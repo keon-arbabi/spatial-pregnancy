@@ -80,7 +80,7 @@ abc_cache.get_data_path(
     'MERFISH-C57BL6J-638850',
     'C57BL6J-638850/raw')
 
-# abc_cache.get_data_path(
-#     'MERFISH-C57BL6J-638850-imputed',
-#     'C57BL6J-638850-imputed/log2')
+abc_cache.get_data_path(
+    'MERFISH-C57BL6J-638850-imputed',
+    'C57BL6J-638850-imputed/log2')
 
