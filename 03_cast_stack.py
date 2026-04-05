@@ -6,9 +6,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import numpy as np
-import pandas as pd
 import torch
-import scanpy as sc
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.expanduser('~/CAST-keon'))
@@ -56,8 +54,7 @@ def collapse_dicts(coords_final, indices_dict, n_split):
         collapsed[base_key] = full_array
     return collapsed
 
-def run_cast_stack(name, sample_col, n_split=None, gpu=0,
-                   stack_params=None):
+def run_cast_stack(name, n_split=None, stack_params=None):
     output_dir = f'{working_dir}/output/{name}'
     stack_dir = f'{output_dir}/CAST-STACK'
     os.makedirs(stack_dir, exist_ok=True)
@@ -109,9 +106,10 @@ def run_cast_stack(name, sample_col, n_split=None, gpu=0,
             continue
 
         print(f'[{name}] aligning {sample}...')
+        os.makedirs(f'{stack_dir}/{sample}', exist_ok=True)
         params_dist = CAST.reg_params(
             dataname=query_reference_list[sample],
-            gpu=gpu if torch.cuda.is_available() else -1,
+            gpu=0 if torch.cuda.is_available() else -1,
             diff_step=5, **sp)
         params_dist.alpha_basis = torch.Tensor(
             [1/1000, 1/1000, 1/50, 5, 5]).reshape(5, 1).to(params_dist.device)
@@ -145,8 +143,7 @@ def run_cast_stack(name, sample_col, n_split=None, gpu=0,
 
     # plot overlays
     ref_coords = coords_raw[ref_section]
-    fig_dir = f'{working_dir}/figures/{name}'
-    os.makedirs(fig_dir, exist_ok=True)
+    fig_dir = f''
 
     for coord_type, coord_dict in [('affine', coords_affine),
                                     ('ffd', coords_ffd)]:
@@ -168,7 +165,8 @@ def run_cast_stack(name, sample_col, n_split=None, gpu=0,
         for j in range(len(samples), nrows * ncols):
             axes[j // ncols, j % ncols].set_visible(False)
         plt.tight_layout()
-        fig.savefig(f'{fig_dir}/stack_{coord_type}.png', dpi=200)
+        fig.savefig(f'{working_dir}/figures/{name}_stack_{coord_type}.png',
+                    dpi=200)
         plt.close()
 
     total = sum(c.shape[0] for c in coords_ffd.values())
@@ -178,16 +176,17 @@ def run_cast_stack(name, sample_col, n_split=None, gpu=0,
 #region run ####################################################################
 
 def run_merfish():
-    run_cast_stack('merfish', sample_col='sample', n_split=10, gpu=0,
+    run_cast_stack('merfish', n_split=5,
                    stack_params={'iterations_bs': [100]})
 
 def run_slidetags():
-    run_cast_stack('slidetags', sample_col='sample', n_split=None, gpu=1)
+    run_cast_stack('slidetags', n_split=None)
 
 def run_xenium():
-    run_cast_stack('xenium', sample_col='sample_rep', n_split=10, gpu=2,
+    run_cast_stack('xenium', n_split=5,
                    stack_params={'iterations_bs': [200]})
 
+gpu_map = {'merfish': '0', 'slidetags': '1', 'xenium': '2'}
 runners = {'merfish': run_merfish, 'slidetags': run_slidetags,
            'xenium': run_xenium}
 
@@ -200,6 +199,7 @@ if __name__ == '__main__':
     if t not in runners:
         print(f'Unknown dataset: {t}. Choose from {list(runners.keys())}')
         sys.exit(1)
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu_map[t]
     runners[t]()
 
 #endregion
