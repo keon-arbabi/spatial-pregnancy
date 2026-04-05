@@ -1,8 +1,10 @@
 import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 from pathlib import Path
 from abc_atlas_access.abc_atlas_cache.abc_project_cache import AbcProjectCache
 
-warnings.filterwarnings("ignore")
 
 # https://github.com/AllenInstitute/abc_atlas_access/blob/main/notebooks/merfish_ccf_registration_tutorial.ipynb
 # https://github.com/AllenInstitute/abc_atlas_access/blob/main/notebooks/merfish_imputed_genes_example.ipynb

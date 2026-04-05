@@ -1,12 +1,12 @@
-import os
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import pandas as pd
 import numpy as np
 import anndata as ad
-import scanpy as sc
 import matplotlib.pyplot as plt
 import scipy.sparse as sparse
-import warnings
-warnings.filterwarnings('ignore')
 
 ###############################################################################
 

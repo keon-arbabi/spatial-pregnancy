@@ -1,14 +1,12 @@
 #region imports and setup #######################################################
 
-import os
-import sys
-import warnings
-warnings.filterwarnings('ignore')
+import os, sys, warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
-import numpy as np
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
-
 sys.path.insert(0, os.path.expanduser('~/CAST-keon'))
 import CAST
 
@@ -82,7 +80,6 @@ def run_cast_stack(name, n_split=None, stack_params=None):
     embed_dict = {k.split('_dup')[0]: v.cpu().detach()
                   if hasattr(v, 'detach') else v
                   for k, v in embed_dict.items()}
-
     query_keys = [k for k in coords_raw if not k.startswith('C57BL6J-638850')]
     print(f'[{name}] {len(query_keys)} query samples, '
           f'n_split={n_split or "none"}')

@@ -1,75 +1,88 @@
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.spatial import cKDTree, Delaunay
+import sys, os
+sys.path.insert(0, os.path.expanduser('~'))
+import polars as pl
+from single_cell import SingleCell
 
-working_dir = '/home/karbabi/spatial-pregnancy'
-name = 'merfish'
-sample_col = 'sample'
+# check all datasets that go through set_var_names for duplicates
+print('=== duplicate gene_symbol check ===')
 
-# load coords
-coords_ffd = torch.load(f'{working_dir}/output/{name}/coords_ffd.pt',
-                         weights_only=False)
-coords_raw = torch.load(f'{working_dir}/output/{name}/coords_raw.pt',
-                         weights_only=False)
-ref_sections = sorted(s for s in coords_raw if s.startswith('C57BL6J-638850'))
-ref_coords = np.vstack([coords_raw[s] for s in ref_sections])
-query_coords = np.vstack([coords_ffd[s] for s in sorted(coords_ffd.keys())])
+scrna = SingleCell('single-cell/ABC/zeng_combined_10Xv3.h5ad').skip_qc()
+print(f'scrna: var_names={scrna.var_names.name!r}, '
+      f'n_unique={scrna.var_names.n_unique()}, len={len(scrna.var_names)}, '
+      f'dupes={len(scrna.var_names) - scrna.var_names.n_unique()}')
 
-# compute avg delaunay edge dist (subsampled)
-def compute_avg_delaunay_dist(coords, quantile=0.99, max_subsample=50_000,
-                              seed=0):
-    if coords.shape[0] > max_subsample:
-        rng = np.random.default_rng(seed)
-        idx = rng.choice(coords.shape[0], max_subsample, replace=False)
-        coords = coords[idx]
-    coords = np.unique(coords, axis=0)
-    tri = Delaunay(coords)
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            a, b = int(simplex[i]), int(simplex[(i + 1) % 3])
-            edges.add((min(a, b), max(a, b)))
-    edges = np.array(list(edges))
-    edge_dists = np.linalg.norm(
-        coords[edges[:, 0]] - coords[edges[:, 1]], axis=1)
-    threshold = np.percentile(edge_dists, quantile * 100)
-    edge_dists = edge_dists[edge_dists <= threshold]
-    return edge_dists.mean(), edge_dists
+merfish = SingleCell(
+    f'{os.getcwd()}/spatial-pregnancy/input/adata_ref_zeng_raw.h5ad').skip_qc()
+merfish = merfish.set_var_names('gene_symbol')
+print(f'merfish: var_names={merfish.var_names.name!r}, '
+      f'n_unique={merfish.var_names.n_unique()}, len={len(merfish.var_names)}, '
+      f'dupes={len(merfish.var_names) - merfish.var_names.n_unique()}')
 
-avg_dist, edge_dists = compute_avg_delaunay_dist(query_coords)
-print(f'avg Delaunay edge dist: {avg_dist:.1f}')
-print(f'edge dist percentiles: '
-      f'p25={np.percentile(edge_dists, 25):.1f}, '
-      f'p50={np.percentile(edge_dists, 50):.1f}, '
-      f'p75={np.percentile(edge_dists, 75):.1f}, '
-      f'p95={np.percentile(edge_dists, 95):.1f}')
+for name in ['merfish', 'slidetags', 'xenium']:
+    path = f'spatial-pregnancy/output/{name}/01_adata_query_{name}.h5ad'
+    if not os.path.exists(path):
+        print(f'{name} query: NOT FOUND')
+        continue
+    q = SingleCell(path).skip_qc()
+    if 'gene_symbol' in q.var.columns:
+        q = q.set_var_names('gene_symbol')
+    print(f'{name} query: var_names={q.var_names.name!r}, '
+          f'n_unique={q.var_names.n_unique()}, len={len(q.var_names)}, '
+          f'dupes={len(q.var_names) - q.var_names.n_unique()}')
 
-# test different radii
-tree = cKDTree(ref_coords)
-folds = [1, 2, 3, 5]
-shifts = [0, 25, 50, 100]
+# test the fix: dedup scrna, then run the failing pipeline
+print('\n=== testing fix: make_var_names_unique ===')
+scrna = scrna.make_var_names_unique(separator='~')
+print(f'scrna after dedup: n_unique={scrna.var_names.n_unique()}, '
+      f'len={len(scrna.var_names)}')
 
-fig, axes = plt.subplots(len(folds), len(shifts), figsize=(20, 16))
-fig.suptitle(f'{name}: n_spatial_candidates per (fold, shift)', fontsize=14)
+# filter to subclasses (matching load_scrna_filtered)
+merfish_ref = SingleCell(
+    f'{os.getcwd()}/spatial-pregnancy/input/adata_ref_zeng_raw.h5ad')
+ref_subclasses = merfish_ref.obs['subclass'].cast(str).unique().drop_nulls()
+scrna = scrna.filter_obs(
+    pl.col('subclass').is_not_null() &
+    pl.col('subclass').cast(str).is_in(ref_subclasses))
+scrna = scrna.with_columns_obs(pl.lit('scrna-seq').alias('batch'))
 
-for row, fold in enumerate(folds):
-    for col, shift in enumerate(shifts):
-        r = fold * avg_dist + shift
-        candidates = tree.query_ball_point(query_coords, r=r)
-        n_cands = np.array([len(c) for c in candidates])
-        n_empty = (n_cands == 0).sum()
+query = SingleCell(
+    'spatial-pregnancy/output/slidetags/01_adata_query_slidetags.h5ad')
+query = query.skip_qc()
+query = query.rename_obs({'_index': 'cell_label'})
+if 'gene_symbol' in query.var.columns:
+    query = query.set_var_names('gene_symbol')
+else:
+    query = query.rename_var({'_index': 'gene_symbol'})
+query = query.make_var_names_unique(separator='~')
+query = query.with_columns_obs(
+    pl.col('sample').cast(pl.String).alias('batch'))
 
-        ax = axes[row, col]
-        ax.hist(n_cands[n_cands > 0], bins=50, alpha=0.7, color='steelblue')
-        ax.set_title(f'fold={fold}, shift={shift}\n'
-                     f'r={r:.0f}, empty={n_empty:,}\n'
-                     f'median={np.median(n_cands):.0f}, '
-                     f'p95={np.percentile(n_cands, 95):.0f}')
-        ax.set_xlabel('n candidates')
-        ax.set_ylabel('n cells')
+# integrate_harmony steps
+scrna = scrna.with_uns(normalized=False)
+query = query.with_uns(normalized=False)
+scrna, query = scrna.hvg(query)
+scrna = scrna.normalize()
+query = query.normalize()
 
-plt.tight_layout()
-fig.savefig(f'{working_dir}/figures/{name}_radius_sweep.png', dpi=150)
-plt.close()
-print(f'saved {name}_radius_sweep.png')
+print(f'\nafter hvg+normalize:')
+print(f'scrna: X={scrna.X.shape}, var={scrna.var.shape}, '
+      f'match={scrna.var.shape[0] == scrna.X.shape[1]}')
+print(f'query: X={query.X.shape}, var={query.var.shape}, '
+      f'match={query.var.shape[0] == query.X.shape[1]}')
+
+# concat_obs (where it was failing)
+for col in ['class', 'subclass']:
+    if col not in query.obs.columns:
+        query = query.with_columns_obs(
+            pl.lit('Unlabelled').cast(pl.Categorical).alias(col))
+    if col in scrna.obs.columns:
+        scrna = scrna.with_columns_obs(pl.col(col).cast(pl.Categorical))
+    if col in query.obs.columns:
+        query = query.with_columns_obs(pl.col(col).cast(pl.Categorical))
+
+print('\ntrying concat_obs...')
+try:
+    combined = scrna.concat_obs(query, flexible=True)
+    print(f'SUCCESS: {combined.X.shape}')
+except Exception as e:
+    print(f'FAILED: {type(e).__name__}: {e}')

@@ -1,4 +1,7 @@
-import os
+import os, warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import shutil
 from pathlib import Path
 import pandas as pd, anndata as ad, scanpy as sc

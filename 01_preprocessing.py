@@ -1,8 +1,9 @@
 #region imports and setup #######################################################
 
-import os
-import sys
-import json
+import os, sys, json, warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import numpy as np
 import pandas as pd
 import scanpy as sc

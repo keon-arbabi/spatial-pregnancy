@@ -17,6 +17,7 @@ from single_cell import SingleCell
 
 warnings.filterwarnings('ignore')
 working_dir = '/home/karbabi/spatial-pregnancy'
+merfish_ref_path = f'{working_dir}/input/adata_ref_zeng_raw.h5ad'
 
 cells_joined = pd.read_csv('single-cell/ABC/metadata/cells_joined.csv')
 color_mappings = {
@@ -33,23 +34,34 @@ del cells_joined
 
 datasets = {
     'merfish': dict(
-        sample_col='sample', ave_dist_fold=3,
-        alignment_shift_adjustment=50),
+        sample_col='sample',
+        ave_dist_fold=10,
+        alignment_shift_adjustment=0,
+        use_scanorama=False,
+        harmony_kwargs=dict(
+            theta=4, alpha=0.1, tolerance=0.001,
+            max_iterations=20)),
     'slidetags': dict(
-        sample_col='sample', ave_dist_fold=3,
-        alignment_shift_adjustment=50),
+        sample_col='sample',
+        ave_dist_fold=10, alignment_shift_adjustment=0,
+        use_scanorama=False,
+        harmony_kwargs=dict(
+            theta=8, alpha=0.1, tolerance=0.001,
+            max_iterations=20)),
     'xenium': dict(
-        sample_col='sample_rep', ave_dist_fold=3,
-        alignment_shift_adjustment=50),
+        sample_col='sample_rep',
+        ave_dist_fold=3, alignment_shift_adjustment=0,
+        use_scanorama=False,
+        harmony_kwargs=dict(
+            theta=4, alpha=0.1, tolerance=0.001,
+            max_iterations=20)),
 }
 
-merfish_ref_path = f'{working_dir}/input/adata_ref_zeng_raw.h5ad'
-scrna_ref_path = 'single-cell/ABC/zeng_combined_10Xv3.h5ad'
-
-# Load scRNA-seq ref, filtered to subclasses present in MERFISH ref.
+# load scRNA-seq ref, filtered to subclasses present in MERFISH ref.
 def load_scrna_filtered():
-    scrna_ref = SingleCell(scrna_ref_path)
+    scrna_ref = SingleCell('single-cell/ABC/zeng_combined_10Xv3.h5ad')
     scrna_ref = scrna_ref.skip_qc()
+    scrna_ref = scrna_ref.make_var_names_unique(separator='~')
     merfish_ref = SingleCell(merfish_ref_path)
     ref_subclasses = merfish_ref.obs['subclass'].cast(str).unique().drop_nulls()
     scrna_ref = scrna_ref.filter_obs(
@@ -61,45 +73,49 @@ def load_scrna_filtered():
     del merfish_ref
     return scrna_ref
 
-# HVG -> normalize -> scanorama -> PCA -> Harmony.
-# Returns (sc1, sc2) with Harmony embeddings in obsm['harmony'].
-def harmonize_with_scanorama(sc1, sc2, label='', filter_hvg=False,
-                             batch_column=None):
+# hvg -> normalize -> pca -> harmony.
+# returns (sc1, sc2) with harmony embeddings in obsm['harmony'].
+def integrate_harmony(sc1, sc2, label='', batch_column=None,
+                      use_scanorama=False, harmony_kwargs=None):
+    # reset normalized flag in case uns dict is shared from a prior run
+    sc1 = sc1.with_uns(normalized=False)
+    sc2 = sc2.with_uns(normalized=False)
     sc1, sc2 = sc1.hvg(sc2)
     sc1 = sc1.normalize()
     sc2 = sc2.normalize()
-    if filter_hvg:
+    if use_scanorama:
         sc1 = sc1.filter_var(pl.col('highly_variable'))
         sc2 = sc2.filter_var(pl.col('highly_variable'))
-    a1, a2 = sc1.to_scanpy(), sc2.to_scanpy()
-    print(f'[{label}] running scanorama ({a1.shape[1]} genes)...')
-    corrected, genes = scanorama.correct(
-        [a1.X, a2.X], [list(a1.var_names), list(a2.var_names)])
-    var = pd.DataFrame(index=genes)
-    a1 = sc.AnnData(X=corrected[0].astype(np.float32), obs=a1.obs, var=var)
-    a2 = sc.AnnData(X=corrected[1].astype(np.float32), obs=a2.obs, var=var)
-    sc1 = SingleCell(a1).with_uns(QCed=True, normalized=True)
-    sc2 = SingleCell(a2).with_uns(QCed=True, normalized=True)
-    del corrected, a1, a2
-    sc1, sc2 = sc1.pca(sc2, num_PCs=50, hvg_column=None)
+        a1, a2 = sc1.to_scanpy(), sc2.to_scanpy()
+        print(f'[{label}] running scanorama ({a1.shape[1]} genes)...')
+        corrected, genes = scanorama.correct(
+            [a1.X, a2.X], [list(a1.var_names), list(a2.var_names)])
+        var = pd.DataFrame(index=genes)
+        a1 = sc.AnnData(X=corrected[0].astype(np.float32), obs=a1.obs, var=var)
+        a2 = sc.AnnData(X=corrected[1].astype(np.float32), obs=a2.obs, var=var)
+        sc1 = SingleCell(a1).with_uns(QCed=True, normalized=True)
+        sc2 = SingleCell(a2).with_uns(QCed=True, normalized=True)
+        del corrected, a1, a2
+        sc1, sc2 = sc1.pca(sc2, num_PCs=50, hvg_column=None)
+    else:
+        sc1, sc2 = sc1.pca(sc2, num_PCs=50)
     print(f'[{label}] running Harmony...')
-    sc1, sc2 = sc1.harmonize(sc2, batch_column=batch_column)
+    hkw = harmony_kwargs or {}
+    sc1, sc2 = sc1.harmonize(sc2, batch_column=batch_column, **hkw)
     return sc1, sc2
 
-# UMAP visualization of two Harmony-integrated datasets.
+# umap visualization of two harmony-integrated datasets.
 def plot_harmony_umap(sc1, sc2, save_path, title=None):
-    obs_name = sc1.obs.columns[0]
     # fill missing label columns so concat keeps them (query cells show grey)
     for col in ['class', 'subclass']:
         if col not in sc2.obs.columns:
-            sc2 = sc2.with_columns_obs(pl.lit('Unlabelled').alias(col))
+            sc2 = sc2.with_columns_obs(
+                pl.lit('Unlabelled').cast(pl.Categorical).alias(col))
         if col in sc1.obs.columns:
-            sc1 = sc1.with_columns_obs(pl.col(col).cast(pl.String))
+            sc1 = sc1.with_columns_obs(pl.col(col).cast(pl.Categorical))
         if col in sc2.obs.columns:
-            sc2 = sc2.with_columns_obs(pl.col(col).cast(pl.String))
-    sc2_r = sc2.rename_obs({sc2.obs.columns[0]: obs_name}) \
-        if sc2.obs.columns[0] != obs_name else sc2
-    combined = sc1.concat_obs(sc2_r, flexible=True)
+            sc2 = sc2.with_columns_obs(pl.col(col).cast(pl.Categorical))
+    combined = sc1.concat_obs(sc2, flexible=True)
     combined = combined.neighbors(PC_key='harmony')
     combined = combined.umap(hogwild=True)
     combined = combined.to_scanpy()
@@ -121,9 +137,9 @@ def plot_harmony_umap(sc1, sc2, save_path, title=None):
 
 #region Phase A: MERFISH ref <-> scRNA-seq bridge ##############################
 
-# For each MERFISH ref cell, stores its k nearest scRNA-seq neighbors
-# in Harmony space (indices, distances, and their cell type labels).
-# This creates the spatial-expression bridge for the three-hop transfer.
+# for each MERFISH ref cell, stores its k nearest scRNA-seq neighbors
+# in harmony space (indices, distances, and their cell type labels).
+# this creates the spatial-expression bridge for the three-hop transfer.
 def prepare_reference(k_harmony=20):
 
     cached_path = f'{working_dir}/input/adata_ref_zeng_bridge.h5ad'
@@ -144,8 +160,8 @@ def prepare_reference(k_harmony=20):
     print(f'[Phase A] scRNA-seq: {scrna_ref.X.shape}, '
           f'MERFISH ref: {merfish_ref.X.shape}')
 
-    scrna_ref, merfish_ref = harmonize_with_scanorama(
-        scrna_ref, merfish_ref, label='Phase A')
+    scrna_ref, merfish_ref = integrate_harmony(
+        scrna_ref, merfish_ref, label='Phase A', use_scanorama=True)
     os.makedirs(f'{working_dir}/figures', exist_ok=True)
     plot_harmony_umap(scrna_ref, merfish_ref,
                       f'{working_dir}/figures/phase_a_umap.png')
@@ -153,7 +169,7 @@ def prepare_reference(k_harmony=20):
     merfish_harmony = merfish_ref.obsm['harmony']
     scrna_harmony = scrna_ref.obsm['harmony']
 
-    # validate Harmony quality via label_transfer_from
+    # validate harmony quality via label_transfer_from
     for level in ['class', 'subclass']:
         print(f'[Phase A] validating {level} transfer...')
         merfish_ref = merfish_ref.label_transfer_from(
@@ -178,8 +194,8 @@ def prepare_reference(k_harmony=20):
               f'<0.5={low_conf:.1%}, '
               f'types={n_pred}/{n_true} (pred/true)')
 
-    # kNN in Harmony space (cosine distance): for each MERFISH ref cell,
-    # find k nearest scRNA cells. Chunked to manage memory (~344K x 4M).
+    # kNN in harmony space (cosine distance): for each MERFISH ref cell,
+    # find k nearest scRNA cells. chunked to manage memory (~344K x 4M).
     print(f'[Phase A] computing {k_harmony}-NN (cosine) from MERFISH ref '
           f'to scRNA-seq...')
     n_ref = merfish_harmony.shape[0]
@@ -210,7 +226,7 @@ def prepare_reference(k_harmony=20):
 
 #region Phase A': query <-> scRNA-seq Harmony integration ######################
 
-# Harmony-integrate query with scRNA-seq for expression matching.
+# harmony-integrate query with scRNA-seq for expression matching.
 def prepare_query(name, sample_col='sample'):
 
     output_dir = f'{working_dir}/output/{name}'
@@ -225,14 +241,21 @@ def prepare_query(name, sample_col='sample'):
     scrna_ref = load_scrna_filtered()
     query = SingleCell(f'{output_dir}/01_adata_query_{name}.h5ad')
     query = query.skip_qc()
+    query = query.rename_obs({'_index': 'cell_label'})
+    if 'gene_symbol' in query.var.columns:
+        query = query.set_var_names('gene_symbol')
+    else:
+        query = query.rename_var({'_index': 'gene_symbol'})
     query = query.with_columns_obs(
         pl.col(sample_col).cast(pl.String).alias('batch'))
     print(f'[{name}] scRNA-seq: {scrna_ref.X.shape}, '
           f'query: {query.X.shape}')
 
-    scrna_ref, query = harmonize_with_scanorama(
-        scrna_ref, query, label=name, filter_hvg=True,
-        batch_column='batch')
+    cfg = datasets[name]
+    scrna_ref, query = integrate_harmony(
+        scrna_ref, query, label=name, batch_column='batch',
+        use_scanorama=cfg.get('use_scanorama', False),
+        harmony_kwargs=cfg.get('harmony_kwargs'))
     os.makedirs(f'{working_dir}/figures', exist_ok=True)
     plot_harmony_umap(
         scrna_ref, query,
@@ -254,9 +277,9 @@ def prepare_query(name, sample_col='sample'):
 
 #region Phase B: spatial cell type transfer ####################################
 
-# Average Delaunay edge distance, filtering edges above `quantile`.
-# Reimplements CAST's average_dist without the O(n^2) pairwise matrix.
-# Subsamples large datasets for speed.
+# average Delaunay edge distance, filtering edges above `quantile`.
+# reimplements CAST's average_dist without the O(n^2) pairwise matrix.
+# subsamples large datasets for speed.
 def compute_avg_delaunay_dist(coords, quantile=0.99, max_subsample=50_000,
                               seed=0):
 
@@ -282,8 +305,8 @@ def compute_avg_delaunay_dist(coords, quantile=0.99, max_subsample=50_000,
     edge_dists = edge_dists[edge_dists <= threshold]
     return edge_dists.mean()
 
-# Spatially-constrained expression-based cell type transfer.
-# For each query cell:
+# spatially-constrained expression-based cell type transfer.
+# for each query cell:
 # 1. Spatial hard filter: find MERFISH ref cells within adaptive radius
 # 2. Bridge expansion: gather those ref cells' scRNA-seq Harmony neighbors
 # 3. Expression matching: cosine distance in query-scRNA Harmony space,
@@ -345,9 +368,9 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
 
     avg_edge_dist = compute_avg_delaunay_dist(query_coords)
     pdist_thres = ave_dist_fold * avg_edge_dist + alignment_shift_adjustment
-    print(f'[{name}] adaptive radius: {avg_edge_dist:.1f} avg edge x '
+    print(f'[{name}] adaptive radius: {avg_edge_dist:.4f} avg edge x '
           f'{ave_dist_fold} + {alignment_shift_adjustment} = '
-          f'{pdist_thres:.1f}')
+          f'{pdist_thres:.4f}')
 
     tree = cKDTree(ref_coords)
     spatial_candidates = tree.query_ball_point(query_coords, r=pdist_thres)
@@ -393,70 +416,105 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
     avg_pdist = np.zeros(n_query, dtype=np.float32)
     min_cos_dist = np.ones(n_query, dtype=np.float32)
 
-    print(f'[{name}] running three-hop transfer (k2={k2})...')
-    for i in range(n_query):
-        if i % 100_000 == 0 and i > 0:
-            print(f'[{name}]   {i:,} / {n_query:,} cells')
+    # precompute normalized harmony vectors for batch cosine similarity
+    eps = np.float32(1e-8)
+    query_norm = query_harmony / np.linalg.norm(
+        query_harmony, axis=1, keepdims=True).clip(min=eps)
+    scrna_norm = scrna_harmony / np.linalg.norm(
+        scrna_harmony, axis=1, keepdims=True).clip(min=eps)
 
-        # hop 1: get spatial ref candidates
+    # phase 1: build per-cell scRNA pools, avg_pdist, bridge consistency
+    print(f'[{name}] building candidate pools...')
+    cell_pools = [None] * n_query
+    for i in range(n_query):
         ref_local = spatial_candidates[i]
         if len(ref_local) == 0:
             ref_local = fallback_indices[i]
             avg_pdist[i] = fallback_dists[i].mean()
         else:
             ref_local = np.array(ref_local)
-            dists_i = np.linalg.norm(
-                ref_coords[ref_local] - query_coords[i], axis=1)
-            avg_pdist[i] = dists_i.mean()
-
+            avg_pdist[i] = np.linalg.norm(
+                ref_coords[ref_local] - query_coords[i], axis=1).mean()
         ref_global = ref_global_idx[ref_local]
-
-        # bridge consistency: fraction of spatial ref candidates with
-        # consistent labels between MERFISH ref and scRNA-seq transfer
         for level in levels:
             if level in bridge_consistent:
                 results[level]['bridge_consistency'][i] = \
                     bridge_consistent[level][ref_global].mean()
+        cell_pools[i] = np.unique(scrna_indices[ref_global].ravel())
 
-        # hop 2: gather scRNA-seq candidate pool, deduplicate
-        scrna_pool = scrna_indices[ref_global].ravel()
-        scrna_pool = np.unique(scrna_pool)
+    # phase 2: chunked expression matching + vectorized voting
+    chunk_size = 500
+    n_scrna = scrna_norm.shape[0]
+    g2l = np.empty(n_scrna, dtype=np.intp)
 
-        # hop 3: cosine distance in query-scRNA Harmony space
-        cos_dist = cdist(
-            scrna_harmony[scrna_pool],
-            query_harmony[i].reshape(1, -1),
-            metric='cosine').ravel()
+    print(f'[{name}] running expression matching (k2={k2})...')
+    for cs in range(0, n_query, chunk_size):
+        ce = min(cs + chunk_size, n_query)
+        n_chunk = ce - cs
+        if cs % 50_000 < chunk_size and cs > 0:
+            print(f'[{name}]   {cs:,} / {n_query:,}')
 
-        if len(scrna_pool) <= k2:
-            top_idx = np.arange(len(scrna_pool))
+        pools = cell_pools[cs:ce]
+        union_pool = np.unique(np.concatenate(pools))
+        n_pool = len(union_pool)
+        if n_pool == 0:
+            continue
+
+        g2l[union_pool] = np.arange(n_pool)
+
+        # batch cosine similarity: (n_chunk x n_pool)
+        sim = query_norm[cs:ce] @ scrna_norm[union_pool].T
+
+        # per-cell pool membership mask
+        pool_sizes = [len(p) for p in pools]
+        mask_rows = np.repeat(np.arange(n_chunk), pool_sizes)
+        mask_cols = np.concatenate([g2l[p] for p in pools])
+        mask = np.zeros((n_chunk, n_pool), dtype=bool)
+        mask[mask_rows, mask_cols] = True
+
+        dist = np.where(mask, 1.0 - sim, np.inf)
+        del sim, mask
+
+        # top-k2 per cell (inf entries sort last)
+        k2_eff = min(k2, n_pool)
+        if k2_eff < n_pool:
+            top_local = np.argpartition(dist, k2_eff, axis=1)[:, :k2_eff]
         else:
-            top_idx = np.argpartition(cos_dist, k2)[:k2]
+            top_local = np.broadcast_to(
+                np.arange(n_pool), (n_chunk, n_pool))[:, :k2_eff].copy()
+        top_dist = np.take_along_axis(dist, top_local, axis=1)
+        top_global = union_pool[top_local]
+        del dist
 
-        top_scrna = scrna_pool[top_idx]
-        top_cos_dist = cos_dist[top_idx]
-        min_cos_dist[i] = top_cos_dist.min()
+        valid = np.isfinite(top_dist)
+        min_cos_dist[cs:ce] = np.where(
+            valid.any(axis=1),
+            np.min(np.where(valid, top_dist, np.inf), axis=1), 1.0)
 
-        # IDW weighting by cosine distance
-        weights = 1.0 / (top_cos_dist + 1e-6)
+        weights = np.where(valid, 1.0 / (top_dist + 1e-6), 0.0)
 
-        # weighted vote per level
+        # vectorized weighted vote
+        r_idx = np.repeat(
+            np.arange(n_chunk)[:, None], k2_eff, axis=1).ravel()
+        w_flat = weights.ravel()
         for level in levels:
-            unique_labels, label_codes = label_data[level]
-            top_codes = label_codes[top_scrna]
-            n_labels = len(unique_labels)
+            ul, lc = label_data[level]
+            n_labels = len(ul)
+            codes = lc[top_global].ravel()
+            scores = np.zeros((n_chunk, n_labels), dtype=np.float64)
+            np.add.at(scores, (r_idx, codes), w_flat)
 
-            scores = np.bincount(top_codes, weights=weights,
-                                 minlength=n_labels)
-            ranked = np.argsort(scores)[::-1]
-            total = scores.sum()
+            best = np.argmax(scores, axis=1)
+            total = scores.sum(axis=1)
+            safe = np.maximum(total, 1e-12)
+            results[level]['assigned'][cs:ce] = ul[best]
+            results[level]['confidence'][cs:ce] = scores[
+                np.arange(n_chunk), best] / safe
+            sorted_s = np.sort(scores, axis=1)[:, ::-1]
+            results[level]['margin'][cs:ce] = (
+                sorted_s[:, 0] - sorted_s[:, 1]) / safe
 
-            results[level]['assigned'][i] = unique_labels[ranked[0]]
-            results[level]['confidence'][i] = (
-                scores[ranked[0]] / total if total > 0 else 0.0)
-            results[level]['margin'][i] = (
-                (scores[ranked[0]] - scores[ranked[1]]) / total
-                if total > 0 and len(ranked) > 1 else 0.0)
+        del top_local, top_dist, top_global, weights
 
     # store results
     adata.obs['avg_pdist'] = avg_pdist

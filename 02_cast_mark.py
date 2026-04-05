@@ -1,8 +1,9 @@
 #region imports and setup #######################################################
 
-import os
-import warnings
-warnings.filterwarnings('ignore')
+import os, sys, warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import torch
 import scanorama
 import numpy as np
@@ -13,7 +14,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy.sparse as sparse
 from sklearn.cluster import KMeans
-
 import CAST
 from CAST.models.model_GCNII import Args
 
