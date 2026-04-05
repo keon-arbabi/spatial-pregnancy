@@ -1,88 +1,136 @@
-import sys, os
-sys.path.insert(0, os.path.expanduser('~'))
-import polars as pl
-from single_cell import SingleCell
+import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from scipy.spatial import cKDTree, Delaunay
 
-# check all datasets that go through set_var_names for duplicates
-print('=== duplicate gene_symbol check ===')
+working_dir = '/home/karbabi/spatial-pregnancy'
 
-scrna = SingleCell('single-cell/ABC/zeng_combined_10Xv3.h5ad').skip_qc()
-print(f'scrna: var_names={scrna.var_names.name!r}, '
-      f'n_unique={scrna.var_names.n_unique()}, len={len(scrna.var_names)}, '
-      f'dupes={len(scrna.var_names) - scrna.var_names.n_unique()}')
+datasets = {
+    'merfish': dict(ave_dist_fold=10, alignment_shift_adjustment=0),
+    'slidetags': dict(ave_dist_fold=10, alignment_shift_adjustment=0),
+    'xenium': dict(ave_dist_fold=10, alignment_shift_adjustment=0),
+}
 
-merfish = SingleCell(
-    f'{os.getcwd()}/spatial-pregnancy/input/adata_ref_zeng_raw.h5ad').skip_qc()
-merfish = merfish.set_var_names('gene_symbol')
-print(f'merfish: var_names={merfish.var_names.name!r}, '
-      f'n_unique={merfish.var_names.n_unique()}, len={len(merfish.var_names)}, '
-      f'dupes={len(merfish.var_names) - merfish.var_names.n_unique()}')
+def compute_avg_delaunay_dist(coords, quantile=0.99, max_subsample=50_000,
+                              seed=0):
+    if coords.shape[0] > max_subsample:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(coords.shape[0], max_subsample, replace=False)
+        coords = coords[idx]
+    coords = np.unique(coords, axis=0)
+    tri = Delaunay(coords)
+    edges = set()
+    for simplex in tri.simplices:
+        for i in range(3):
+            a, b = int(simplex[i]), int(simplex[(i + 1) % 3])
+            edges.add((min(a, b), max(a, b)))
+    edges = np.array(list(edges))
+    edge_dists = np.linalg.norm(
+        coords[edges[:, 0]] - coords[edges[:, 1]], axis=1)
+    threshold = np.percentile(edge_dists, quantile * 100)
+    edge_dists = edge_dists[edge_dists <= threshold]
+    return edge_dists.mean()
 
-for name in ['merfish', 'slidetags', 'xenium']:
-    path = f'spatial-pregnancy/output/{name}/01_adata_query_{name}.h5ad'
-    if not os.path.exists(path):
-        print(f'{name} query: NOT FOUND')
-        continue
-    q = SingleCell(path).skip_qc()
-    if 'gene_symbol' in q.var.columns:
-        q = q.set_var_names('gene_symbol')
-    print(f'{name} query: var_names={q.var_names.name!r}, '
-          f'n_unique={q.var_names.n_unique()}, len={len(q.var_names)}, '
-          f'dupes={len(q.var_names) - q.var_names.n_unique()}')
+available = []
+for name, cfg in datasets.items():
+    ffd_path = f'{working_dir}/output/{name}/coords_ffd.pt'
+    raw_path = f'{working_dir}/output/{name}/coords_raw.pt'
+    if os.path.exists(ffd_path) and os.path.exists(raw_path):
+        available.append(name)
+    else:
+        print(f'[{name}] skipping, no coords_ffd.pt/coords_raw.pt')
 
-# test the fix: dedup scrna, then run the failing pipeline
-print('\n=== testing fix: make_var_names_unique ===')
-scrna = scrna.make_var_names_unique(separator='~')
-print(f'scrna after dedup: n_unique={scrna.var_names.n_unique()}, '
-      f'len={len(scrna.var_names)}')
+n = len(available)
+fig, axes = plt.subplots(2, n, figsize=(7 * n, 12), squeeze=False)
+rng = np.random.default_rng(42)
 
-# filter to subclasses (matching load_scrna_filtered)
-merfish_ref = SingleCell(
-    f'{os.getcwd()}/spatial-pregnancy/input/adata_ref_zeng_raw.h5ad')
-ref_subclasses = merfish_ref.obs['subclass'].cast(str).unique().drop_nulls()
-scrna = scrna.filter_obs(
-    pl.col('subclass').is_not_null() &
-    pl.col('subclass').cast(str).is_in(ref_subclasses))
-scrna = scrna.with_columns_obs(pl.lit('scrna-seq').alias('batch'))
+for col, name in enumerate(available):
+    cfg = datasets[name]
+    print(f'[{name}] loading...')
+    coords_ffd = torch.load(
+        f'{working_dir}/output/{name}/coords_ffd.pt', weights_only=False)
+    coords_raw = torch.load(
+        f'{working_dir}/output/{name}/coords_raw.pt', weights_only=False)
 
-query = SingleCell(
-    'spatial-pregnancy/output/slidetags/01_adata_query_slidetags.h5ad')
-query = query.skip_qc()
-query = query.rename_obs({'_index': 'cell_label'})
-if 'gene_symbol' in query.var.columns:
-    query = query.set_var_names('gene_symbol')
-else:
-    query = query.rename_var({'_index': 'gene_symbol'})
-query = query.make_var_names_unique(separator='~')
-query = query.with_columns_obs(
-    pl.col('sample').cast(pl.String).alias('batch'))
+    ref_sections = sorted(
+        s for s in coords_raw if s.startswith('C57BL6J-638850'))
+    ref_coords = np.vstack([coords_raw[s] for s in ref_sections])
+    query_coords = np.vstack(
+        [coords_ffd[s] for s in sorted(coords_ffd.keys())])
 
-# integrate_harmony steps
-scrna = scrna.with_uns(normalized=False)
-query = query.with_uns(normalized=False)
-scrna, query = scrna.hvg(query)
-scrna = scrna.normalize()
-query = query.normalize()
+    avg_edge = compute_avg_delaunay_dist(query_coords)
+    radius = cfg['ave_dist_fold'] * avg_edge + cfg['alignment_shift_adjustment']
+    print(f'[{name}] avg_edge={avg_edge:.4f}, radius={radius:.4f}, '
+          f'ref={ref_coords.shape[0]:,}, query={query_coords.shape[0]:,}')
 
-print(f'\nafter hvg+normalize:')
-print(f'scrna: X={scrna.X.shape}, var={scrna.var.shape}, '
-      f'match={scrna.var.shape[0] == scrna.X.shape[1]}')
-print(f'query: X={query.X.shape}, var={query.var.shape}, '
-      f'match={query.var.shape[0] == query.X.shape[1]}')
+    # pick a query cell near center of tissue
+    center = query_coords.mean(axis=0)
+    dists_to_center = np.linalg.norm(query_coords - center, axis=1)
+    central_idx = np.where(
+        dists_to_center < np.percentile(dists_to_center, 10))[0]
+    cell_idx = rng.choice(central_idx)
+    cell = query_coords[cell_idx]
 
-# concat_obs (where it was failing)
-for col in ['class', 'subclass']:
-    if col not in query.obs.columns:
-        query = query.with_columns_obs(
-            pl.lit('Unlabelled').cast(pl.Categorical).alias(col))
-    if col in scrna.obs.columns:
-        scrna = scrna.with_columns_obs(pl.col(col).cast(pl.Categorical))
-    if col in query.obs.columns:
-        query = query.with_columns_obs(pl.col(col).cast(pl.Categorical))
+    tree = cKDTree(ref_coords)
+    candidates = tree.query_ball_point(cell, r=radius)
 
-print('\ntrying concat_obs...')
-try:
-    combined = scrna.concat_obs(query, flexible=True)
-    print(f'SUCCESS: {combined.X.shape}')
-except Exception as e:
-    print(f'FAILED: {type(e).__name__}: {e}')
+    # --- top row: full tissue with circle ---
+    ax = axes[0, col]
+    ax.scatter(ref_coords[:, 0], ref_coords[:, 1],
+               s=0.05, c='lightgray', alpha=0.15, rasterized=True)
+    ax.scatter(query_coords[:, 0], query_coords[:, 1],
+               s=0.05, c='#aec7e8', alpha=0.1, rasterized=True)
+    ax.scatter(cell[0], cell[1], s=30, c='red', zorder=5)
+    circle = Circle(cell, radius, fill=False, color='red',
+                    linewidth=1.5, linestyle='--')
+    ax.add_patch(circle)
+    ax.set_aspect('equal')
+    ax.set_title(f'{name} (full)\navg_edge={avg_edge:.4f}, '
+                 f'r={radius:.4f}')
+    ax.axis('off')
+
+    # --- bottom row: zoomed to ~8x radius ---
+    ax = axes[1, col]
+    zoom = max(radius * 8, 0.3)
+    xlo, xhi = cell[0] - zoom, cell[0] + zoom
+    ylo, yhi = cell[1] - zoom, cell[1] + zoom
+
+    # only plot points within the zoom window (+ margin)
+    margin = zoom * 0.2
+    ref_mask = ((ref_coords[:, 0] > xlo - margin) &
+                (ref_coords[:, 0] < xhi + margin) &
+                (ref_coords[:, 1] > ylo - margin) &
+                (ref_coords[:, 1] < yhi + margin))
+    q_mask = ((query_coords[:, 0] > xlo - margin) &
+              (query_coords[:, 0] < xhi + margin) &
+              (query_coords[:, 1] > ylo - margin) &
+              (query_coords[:, 1] < yhi + margin))
+
+    ax.scatter(ref_coords[ref_mask, 0], ref_coords[ref_mask, 1],
+               s=3, c='lightgray', alpha=0.4, rasterized=True,
+               label='ref')
+    ax.scatter(query_coords[q_mask, 0], query_coords[q_mask, 1],
+               s=3, c='#aec7e8', alpha=0.4, rasterized=True,
+               label='query')
+    if len(candidates) > 0:
+        ax.scatter(ref_coords[candidates, 0], ref_coords[candidates, 1],
+                   s=10, c='steelblue', alpha=0.8, zorder=3,
+                   label=f'{len(candidates)} candidates')
+    ax.scatter(cell[0], cell[1], s=60, c='red', zorder=5,
+               edgecolors='black', linewidths=0.5, label='query cell')
+    circle = Circle(cell, radius, fill=False, color='red',
+                    linewidth=2, linestyle='--')
+    ax.add_patch(circle)
+    ax.set_xlim(xlo, xhi)
+    ax.set_ylim(ylo, yhi)
+    ax.set_aspect('equal')
+    ax.set_title(f'{name} (zoomed)\n{len(candidates)} ref candidates '
+                 f'within r={radius:.4f}')
+    ax.legend(loc='upper right', fontsize=7, markerscale=2)
+
+plt.tight_layout()
+fig.savefig(f'{working_dir}/figures/radius_visualization.png', dpi=200)
+plt.close()
+print('saved radius_visualization.png')

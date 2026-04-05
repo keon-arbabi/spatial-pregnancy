@@ -33,28 +33,24 @@ for level in color_mappings:
 del cells_joined
 
 datasets = {
-    'merfish': dict(
-        sample_col='sample',
-        ave_dist_fold=10,
-        alignment_shift_adjustment=0,
-        use_scanorama=False,
-        harmony_kwargs=dict(
-            theta=4, alpha=0.1, tolerance=0.001,
-            max_iterations=20)),
     'slidetags': dict(
         sample_col='sample',
         ave_dist_fold=10, alignment_shift_adjustment=0,
-        use_scanorama=False,
+        n_pcs=20, use_scanorama=True,
         harmony_kwargs=dict(
-            theta=8, alpha=0.1, tolerance=0.001,
-            max_iterations=20)),
+            theta=8, alpha=0.05, tolerance=0.001, max_iterations=20)),
+    'merfish': dict(
+        sample_col='sample',
+        ave_dist_fold=10, alignment_shift_adjustment=0,
+        n_pcs=20, use_scanorama=True,
+        harmony_kwargs=dict(
+            theta=12, alpha=0.05, tolerance=0.001, max_iterations=20)),
     'xenium': dict(
         sample_col='sample_rep',
-        ave_dist_fold=3, alignment_shift_adjustment=0,
-        use_scanorama=False,
+        ave_dist_fold=10, alignment_shift_adjustment=0,
+        n_pcs=20, use_scanorama=True,
         harmony_kwargs=dict(
-            theta=4, alpha=0.1, tolerance=0.001,
-            max_iterations=20)),
+            theta=12, alpha=0.05, tolerance=0.001, max_iterations=20)),
 }
 
 # load scRNA-seq ref, filtered to subclasses present in MERFISH ref.
@@ -76,7 +72,8 @@ def load_scrna_filtered():
 # hvg -> normalize -> pca -> harmony.
 # returns (sc1, sc2) with harmony embeddings in obsm['harmony'].
 def integrate_harmony(sc1, sc2, label='', batch_column=None,
-                      use_scanorama=False, harmony_kwargs=None):
+                      use_scanorama=False, n_pcs=50, harmony_kwargs=None,
+                      cache_dir=None):
     # reset normalized flag in case uns dict is shared from a prior run
     sc1 = sc1.with_uns(normalized=False)
     sc2 = sc2.with_uns(normalized=False)
@@ -86,23 +83,69 @@ def integrate_harmony(sc1, sc2, label='', batch_column=None,
     if use_scanorama:
         sc1 = sc1.filter_var(pl.col('highly_variable'))
         sc2 = sc2.filter_var(pl.col('highly_variable'))
-        a1, a2 = sc1.to_scanpy(), sc2.to_scanpy()
-        print(f'[{label}] running scanorama ({a1.shape[1]} genes)...')
-        corrected, genes = scanorama.correct(
-            [a1.X, a2.X], [list(a1.var_names), list(a2.var_names)])
+        scanorama_path = (f'{cache_dir}/scanorama_project.npz'
+                          if cache_dir else None)
+        if scanorama_path and os.path.exists(scanorama_path):
+            print(f'[{label}] loading cached scanorama')
+            data = np.load(scanorama_path, allow_pickle=True)
+            genes = list(data['genes'])
+            c1 = data['X1']
+            c2 = data['X2']
+        else:
+            a1, a2 = sc1.to_scanpy(), sc2.to_scanpy()
+            print(f'[{label}] running scanorama ({a1.shape[1]} genes)...')
+            corrected, genes = scanorama.correct(
+                [a1.X, a2.X], [list(a1.var_names), list(a2.var_names)])
+            c1, c2 = corrected[0], corrected[1]
+            del a1, a2, corrected
+            if scanorama_path:
+                np.savez(scanorama_path, X1=c1, X2=c2, genes=np.array(genes))
         var = pd.DataFrame(index=genes)
-        a1 = sc.AnnData(X=corrected[0].astype(np.float32), obs=a1.obs, var=var)
-        a2 = sc.AnnData(X=corrected[1].astype(np.float32), obs=a2.obs, var=var)
+        a1 = sc.AnnData(X=c1.astype(np.float32),
+                         obs=sc1.to_scanpy().obs, var=var)
+        a2 = sc.AnnData(X=c2.astype(np.float32),
+                         obs=sc2.to_scanpy().obs, var=var)
         sc1 = SingleCell(a1).with_uns(QCed=True, normalized=True)
         sc2 = SingleCell(a2).with_uns(QCed=True, normalized=True)
-        del corrected, a1, a2
-        sc1, sc2 = sc1.pca(sc2, num_PCs=50, hvg_column=None)
+        del c1, c2, a1, a2
+        sc1, sc2 = sc1.pca(sc2, num_PCs=n_pcs, hvg_column=None)
     else:
-        sc1, sc2 = sc1.pca(sc2, num_PCs=50)
+        sc1, sc2 = sc1.pca(sc2, num_PCs=n_pcs)
     print(f'[{label}] running Harmony...')
     hkw = harmony_kwargs or {}
     sc1, sc2 = sc1.harmonize(sc2, batch_column=batch_column, **hkw)
     return sc1, sc2
+
+# integration quality diagnostics on harmony embeddings.
+def eval_integration_from_arrays(h1, h2, label='', k=50, n_per_batch=20_000):
+    from sklearn.metrics import silhouette_score
+    n1, n2 = h1.shape[0], h2.shape[0]
+    # stratified subsample: equal from each batch
+    rng = np.random.default_rng(0)
+    idx1 = rng.choice(n1, min(n_per_batch, n1), replace=False)
+    idx2 = rng.choice(n2, min(n_per_batch, n2), replace=False)
+    harmony = np.vstack([h1[idx1], h2[idx2]])
+    batch = np.array([0] * len(idx1) + [1] * len(idx2))
+    # L2-normalize for cosine-equivalent kNN
+    norms = np.linalg.norm(harmony, axis=1, keepdims=True).clip(min=1e-8)
+    harmony_norm = harmony / norms
+    tree = cKDTree(harmony_norm)
+    _, nn_idx = tree.query(harmony_norm, k=k + 1)
+    nn_idx = nn_idx[:, 1:]
+    nn_batch = batch[nn_idx]
+    # ilisi: batch diversity in neighborhoods (higher = better mixing)
+    p1 = nn_batch.mean(axis=1)
+    simpson = p1**2 + (1 - p1)**2
+    ilisi = (1.0 / simpson).mean()
+    # neighbor ratio: fraction of sc1 neighbors for sc2 cells
+    query_mask = batch == 1
+    nbr_ratio = (1 - nn_batch[query_mask].mean(axis=1)).mean()
+    # batch silhouette (negative = good mixing)
+    batch_sil = silhouette_score(
+        harmony_norm, batch, sample_size=min(10_000, len(batch)))
+    print(f'[{label}] integration: iLISI={ilisi:.2f}/2.00, '
+          f'nbr_ratio={nbr_ratio:.2f} (50/50 sample), '
+          f'batch_sil={batch_sil:.3f}')
 
 # umap visualization of two harmony-integrated datasets.
 def plot_harmony_umap(sc1, sc2, save_path, title=None):
@@ -120,14 +163,21 @@ def plot_harmony_umap(sc1, sc2, save_path, title=None):
     combined = combined.umap(hogwild=True)
     combined = combined.to_scanpy()
     combined.obsm['X_umap'] = combined.obsm.pop('umap')
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    # batch palette: scRNA-seq always dark grey, query samples get colors
+    batch_vals = [b for b in combined.obs['batch'].unique()
+                  if b != 'scrna-seq']
+    tab_colors = plt.cm.tab20(np.linspace(0, 1, max(len(batch_vals), 1)))
+    batch_palette = {'scrna-seq': '#888888'}
+    batch_palette.update(zip(batch_vals, tab_colors))
+    palettes = {**color_mappings, 'batch': batch_palette}
+    fig, axes = plt.subplots(1, 3, figsize=(12, 6))
     if title:
         fig.suptitle(title, fontsize=14)
     for ax, col in zip(axes, ['batch', 'class', 'subclass']):
         sc.pl.umap(
             combined, color=col, size=0.1, ax=ax,
-            show=False, palette=color_mappings.get(col),
-            legend_loc='none' if col == 'subclass' else 'right margin')
+            show=False, palette=palettes.get(col),
+            legend_loc='none')
     plt.tight_layout()
     fig.savefig(save_path, dpi=200)
     plt.close()
@@ -161,7 +211,8 @@ def prepare_reference(k_harmony=20):
           f'MERFISH ref: {merfish_ref.X.shape}')
 
     scrna_ref, merfish_ref = integrate_harmony(
-        scrna_ref, merfish_ref, label='Phase A', use_scanorama=True)
+        scrna_ref, merfish_ref, label='Phase A', use_scanorama=True,
+        cache_dir=f'{working_dir}/input')
     os.makedirs(f'{working_dir}/figures', exist_ok=True)
     plot_harmony_umap(scrna_ref, merfish_ref,
                       f'{working_dir}/figures/phase_a_umap.png')
@@ -235,7 +286,9 @@ def prepare_query(name, sample_col='sample'):
     if os.path.exists(cache_path):
         print(f'[{name}] loading cached query-scRNA Harmony')
         data = np.load(cache_path)
-        return data['query_harmony'], data['scrna_harmony']
+        qh, sh = data['query_harmony'], data['scrna_harmony']
+        eval_integration_from_arrays(qh, sh, label=name)
+        return qh, sh
 
     print(f'[{name}] integrating query with scRNA-seq ref...')
     scrna_ref = load_scrna_filtered()
@@ -255,22 +308,41 @@ def prepare_query(name, sample_col='sample'):
     scrna_ref, query = integrate_harmony(
         scrna_ref, query, label=name, batch_column='batch',
         use_scanorama=cfg.get('use_scanorama', False),
-        harmony_kwargs=cfg.get('harmony_kwargs'))
+        n_pcs=cfg.get('n_pcs', 50),
+        harmony_kwargs=cfg.get('harmony_kwargs'),
+        cache_dir=output_dir)
+    eval_integration_from_arrays(
+        scrna_ref.obsm['harmony'], query.obsm['harmony'], label=name)
     os.makedirs(f'{working_dir}/figures', exist_ok=True)
     plot_harmony_umap(
         scrna_ref, query,
         f'{working_dir}/figures/{name}_query_scrna_harmony_umap.png',
         title=f'{name}: query-scRNA Harmony integration')
 
+    # unconstrained label transfer (no spatial constraint, for comparison)
+    for level in ['class', 'subclass']:
+        query = query.label_transfer_from(
+            scrna_ref, level, num_neighbors=20,
+            cell_type_column=f'{level}_unconstrained',
+            confidence_column=f'{level}_unconstrained_confidence')
+    query_adata = query.to_scanpy()
+    unconstrained = {
+        col: query_adata.obs[col].values
+        for col in query_adata.obs.columns
+        if 'unconstrained' in col}
+    print(f'[{name}] unconstrained transfer: '
+          f'{query_adata.obs["class_unconstrained"].nunique()} classes, '
+          f'{query_adata.obs["subclass_unconstrained"].nunique()} subclasses')
+
     query_harmony = query.obsm['harmony'].astype(np.float32)
     scrna_harmony = scrna_ref.obsm['harmony'].astype(np.float32)
 
     np.savez(cache_path, query_harmony=query_harmony,
-             scrna_harmony=scrna_harmony)
+             scrna_harmony=scrna_harmony, **unconstrained)
     print(f'[{name}] saved Harmony ({query_harmony.shape[0]:,} query + '
           f'{scrna_harmony.shape[0]:,} scRNA-seq, {query_harmony.shape[1]}D)')
 
-    del scrna_ref, query
+    del scrna_ref, query, query_adata
     return query_harmony, scrna_harmony
 
 #endregion
@@ -315,6 +387,7 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
 
     if levels is None:
         levels = ['class', 'subclass']
+
     cfg = datasets[name]
     sample_col = cfg['sample_col']
     ave_dist_fold = cfg['ave_dist_fold']
@@ -576,22 +649,18 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
     print(f'[{name}] done')
 
 #endregion
+
 #region run ####################################################################
 
 if __name__ == '__main__':
-    for name, cfg in datasets.items():
-        prepare_query(name, cfg['sample_col'])
-    prepare_reference()
-
-# if __name__ == '__main__':
-#     if len(sys.argv) < 2:
-#         print(f'Usage: python {sys.argv[0]} <dataset>')
-#         print(f'Datasets: {", ".join(datasets.keys())}')
-#         sys.exit(1)
-#     t = sys.argv[1]
-#     if t not in datasets:
-#         print(f'Unknown dataset: {t}. Choose from {list(datasets.keys())}')
-#         sys.exit(1)
-#     run_project(t)
+    if len(sys.argv) < 2:
+        print(f'Usage: python {sys.argv[0]} <dataset>')
+        print(f'Datasets: {", ".join(datasets.keys())}')
+        sys.exit(1)
+    t = sys.argv[1]
+    if t not in datasets:
+        print(f'Unknown dataset: {t}. Choose from {list(datasets.keys())}')
+        sys.exit(1)
+    run_project(t)
 
 #endregion
