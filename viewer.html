@@ -70,6 +70,25 @@ body { display: flex; }
     padding: 3px 8px; border-radius: 3px;
     pointer-events: none; z-index: 5;
 }
+#tooltip {
+    position: fixed; left: 0; top: 0;
+    background: rgba(0,0,0,0.92);
+    border: 1px solid #444;
+    color: #fff; font-size: 11px;
+    padding: 5px 8px; border-radius: 3px;
+    pointer-events: none; z-index: 100;
+    display: none;
+    max-width: 280px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+#tooltip .row { display: flex; gap: 6px; align-items: center; }
+#tooltip .swatch {
+    display: inline-block; width: 9px; height: 9px;
+    border-radius: 2px;
+    border: 1px solid rgba(255,255,255,0.15);
+}
+#tooltip .k { color: #888; font-size: 10px; min-width: 50px; }
+#tooltip .v { color: #fff; }
 
 /* sidebar widgets */
 .row { margin-bottom: 6px; }
@@ -228,8 +247,9 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
         </div>
     </div>
     <div id="zoom-info">100%</div>
-    <div id="help">scroll = zoom · drag = pan · double-click = reset</div>
+    <div id="help">scroll = zoom · drag = pan · double-click = reset · hover = inspect</div>
 </main>
+<div id="tooltip"></div>
 
 <script>
 //----------------------------------------------------------------------------
@@ -486,11 +506,18 @@ async function loadSlice(entry) {
     gl.bindBuffer(gl.ARRAY_BUFFER, subBuf);
     gl.bufferData(gl.ARRAY_BUFFER, subF, gl.STATIC_DRAW);
 
+    // keep CPU-side copies for hit testing (small: ~10 bytes/cell)
+    const xsCopy = new Float32Array(xs);   // detach from buf so it can GC
+    const ysCopy = new Float32Array(ys);
+    const subCopy = new Uint16Array(sub);
+    const clsCopy = new Uint8Array(cls);
+
     const slice = {
         n,
         posBuf, classBuf, subBuf,
         xRange: entry.x_range,
         yRange: entry.y_range,
+        xs: xsCopy, ys: ysCopy, cls: clsCopy, sub: subCopy,
     };
     state.slices.set(entry.file, slice);
     return slice;
@@ -615,7 +642,28 @@ function computeViewports() {
             // for cull
             left, top, right: left + w, bottom: top + h,
         };
+        p.rect = r;  // CSS pixel rect for hover hit-tests
     }
+}
+
+// fit slice's xRange/yRange into the panel preserving aspect, with padding.
+// returns (sx, sy, cx, cy) such that ndc = (world - c) * s.
+function panelTransform(p, slice) {
+    const [x0, x1] = slice.xRange;
+    const [y0, y1] = slice.yRange;
+    const wx = x1 - x0, wy = y1 - y0;
+    const aspect = p.vp.w / p.vp.h;
+    const dataAspect = wx / wy;
+    let sx, sy;
+    const pad = 0.92;
+    if (dataAspect > aspect) {
+        sx = (2 / wx) * pad;
+        sy = sx * (p.vp.w / p.vp.h);
+    } else {
+        sy = (2 / wy) * pad;
+        sx = sy * (p.vp.h / p.vp.w);
+    }
+    return { sx, sy, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
 }
 
 //----------------------------------------------------------------------------
@@ -684,26 +732,9 @@ function render() {
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        // world->NDC: fit slice's xRange/yRange into [-1,1] preserving aspect
-        const [x0, x1] = slice.xRange;
-        const [y0, y1] = slice.yRange;
-        const wx = x1 - x0, wy = y1 - y0;
-        const aspect = p.vp.w / p.vp.h;
-        const dataAspect = wx / wy;
-        let sx, sy, tx, ty;
-        const pad = 0.92;
-        if (dataAspect > aspect) {
-            sx = (2 / wx) * pad;
-            sy = sx * (p.vp.w / p.vp.h);
-        } else {
-            sy = (2 / wy) * pad;
-            sx = sy * (p.vp.h / p.vp.w);
-        }
-        const cx = (x0 + x1) / 2;
-        const cy = (y0 + y1) / 2;
-        tx = -cx * sx;
-        ty = -cy * sy;
-        gl.uniform4f(state.locs.u_xform, sx, sy, tx, ty);
+        const t = panelTransform(p, slice);
+        gl.uniform4f(state.locs.u_xform,
+            t.sx, t.sy, -t.cx * t.sx, -t.cy * t.sy);
 
         // bind attributes
         gl.bindBuffer(gl.ARRAY_BUFFER, slice.posBuf);
@@ -777,6 +808,111 @@ function initInteraction() {
         e.preventDefault();
         resetView();
     });
+
+    // hover tooltip — throttled to rAF
+    let hoverPending = false;
+    let lastHover = null;
+    stage.addEventListener('mousemove', e => {
+        if (state.dragging) { hideTooltip(); return; }
+        lastHover = { x: e.clientX, y: e.clientY };
+        if (hoverPending) return;
+        hoverPending = true;
+        requestAnimationFrame(() => {
+            hoverPending = false;
+            if (lastHover) handleHover(lastHover.x, lastHover.y);
+        });
+    });
+    stage.addEventListener('mouseleave', hideTooltip);
+}
+
+function hideTooltip() {
+    document.getElementById('tooltip').style.display = 'none';
+}
+
+function handleHover(mx, my) {
+    // find the panel under the cursor
+    const el = document.elementFromPoint(mx, my);
+    const panelEl = el && el.closest && el.closest('.panel');
+    if (!panelEl) { hideTooltip(); return; }
+    const p = state.panels.find(pp => pp.el === panelEl);
+    if (!p) { hideTooltip(); return; }
+    const slice = state.slices.get(p.entry.file);
+    if (!slice || !p.vp) { hideTooltip(); return; }
+
+    // pixel -> NDC -> world via the inverse of the panel transform
+    const r = p.rect || p.el.getBoundingClientRect();
+    const localX = mx - r.left;
+    const localY = my - r.top;
+    if (localX < 0 || localY < 0 || localX > r.width || localY > r.height) {
+        hideTooltip(); return;
+    }
+    const ndcX = (localX / r.width) * 2 - 1;
+    const ndcY = 1 - (localY / r.height) * 2;
+    const t = panelTransform(p, slice);
+    const wx = ndcX / t.sx + t.cx;
+    const wy = ndcY / t.sy + t.cy;
+
+    // hit threshold: ~6 css pixels in the panel, converted to world units
+    // 1 ndc unit = r.width/2 css pixels, and 1 ndc = 1/sx world units
+    const pxToWorldX = (1 / t.sx) / (r.width / 2);
+    const pxToWorldY = (1 / t.sy) / (r.height / 2);
+    const thr = 6;
+    const thrWX = thr * pxToWorldX;
+    const thrWY = thr * pxToWorldY;
+
+    // brute-force NN over visible cells only
+    const xs = slice.xs, ys = slice.ys;
+    const cls = slice.cls, sub = slice.sub;
+    const useSubFilter = state.filterLevel === 'subclass';
+    const visArr = useSubFilter ? state.subVisible : state.classVisible;
+    const ids = useSubFilter ? sub : cls;
+    const n = slice.n;
+    let bestI = -1;
+    let bestD = Infinity;
+    // ellipse-shaped early reject in screen space (anisotropic if panel is non-square)
+    const invThrX2 = 1 / (thrWX * thrWX);
+    const invThrY2 = 1 / (thrWY * thrWY);
+    for (let i = 0; i < n; i++) {
+        if (!visArr[ids[i]]) continue;
+        const dx = xs[i] - wx;
+        const dy = ys[i] - wy;
+        const d = dx * dx * invThrX2 + dy * dy * invThrY2;
+        if (d < bestD) { bestD = d; bestI = i; }
+    }
+    if (bestI < 0 || bestD > 1) { hideTooltip(); return; }
+
+    showTooltip(mx, my, p, slice, bestI);
+}
+
+function showTooltip(mx, my, panel, slice, i) {
+    const tt = document.getElementById('tooltip');
+    const cls = slice.cls[i];
+    const sub = slice.sub[i];
+    const cP = state.manifest.class_palette[cls] || {name: '?', color: '#666'};
+    const sP = state.manifest.subclass_palette[sub] || {name: '?', color: '#666'};
+    const sampleLabel = panel.entry.sample_rep
+        ? `${panel.entry.condition} · ${panel.entry.sample_rep}`
+        : `REF · section ${panel.entry.short}`;
+    tt.innerHTML = `
+        <div class="row" style="margin-bottom:3px;color:#aaa;font-size:10px">${sampleLabel}</div>
+        <div class="row"><span class="k">class</span>
+            <span class="swatch" style="background:${cP.color}"></span>
+            <span class="v">${cP.name}</span></div>
+        <div class="row"><span class="k">subclass</span>
+            <span class="swatch" style="background:${sP.color}"></span>
+            <span class="v">${sP.name}</span></div>
+    `;
+    // position with edge clamping
+    tt.style.display = 'block';
+    const ttW = tt.offsetWidth;
+    const ttH = tt.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = mx + 14;
+    let top  = my + 14;
+    if (left + ttW > vw - 8) left = mx - ttW - 14;
+    if (top  + ttH > vh - 8) top  = my - ttH - 14;
+    tt.style.left = left + 'px';
+    tt.style.top  = top + 'px';
 }
 
 //----------------------------------------------------------------------------
