@@ -36,6 +36,13 @@ del cells_joined
 phase_a_config = dict(
     n_pcs=50, use_scanorama=True, harmony_kwargs=dict(theta=8))
 
+# class -> tight radius as multiple of avg nearest-neighbor distance.
+# scRNA candidates of these classes are dropped from the pool unless a
+# ref cell of the same class sits within the tight radius of the query.
+class_restrict = {
+    '05 OB-IMN GABA': 8,
+}
+
 datasets = {
     'xenium': dict(
         sample_col='sample_rep',
@@ -470,6 +477,27 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
           f'{ave_dist_fold} + {alignment_shift_adjustment} = '
           f'{pdist_thres:.4f}')
 
+    # type-specific class restriction: per-class 1-NN allow mask
+    ref_class_arr_local = adata_ref.obs['class'].astype(str).values[
+        ref_global_idx]
+    scrna_class_arr = np.asarray(
+        adata_ref.uns['scrna_class_labels']).astype(str)
+    allowed_class = {}
+    for cls_name, fold in class_restrict.items():
+        mask_ref = ref_class_arr_local == cls_name
+        if not mask_ref.any():
+            print(f'[{name}] class_restrict: {cls_name!r} not in ref, '
+                  f'skipping')
+            continue
+        tight_radius = fold * avg_edge_dist
+        cls_tree = cKDTree(ref_coords[mask_ref])
+        d_cls, _ = cls_tree.query(query_coords, k=1)
+        allowed = d_cls <= tight_radius
+        allowed_class[cls_name] = allowed
+        print(f'[{name}] class_restrict {cls_name!r}: '
+              f'{allowed.sum():,}/{len(query_coords):,} cells within '
+              f'{fold}x avg_nn = {tight_radius:.4f}')
+
     print(f'[{name}] spatial kNN (query_ball_point)...')
     tree = cKDTree(ref_coords)
     spatial_candidates = tree.query_ball_point(query_coords, r=pdist_thres)
@@ -550,13 +578,23 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
             if level in bridge_consistent:
                 results[level]['bridge_consistency'][i] = \
                     bridge_consistent[level][ref_global].mean()
-        # gather scRNA pool and filter to subclasses present in ref neighbors
         ref_subs_present = set(ref_subclass_arr[ref_global])
         scrna_pool = scrna_indices[ref_global].ravel()
-        pool_mask = np.isin(scrna_subclass_arr[scrna_pool], list(ref_subs_present))
+        subclass_mask = np.isin(
+            scrna_subclass_arr[scrna_pool], list(ref_subs_present))
+        # drop restricted classes when query is outside their tight radius
+        class_keep = np.ones(len(scrna_pool), dtype=bool)
+        for cls_name, allowed in allowed_class.items():
+            if not allowed[i]:
+                class_keep &= scrna_class_arr[scrna_pool] != cls_name
         unfiltered_size = len(np.unique(scrna_pool))
-        cell_pools[i] = np.unique(scrna_pool[pool_mask]) if pool_mask.any() \
-            else np.unique(scrna_pool)
+        pool_mask = subclass_mask & class_keep
+        if pool_mask.any():
+            cell_pools[i] = np.unique(scrna_pool[pool_mask])
+        elif class_keep.any():
+            cell_pools[i] = np.unique(scrna_pool[class_keep])
+        else:
+            cell_pools[i] = np.array([], dtype=scrna_pool.dtype)
         total_before += unfiltered_size
         total_after += len(cell_pools[i])
         pool_reduction[i] = 1.0 - len(cell_pools[i]) / max(unfiltered_size, 1)
@@ -700,21 +738,163 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
 
     print(f'[{name}] done')
 
+# in-place patch: reapply class_restrict to an existing 02_adata without
+# rerunning the full pipeline. only reprocesses cells currently assigned
+# to a restricted class that fall outside the tight radius.
+def patch_class_restrict(name, k2=5, k_extend=20, levels=None):
+
+    if not class_restrict:
+        print(f'[{name}] no class_restrict, skipping')
+        return
+    if levels is None:
+        levels = ['class', 'subclass']
+
+    cfg = datasets[name]
+    sample_col = cfg['sample_col']
+    output_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
+    adata = sc.read_h5ad(output_path)
+
+    adata_ref, scrna_indices, _ = prepare_reference()
+    ref_sections = sorted(
+        s for s in adata_ref.obs['sample'].unique()
+        if s.startswith('C57BL6J-638850'))
+    ref_global_idx = np.concatenate([
+        np.where(adata_ref.obs['sample'] == s)[0] for s in ref_sections])
+    ref_coords = adata_ref.obs.iloc[ref_global_idx][
+        ['x_raw', 'y_raw']].values
+    ref_class_arr_local = adata_ref.obs['class'].astype(str).values[
+        ref_global_idx]
+    ref_subclass_arr = adata_ref.obs['subclass'].astype(str).values
+    scrna_class_arr = np.asarray(
+        adata_ref.uns['scrna_class_labels']).astype(str)
+    scrna_subclass_arr = np.asarray(
+        adata_ref.uns['scrna_subclass_labels']).astype(str)
+
+    qh, sh = prepare_query(name, sample_col)
+    query_coords = adata.obs[['x_ffd', 'y_ffd']].values
+    avg_edge_dist = avg_nn_dist(query_coords)
+    pdist_thres = (cfg['ave_dist_fold'] * avg_edge_dist
+                   + cfg['alignment_shift_adjustment'])
+
+    allowed_class = {}
+    for cls_name, fold in class_restrict.items():
+        mask_ref = ref_class_arr_local == cls_name
+        if not mask_ref.any():
+            continue
+        cls_tree = cKDTree(ref_coords[mask_ref])
+        d_cls, _ = cls_tree.query(query_coords, k=1)
+        allowed_class[cls_name] = d_cls <= fold * avg_edge_dist
+
+    cur = adata.obs['class'].astype(str).values
+    affected = np.zeros(len(adata), dtype=bool)
+    for cls_name, allowed in allowed_class.items():
+        affected |= (cur == cls_name) & ~allowed
+    n_aff = int(affected.sum())
+    print(f'[{name}] reprocessing {n_aff:,}/{len(adata):,} cells')
+    if n_aff == 0:
+        return
+
+    aff_idx = np.where(affected)[0]
+    ref_tree = cKDTree(ref_coords)
+    spatial_cands = ref_tree.query_ball_point(
+        query_coords[aff_idx], r=pdist_thres)
+    _, fb_indices = ref_tree.query(query_coords[aff_idx], k=k_extend)
+
+    eps = np.float32(1e-8)
+    qn = qh / np.linalg.norm(qh, axis=1, keepdims=True).clip(min=eps)
+    sn = sh / np.linalg.norm(sh, axis=1, keepdims=True).clip(min=eps)
+
+    label_data = {
+        level: np.unique(
+            adata_ref.uns[f'scrna_{level}_labels'], return_inverse=True)
+        for level in levels}
+
+    out_label = {l: adata.obs[l].astype(str).values.copy() for l in levels}
+    out_conf = {
+        l: adata.obs[f'{l}_confidence'].values.copy() for l in levels}
+    out_margin = {
+        l: adata.obs[f'{l}_margin'].values.copy() for l in levels}
+    out_min_cos = adata.obs['min_cos_dist'].values.copy()
+
+    for j, qi in enumerate(aff_idx):
+        if j % 5000 == 0 and j > 0:
+            print(f'[{name}]   {j:,}/{n_aff:,}')
+        rl = spatial_cands[j]
+        ref_local = np.array(rl) if len(rl) else fb_indices[j]
+        ref_global = ref_global_idx[ref_local]
+        ref_subs_present = set(ref_subclass_arr[ref_global])
+        scrna_pool = scrna_indices[ref_global].ravel()
+        subclass_mask = np.isin(
+            scrna_subclass_arr[scrna_pool], list(ref_subs_present))
+        class_keep = np.ones(len(scrna_pool), dtype=bool)
+        for cls_name, allowed in allowed_class.items():
+            if not allowed[qi]:
+                class_keep &= scrna_class_arr[scrna_pool] != cls_name
+        pool_mask = subclass_mask & class_keep
+        if pool_mask.any():
+            pool = np.unique(scrna_pool[pool_mask])
+        elif class_keep.any():
+            pool = np.unique(scrna_pool[class_keep])
+        else:
+            pool = np.array([], dtype=scrna_pool.dtype)
+
+        if len(pool) == 0:
+            for level in levels:
+                ul, _ = label_data[level]
+                out_label[level][qi] = ul[0]
+                out_conf[level][qi] = 0.0
+                out_margin[level][qi] = 0.0
+            out_min_cos[qi] = 1.0
+            continue
+
+        cos_dist = 1.0 - sn[pool] @ qn[qi]
+        k = min(k2, len(pool))
+        top = (np.argpartition(cos_dist, k - 1)[:k]
+               if k < len(pool) else np.arange(len(pool)))
+        top_dist = cos_dist[top]
+        top_global = pool[top]
+        weights = 1.0 / (top_dist + 1e-6)
+        out_min_cos[qi] = top_dist.min()
+        for level in levels:
+            ul, lc = label_data[level]
+            codes = lc[top_global]
+            scores = np.bincount(codes, weights=weights, minlength=len(ul))
+            sorted_s = np.sort(scores)[::-1]
+            total = scores.sum()
+            best = int(np.argmax(scores))
+            out_label[level][qi] = ul[best]
+            out_conf[level][qi] = scores[best] / total if total > 0 else 0.0
+            out_margin[level][qi] = (
+                (sorted_s[0] - sorted_s[1]) / total
+                if total > 0 and len(sorted_s) > 1 else 0.0)
+
+    for level in levels:
+        adata.obs[level] = out_label[level]
+        adata.obs[f'{level}_confidence'] = out_conf[level]
+        adata.obs[f'{level}_margin'] = out_margin[level]
+    adata.obs['min_cos_dist'] = out_min_cos
+
+    adata.write(output_path)
+    print(f'[{name}] patched -> {output_path}')
+
 #endregion
 
 #region run ####################################################################
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print(f'Usage: python {sys.argv[0]} <dataset|all>')
+        print(f'Usage: python {sys.argv[0]} <dataset|all> [patch]')
         print(f'Datasets: {", ".join(datasets.keys())}')
         sys.exit(1)
     t = sys.argv[1]
+    fn = (patch_class_restrict
+          if len(sys.argv) > 2 and sys.argv[2] == 'patch'
+          else run_project)
     if t == 'all':
         for name in datasets:
-            run_project(name)
+            fn(name)
     elif t in datasets:
-        run_project(t)
+        fn(t)
     else:
         print(f'Unknown dataset: {t}. Choose from {list(datasets.keys())} or all')
         sys.exit(1)

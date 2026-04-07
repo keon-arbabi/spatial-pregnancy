@@ -719,7 +719,7 @@
   },
   "datasets": {
     "xenium": {
-      "n_cells": 788057,
+      "n_cells": 785410,
       "x_range": [
         -10.728672981262207,
         -0.5738998651504517
@@ -733,7 +733,7 @@
           "sample_rep": "CTRL_1_1",
           "sample": "CTRL_1",
           "condition": "CTRL",
-          "n_cells": 97760,
+          "n_cells": 97389,
           "x_range": [
             -10.481555938720703,
             -0.8839417099952698
@@ -748,7 +748,7 @@
           "sample_rep": "CTRL_2_1",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 73479,
+          "n_cells": 73441,
           "x_range": [
             -10.599467277526855,
             -0.8043392300605774
@@ -763,7 +763,7 @@
           "sample_rep": "CTRL_2_2",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 79289,
+          "n_cells": 79225,
           "x_range": [
             -10.576719284057617,
             -0.8411082625389099
@@ -778,7 +778,7 @@
           "sample_rep": "CTRL_3_1",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 82902,
+          "n_cells": 82543,
           "x_range": [
             -10.68445110321045,
             -0.8112542033195496
@@ -793,7 +793,7 @@
           "sample_rep": "CTRL_3_2",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 78728,
+          "n_cells": 78347,
           "x_range": [
             -10.679407119750977,
             -0.7378882765769958
@@ -808,7 +808,7 @@
           "sample_rep": "PREG_2_1",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 100120,
+          "n_cells": 99723,
           "x_range": [
             -10.728672981262207,
             -0.5738998651504517
@@ -823,7 +823,7 @@
           "sample_rep": "PREG_2_2",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 87584,
+          "n_cells": 87278,
           "x_range": [
             -10.701827049255371,
             -0.7782636284828186
@@ -838,7 +838,7 @@
           "sample_rep": "PREG_3_1",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 89177,
+          "n_cells": 88838,
           "x_range": [
             -10.685636520385742,
             -0.7847784757614136
@@ -853,7 +853,7 @@
           "sample_rep": "PREG_3_2",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 99018,
+          "n_cells": 98626,
           "x_range": [
             -10.69110107421875,
             -0.7630816102027893
@@ -867,7 +867,7 @@
       ]
     },
     "merfish": {
-      "n_cells": 829593,
+      "n_cells": 823799,
       "x_range": [
         -10.783557891845703,
         -0.6158233284950256
@@ -881,7 +881,7 @@
           "sample_rep": "CTRL_1",
           "sample": "CTRL_1",
           "condition": "CTRL",
-          "n_cells": 83733,
+          "n_cells": 83147,
           "x_range": [
             -10.709811210632324,
             -0.9368594884872437
@@ -896,7 +896,7 @@
           "sample_rep": "CTRL_2",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 94144,
+          "n_cells": 93662,
           "x_range": [
             -10.599357604980469,
             -0.6158233284950256
@@ -911,7 +911,7 @@
           "sample_rep": "CTRL_3",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 86508,
+          "n_cells": 85852,
           "x_range": [
             -10.514966011047363,
             -0.7232633233070374
@@ -926,7 +926,7 @@
           "sample_rep": "POSTPART_1",
           "sample": "POSTPART_1",
           "condition": "POSTPART",
-          "n_cells": 66452,
+          "n_cells": 65958,
           "x_range": [
             -10.783557891845703,
             -0.819068968296051
@@ -941,7 +941,7 @@
           "sample_rep": "POSTPART_2",
           "sample": "POSTPART_2",
           "condition": "POSTPART",
-          "n_cells": 128190,
+          "n_cells": 127350,
           "x_range": [
             -10.53069019317627,
             -0.8014578819274902
@@ -956,7 +956,7 @@
           "sample_rep": "POSTPART_3",
           "sample": "POSTPART_3",
           "condition": "POSTPART",
-          "n_cells": 90601,
+          "n_cells": 89963,
           "x_range": [
             -10.699673652648926,
             -1.1019830703735352
@@ -971,7 +971,7 @@
           "sample_rep": "PREG_1",
           "sample": "PREG_1",
           "condition": "PREG",
-          "n_cells": 94612,
+          "n_cells": 93984,
           "x_range": [
             -10.652837753295898,
             -0.7623506784439087
@@ -986,7 +986,7 @@
           "sample_rep": "PREG_2",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 83480,
+          "n_cells": 82725,
           "x_range": [
             -10.525116920471191,
             -1.158291220664978
@@ -1001,7 +1001,7 @@
           "sample_rep": "PREG_3",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 101873,
+          "n_cells": 101158,
           "x_range": [
             -10.552000999450684,
             -1.3611834049224854
@@ -1015,7 +1015,7 @@
       ]
     },
     "slidetags": {
-      "n_cells": 70940,
+      "n_cells": 70580,
       "x_range": [
         -10.86599063873291,
         -0.6940608620643616
@@ -1029,7 +1029,7 @@
           "sample_rep": "CTRL_1_1",
           "sample": "CTRL_1",
           "condition": "CTRL",
-          "n_cells": 5393,
+          "n_cells": 5359,
           "x_range": [
             -10.72961711883545,
             -0.7617392539978027
@@ -1044,7 +1044,7 @@
           "sample_rep": "CTRL_1_2",
           "sample": "CTRL_1",
           "condition": "CTRL",
-          "n_cells": 4420,
+          "n_cells": 4391,
           "x_range": [
             -10.652420043945312,
             -0.7949291467666626
@@ -1059,7 +1059,7 @@
           "sample_rep": "CTRL_2_1",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 6693,
+          "n_cells": 6662,
           "x_range": [
             -10.751603126525879,
             -0.9704970121383667
@@ -1074,7 +1074,7 @@
           "sample_rep": "CTRL_3_1",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 5543,
+          "n_cells": 5524,
           "x_range": [
             -10.589808464050293,
             -1.011077642440796
@@ -1089,7 +1089,7 @@
           "sample_rep": "CTRL_3_2",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 5597,
+          "n_cells": 5551,
           "x_range": [
             -10.51870059967041,
             -1.0046716928482056
@@ -1104,7 +1104,7 @@
           "sample_rep": "POSTPART_1_1",
           "sample": "POSTPART_1",
           "condition": "POSTPART",
-          "n_cells": 5008,
+          "n_cells": 4996,
           "x_range": [
             -10.86599063873291,
             -0.8428760766983032
@@ -1119,7 +1119,7 @@
           "sample_rep": "POSTPART_1_2",
           "sample": "POSTPART_1",
           "condition": "POSTPART",
-          "n_cells": 4528,
+          "n_cells": 4493,
           "x_range": [
             -10.630553245544434,
             -0.7936181426048279
@@ -1134,7 +1134,7 @@
           "sample_rep": "POSTPART_2_1",
           "sample": "POSTPART_2",
           "condition": "POSTPART",
-          "n_cells": 6188,
+          "n_cells": 6148,
           "x_range": [
             -10.6471529006958,
             -0.7660155892372131
@@ -1149,7 +1149,7 @@
           "sample_rep": "POSTPART_2_2",
           "sample": "POSTPART_2",
           "condition": "POSTPART",
-          "n_cells": 5283,
+          "n_cells": 5258,
           "x_range": [
             -10.848661422729492,
             -0.7789991497993469
@@ -1164,7 +1164,7 @@
           "sample_rep": "PREG_1_1",
           "sample": "PREG_1",
           "condition": "PREG",
-          "n_cells": 5725,
+          "n_cells": 5699,
           "x_range": [
             -10.606931686401367,
             -0.8073437809944153
@@ -1179,7 +1179,7 @@
           "sample_rep": "PREG_1_2",
           "sample": "PREG_1",
           "condition": "PREG",
-          "n_cells": 5198,
+          "n_cells": 5178,
           "x_range": [
             -10.547162055969238,
             -0.7481682300567627
@@ -1194,7 +1194,7 @@
           "sample_rep": "PREG_2_1",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 4498,
+          "n_cells": 4484,
           "x_range": [
             -10.719393730163574,
             -0.7955253720283508
@@ -1209,7 +1209,7 @@
           "sample_rep": "PREG_2_2",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 4531,
+          "n_cells": 4507,
           "x_range": [
             -10.738452911376953,
             -0.6940608620643616
@@ -1239,7 +1239,7 @@
           "sample_rep": "PREG_3_2",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 1486,
+          "n_cells": 1481,
           "x_range": [
             -10.712959289550781,
             -0.7466186285018921

@@ -61,6 +61,16 @@ def quantize_unit(arr, lo=0.0, hi=1.0):
     return np.round((a - lo) / (hi - lo) * 255.0).astype(np.uint8)
 
 
+def write_atomic(path, data):
+    """Write to a temp sibling and os.replace over the destination.
+    Works even when the existing file isn't writable by us, as long as
+    the parent directory is."""
+    tmp = f'{path}.tmp.{os.getpid()}'
+    with open(tmp, 'wb') as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
 def pack_sample(x, y, class_ids, subclass_ids, conf, margin, cos):
     """Pack one sample into a 14*n byte buffer with the layout above."""
     n = len(x)
@@ -222,8 +232,7 @@ for section in sorted(np.unique(ref_sample).tolist()):
 
     short = section.split('.')[-1]  # e.g. '46'
     rel = f'reference/{short}.bin'
-    with open(f'{out_dir}/{rel}', 'wb') as fh:
-        fh.write(buf)
+    write_atomic(f'{out_dir}/{rel}', buf)
 
     ref_section_list.append({
         'section': section,
@@ -298,8 +307,7 @@ for name in datasets:
             conf_q[m], margin_q[m], cos_q[m])
 
         rel = f'{name}/{rep}.bin'
-        with open(f'{out_dir}/{rel}', 'wb') as fh:
-            fh.write(buf)
+        write_atomic(f'{out_dir}/{rel}', buf)
 
         first = int(np.argmax(m))
         samples.append({
@@ -322,8 +330,9 @@ for name in datasets:
     print(f'[{name}] wrote {len(samples)} samples '
           f'({sum(s["n_cells"] for s in samples):,} cells)')
 
-with open(f'{out_dir}/manifest.json', 'w') as fh:
-    json.dump(manifest, fh, indent=2)
+write_atomic(
+    f'{out_dir}/manifest.json',
+    json.dumps(manifest, indent=2).encode('utf-8'))
 
 print(f'\nmanifest written to {out_dir}/manifest.json')
 print('done')
