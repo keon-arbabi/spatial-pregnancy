@@ -1,0 +1,1299 @@
+{
+  "version": 2,
+  "class_palette": [
+    {
+      "name": "Unlabelled",
+      "color": "#d3d3d3"
+    },
+    {
+      "name": "01 IT-ET Glut",
+      "color": "#FA0087"
+    },
+    {
+      "name": "02 NP-CT-L6b Glut",
+      "color": "#61e2a4"
+    },
+    {
+      "name": "03 OB-CR Glut",
+      "color": "#D00000"
+    },
+    {
+      "name": "04 DG-IMN Glut",
+      "color": "#16f2f2"
+    },
+    {
+      "name": "05 OB-IMN GABA",
+      "color": "#1b4332"
+    },
+    {
+      "name": "06 CTX-CGE GABA",
+      "color": "#CCFF33"
+    },
+    {
+      "name": "07 CTX-MGE GABA",
+      "color": "#f954ee"
+    },
+    {
+      "name": "08 CNU-MGE GABA",
+      "color": "#70E000"
+    },
+    {
+      "name": "09 CNU-LGE GABA",
+      "color": "#B199FF"
+    },
+    {
+      "name": "10 LSX GABA",
+      "color": "#3283FE"
+    },
+    {
+      "name": "11 CNU-HYa GABA",
+      "color": "#450099"
+    },
+    {
+      "name": "12 HY GABA",
+      "color": "#FF6600"
+    },
+    {
+      "name": "13 CNU-HYa Glut",
+      "color": "#90E0EF"
+    },
+    {
+      "name": "14 HY Glut",
+      "color": "#AA0DFE"
+    },
+    {
+      "name": "15 HY Gnrh1 Glut",
+      "color": "#F28266"
+    },
+    {
+      "name": "18 TH Glut",
+      "color": "#0D47A1"
+    },
+    {
+      "name": "19 MB Glut",
+      "color": "#007200"
+    },
+    {
+      "name": "20 MB GABA",
+      "color": "#9EF01A"
+    },
+    {
+      "name": "23 P Glut",
+      "color": "#6b5ca5"
+    },
+    {
+      "name": "24 MY Glut",
+      "color": "#F0A0FF"
+    },
+    {
+      "name": "30 Astro-Epen",
+      "color": "#594a26"
+    },
+    {
+      "name": "31 OPC-Oligo",
+      "color": "#03045E"
+    },
+    {
+      "name": "33 Vascular",
+      "color": "#858881"
+    },
+    {
+      "name": "34 Immune",
+      "color": "#825f45"
+    }
+  ],
+  "subclass_palette": [
+    {
+      "name": "Unlabelled",
+      "color": "#d3d3d3"
+    },
+    {
+      "name": "001 CLA-EPd-CTX Car3 Glut",
+      "color": "#64c2fc"
+    },
+    {
+      "name": "002 IT EP-CLA Glut",
+      "color": "#1F665D"
+    },
+    {
+      "name": "003 L5/6 IT TPE-ENT Glut",
+      "color": "#C400FF"
+    },
+    {
+      "name": "004 L6 IT CTX Glut",
+      "color": "#C0FF4D"
+    },
+    {
+      "name": "005 L5 IT CTX Glut",
+      "color": "#660F38"
+    },
+    {
+      "name": "006 L4/5 IT CTX Glut",
+      "color": "#3DCCB7"
+    },
+    {
+      "name": "007 L2/3 IT CTX Glut",
+      "color": "#E9530F"
+    },
+    {
+      "name": "008 L2/3 IT ENT Glut",
+      "color": "#1F46CC"
+    },
+    {
+      "name": "009 L2/3 IT PIR-ENTl Glut",
+      "color": "#940099"
+    },
+    {
+      "name": "010 IT AON-TT-DP Glut",
+      "color": "#FF004B"
+    },
+    {
+      "name": "012 MEA Slc17a7 Glut",
+      "color": "#456C99"
+    },
+    {
+      "name": "013 COAp Grxcr2 Glut",
+      "color": "#61CC5C"
+    },
+    {
+      "name": "014 LA-BLA-BMA-PA Glut",
+      "color": "#BBFF73"
+    },
+    {
+      "name": "016 CA1-ProS Glut",
+      "color": "#0F3466"
+    },
+    {
+      "name": "020 L2/3 IT RSP Glut",
+      "color": "#999145"
+    },
+    {
+      "name": "022 L5 ET CTX Glut",
+      "color": "#99A2FF"
+    },
+    {
+      "name": "023 SUB-ProS Glut",
+      "color": "#FF9999"
+    },
+    {
+      "name": "025 CA2-FC-IG Glut",
+      "color": "#FF7391"
+    },
+    {
+      "name": "027 L6b EPd Glut",
+      "color": "#CC827A"
+    },
+    {
+      "name": "028 L6b/CT ENT Glut",
+      "color": "#CC0098"
+    },
+    {
+      "name": "029 L6b CTX Glut",
+      "color": "#9EFF99"
+    },
+    {
+      "name": "030 L6 CT CTX Glut",
+      "color": "#34661F"
+    },
+    {
+      "name": "031 CT SUB Glut",
+      "color": "#440066"
+    },
+    {
+      "name": "032 L5 NP CTX Glut",
+      "color": "#7B7ACC"
+    },
+    {
+      "name": "033 NP SUB Glut",
+      "color": "#99CAFF"
+    },
+    {
+      "name": "035 OB Eomes Ms4a15 Glut",
+      "color": "#7F1FCC"
+    },
+    {
+      "name": "036 HPF CR Glut",
+      "color": "#919900"
+    },
+    {
+      "name": "038 DG-PIR Ex IMN",
+      "color": "#3D53CC"
+    },
+    {
+      "name": "039 OB Meis2 Thsd7b Gaba",
+      "color": "#FF99F7"
+    },
+    {
+      "name": "041 OB-in Frmd7 Gaba",
+      "color": "#FF0073"
+    },
+    {
+      "name": "042 OB-out Frmd7 Gaba",
+      "color": "#CC6D3D"
+    },
+    {
+      "name": "043 OB-mi Frmd7 Gaba",
+      "color": "#FF99A7"
+    },
+    {
+      "name": "044 OB Dopa-Gaba",
+      "color": "#96CC7A"
+    },
+    {
+      "name": "045 OB-STR-CTX Inh IMN",
+      "color": "#819945"
+    },
+    {
+      "name": "046 Vip Gaba",
+      "color": "#663D47"
+    },
+    {
+      "name": "047 Sncg Gaba",
+      "color": "#FFE999"
+    },
+    {
+      "name": "048 RHP-COA Ndnf Gaba",
+      "color": "#0003FF"
+    },
+    {
+      "name": "049 Lamp5 Gaba",
+      "color": "#FF764D"
+    },
+    {
+      "name": "050 Lamp5 Lhx6 Gaba",
+      "color": "#26FF3E"
+    },
+    {
+      "name": "051 Pvalb chandelier Gaba",
+      "color": "#2F992E"
+    },
+    {
+      "name": "052 Pvalb Gaba",
+      "color": "#661F3B"
+    },
+    {
+      "name": "053 Sst Gaba",
+      "color": "#99F2FF"
+    },
+    {
+      "name": "054 STR Prox1 Lhx6 Gaba",
+      "color": "#c60f3a"
+    },
+    {
+      "name": "055 STR Lhx8 Gaba",
+      "color": "#CC3DC9"
+    },
+    {
+      "name": "056 Sst Chodl Gaba",
+      "color": "#EDA32D"
+    },
+    {
+      "name": "057 NDB-SI-MA-STRv Lhx8 Gaba",
+      "color": "#199900"
+    },
+    {
+      "name": "058 PAL-STR Gaba-Chol",
+      "color": "#4DFFFA"
+    },
+    {
+      "name": "059 GPe-SI Sox6 Cyp26b1 Gaba",
+      "color": "#5CCC85"
+    },
+    {
+      "name": "060 OT D3 Folh1 Gaba",
+      "color": "#66580F"
+    },
+    {
+      "name": "061 STR D1 Gaba",
+      "color": "#005B66"
+    },
+    {
+      "name": "062 STR D2 Gaba",
+      "color": "#FF7800"
+    },
+    {
+      "name": "063 STR D1 Sema5a Gaba",
+      "color": "#663A2D"
+    },
+    {
+      "name": "064 STR-PAL Chst9 Gaba",
+      "color": "#967B09"
+    },
+    {
+      "name": "065 IA Mgp Gaba",
+      "color": "#00995F"
+    },
+    {
+      "name": "066 NDB-SI-ant Prdm12 Gaba",
+      "color": "#FF00D6"
+    },
+    {
+      "name": "067 LSX Sall3 Pax6 Gaba",
+      "color": "#006649"
+    },
+    {
+      "name": "068 LSX Otx2 Gaba",
+      "color": "#229917"
+    },
+    {
+      "name": "069 LSX Nkx2-1 Gaba",
+      "color": "#CCA43D"
+    },
+    {
+      "name": "070 LSX Prdm12 Slit2 Gaba",
+      "color": "#0067FF"
+    },
+    {
+      "name": "071 LSX Prdm12 Zeb2 Gaba",
+      "color": "#1F6625"
+    },
+    {
+      "name": "072 LSX Sall3 Lmo1 Gaba",
+      "color": "#00FFD0"
+    },
+    {
+      "name": "073 MEA-BST Sox6 Gaba",
+      "color": "#66360F"
+    },
+    {
+      "name": "074 MEA-BST Lhx6 Sp9 Gaba",
+      "color": "#FCFF4D"
+    },
+    {
+      "name": "075 MEA-BST Lhx6 Nr2e1 Gaba",
+      "color": "#995C70"
+    },
+    {
+      "name": "076 MEA-BST Lhx6 Nfib Gaba",
+      "color": "#990063"
+    },
+    {
+      "name": "077 CEA-BST Gal Avp Gaba",
+      "color": "#2E6637"
+    },
+    {
+      "name": "078 SI-MA-ACB Ebf1 Bnc2 Gaba",
+      "color": "#5CBCCC"
+    },
+    {
+      "name": "079 CEA-BST Six3 Cyp26b1 Gaba",
+      "color": "#73C1FF"
+    },
+    {
+      "name": "080 CEA-AAA-BST Six3 Sp9 Gaba",
+      "color": "#990091"
+    },
+    {
+      "name": "081 ACB-BST-FS D1 Gaba",
+      "color": "#FF4026"
+    },
+    {
+      "name": "082 CEA-BST Ebf1 Pdyn Gaba",
+      "color": "#CC885C"
+    },
+    {
+      "name": "083 CEA-BST Rai14 Pdyn Crh Gaba",
+      "color": "#CC5E5C"
+    },
+    {
+      "name": "084 BST-SI-AAA Six3 Slc22a3 Gaba",
+      "color": "#881FCC"
+    },
+    {
+      "name": "085 SI-MPO-LPO Lhx8 Gaba",
+      "color": "#26FFAD"
+    },
+    {
+      "name": "086 MPO-ADP Lhx8 Gaba",
+      "color": "#FF004F"
+    },
+    {
+      "name": "087 MPN-MPO-LPO Lhx6 Zfhx3 Gaba",
+      "color": "#26C2FF"
+    },
+    {
+      "name": "088 BST Tac2 Gaba",
+      "color": "#71FF4D"
+    },
+    {
+      "name": "089 PVR Six3 Sox3 Gaba",
+      "color": "#4DFFB4"
+    },
+    {
+      "name": "090 BST-MPN Six3 Nrgn Gaba",
+      "color": "#996600"
+    },
+    {
+      "name": "091 ARH-PVi Six6 Dopa-Gaba",
+      "color": "#6000FF"
+    },
+    {
+      "name": "097 PVHd-SBPV Six3 Prox1 Gaba",
+      "color": "#2E3D66"
+    },
+    {
+      "name": "098 AHN-SBPV-PVHd Pdrm12 Gaba",
+      "color": "#BB7ACC"
+    },
+    {
+      "name": "099 SBPV-PVa Six6 Satb2 Gaba",
+      "color": "#99FF4D"
+    },
+    {
+      "name": "100 AHN Onecut3 Gaba",
+      "color": "#553D66"
+    },
+    {
+      "name": "101 ZI Pax6 Gaba",
+      "color": "#73FFCF"
+    },
+    {
+      "name": "102 DMH-LHA Gsx1 Gaba",
+      "color": "#992A00"
+    },
+    {
+      "name": "104 TU-ARH Otp Six6 Gaba",
+      "color": "#2E0F66"
+    },
+    {
+      "name": "106 PVpo-VMPO-MPN Hmx2 Gaba",
+      "color": "#3D4566"
+    },
+    {
+      "name": "107 DMH Hmx2 Gaba",
+      "color": "#FFB473"
+    },
+    {
+      "name": "108 ARH-PVp Tbx3 Gaba",
+      "color": "#CC3D76"
+    },
+    {
+      "name": "109 LGv-ZI Otx2 Gaba",
+      "color": "#664DFF"
+    },
+    {
+      "name": "111 TRS-BAC Sln Glut",
+      "color": "#500F66"
+    },
+    {
+      "name": "113 MEA-COA-BMA Ccdc42 Glut",
+      "color": "#660F5A"
+    },
+    {
+      "name": "114 COAa-PAA-MEA Barhl2 Glut",
+      "color": "#EDFF99"
+    },
+    {
+      "name": "115 MS-SF Bsx Glut",
+      "color": "#1F6641"
+    },
+    {
+      "name": "116 AVPV-MEPO-SFO Tbr1 Glut",
+      "color": "#1100CC"
+    },
+    {
+      "name": "117 LHA Barhl2 Glut",
+      "color": "#5C9995"
+    },
+    {
+      "name": "118 ADP-MPO Trp73 Glut",
+      "color": "#00CC6A"
+    },
+    {
+      "name": "119 SI-MA-LPO-LHA Skor1 Glut",
+      "color": "#352E66"
+    },
+    {
+      "name": "120 MEA Otp Foxp2 Glut",
+      "color": "#894599"
+    },
+    {
+      "name": "121 MEA-BST Otp Zic2 Glut",
+      "color": "#6100CC"
+    },
+    {
+      "name": "122 LHA-MEA Otp Glut",
+      "color": "#1FCCCA"
+    },
+    {
+      "name": "124 MPN-MPO-PVpo Hmx2 Glut",
+      "color": "#CC1F92"
+    },
+    {
+      "name": "126 ARH-PVp Tbx3 Glut",
+      "color": "#CC4B1F"
+    },
+    {
+      "name": "129 VMH Nr5a1 Glut",
+      "color": "#5CCCB1"
+    },
+    {
+      "name": "131 LHA-AHN-PVH Otp Trh Glut",
+      "color": "#7ABACC"
+    },
+    {
+      "name": "132 AHN-RCH-LHA Otp Fezf1 Glut",
+      "color": "#2E9957"
+    },
+    {
+      "name": "133 PVH-SO-PVa Otp Glut",
+      "color": "#603DCC"
+    },
+    {
+      "name": "142 HY Gnrh1 Glut",
+      "color": "#7A9ACC"
+    },
+    {
+      "name": "149 PVT-PT Ntrk1 Glut",
+      "color": "#5C8599"
+    },
+    {
+      "name": "155 PRC-PAG Pax6 Glut",
+      "color": "#3D6566"
+    },
+    {
+      "name": "168 SPA-SPFm-SPFp-POL-PIL-PoT Sp9 Glut",
+      "color": "#26FFFE"
+    },
+    {
+      "name": "195 SNr-VTA Pax5 Npas1 Gaba",
+      "color": "#2E8799"
+    },
+    {
+      "name": "197 SNr Six3 Gaba",
+      "color": "#7A5C99"
+    },
+    {
+      "name": "221 LDT-PCG Vsx2 Lhx4 Glut",
+      "color": "#FF4DC7"
+    },
+    {
+      "name": "243 PGRN-PARN-MDRN Hoxb5 Glut",
+      "color": "#C6FF99"
+    },
+    {
+      "name": "318 Astro-NT NN",
+      "color": "#AD5CCC"
+    },
+    {
+      "name": "319 Astro-TE NN",
+      "color": "#3DCCB1"
+    },
+    {
+      "name": "320 Astro-OLF NN",
+      "color": "#FF73CF"
+    },
+    {
+      "name": "321 Astroependymal NN",
+      "color": "#0833ce"
+    },
+    {
+      "name": "322 Tanycyte NN",
+      "color": "#FF26A1"
+    },
+    {
+      "name": "323 Ependymal NN",
+      "color": "#D8FF00"
+    },
+    {
+      "name": "325 CHOR NN",
+      "color": "#2D9917"
+    },
+    {
+      "name": "326 OPC NN",
+      "color": "#FF26CB"
+    },
+    {
+      "name": "327 Oligo NN",
+      "color": "#99FFBC"
+    },
+    {
+      "name": "329 ABC NN",
+      "color": "#CC5CC1"
+    },
+    {
+      "name": "330 VLMC NN",
+      "color": "#653D66"
+    },
+    {
+      "name": "331 Peri NN",
+      "color": "#82992E"
+    },
+    {
+      "name": "332 SMC NN",
+      "color": "#FF9F73"
+    },
+    {
+      "name": "333 Endo NN",
+      "color": "#994567"
+    },
+    {
+      "name": "334 Microglia NN",
+      "color": "#CC1F4E"
+    },
+    {
+      "name": "335 BAM NN",
+      "color": "#66493D"
+    },
+    {
+      "name": "336 Monocytes NN",
+      "color": "#A673FF"
+    },
+    {
+      "name": "337 DC NN",
+      "color": "#CCA27A"
+    },
+    {
+      "name": "338 Lymphoid NN",
+      "color": "#3D5766"
+    }
+  ],
+  "reference": {
+    "n_cells": 343947,
+    "x_range": [
+      -10.556395530700684,
+      -0.9186677932739258
+    ],
+    "y_range": [
+      -7.485268592834473,
+      -0.448995977640152
+    ],
+    "sections": [
+      {
+        "section": "C57BL6J-638850.46",
+        "short": "46",
+        "n_cells": 97100,
+        "x_range": [
+          -10.556395530700684,
+          -0.9186677932739258
+        ],
+        "y_range": [
+          -7.458168983459473,
+          -0.448995977640152
+        ],
+        "file": "reference/46.bin"
+      },
+      {
+        "section": "C57BL6J-638850.47",
+        "short": "47",
+        "n_cells": 79041,
+        "x_range": [
+          -10.463687896728516,
+          -1.0427128076553345
+        ],
+        "y_range": [
+          -7.485268592834473,
+          -0.5705044269561768
+        ],
+        "file": "reference/47.bin"
+      },
+      {
+        "section": "C57BL6J-638850.48",
+        "short": "48",
+        "n_cells": 70378,
+        "x_range": [
+          -10.385680198669434,
+          -1.127955436706543
+        ],
+        "y_range": [
+          -7.484604835510254,
+          -0.6458218097686768
+        ],
+        "file": "reference/48.bin"
+      },
+      {
+        "section": "C57BL6J-638850.49",
+        "short": "49",
+        "n_cells": 97428,
+        "x_range": [
+          -10.304743766784668,
+          -1.2054353952407837
+        ],
+        "y_range": [
+          -7.4741106033325195,
+          -0.6969531178474426
+        ],
+        "file": "reference/49.bin"
+      }
+    ]
+  },
+  "datasets": {
+    "merfish": {
+      "n_cells": 748853,
+      "x_range": [
+        -10.783557891845703,
+        -0.6158233284950256
+      ],
+      "y_range": [
+        -7.4362711906433105,
+        -0.25588133931159973
+      ],
+      "samples": [
+        {
+          "sample_rep": "CTRL_1",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 75110,
+          "x_range": [
+            -10.709811210632324,
+            -0.9368594884872437
+          ],
+          "y_range": [
+            -7.118929862976074,
+            -0.5161904692649841
+          ],
+          "file": "merfish/CTRL_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_2",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 85346,
+          "x_range": [
+            -10.599357604980469,
+            -0.6158233284950256
+          ],
+          "y_range": [
+            -7.421741008758545,
+            -0.48249292373657227
+          ],
+          "file": "merfish/CTRL_2.bin"
+        },
+        {
+          "sample_rep": "CTRL_3",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 78222,
+          "x_range": [
+            -10.514966011047363,
+            -0.7232633233070374
+          ],
+          "y_range": [
+            -7.3726887702941895,
+            -0.5328355431556702
+          ],
+          "file": "merfish/CTRL_3.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 59788,
+          "x_range": [
+            -10.783557891845703,
+            -0.819068968296051
+          ],
+          "y_range": [
+            -7.007890224456787,
+            -0.4705333113670349
+          ],
+          "file": "merfish/POSTPART_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 116984,
+          "x_range": [
+            -10.53069019317627,
+            -0.7978501915931702
+          ],
+          "y_range": [
+            -7.395939350128174,
+            -0.25588133931159973
+          ],
+          "file": "merfish/POSTPART_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_3",
+          "sample": "POSTPART_3",
+          "condition": "POSTPART",
+          "n_cells": 82596,
+          "x_range": [
+            -10.699673652648926,
+            -1.1019830703735352
+          ],
+          "y_range": [
+            -7.109050273895264,
+            -0.29605913162231445
+          ],
+          "file": "merfish/POSTPART_3.bin"
+        },
+        {
+          "sample_rep": "PREG_1",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 84237,
+          "x_range": [
+            -10.629949569702148,
+            -0.7623506784439087
+          ],
+          "y_range": [
+            -7.408932209014893,
+            -0.5200963020324707
+          ],
+          "file": "merfish/PREG_1.bin"
+        },
+        {
+          "sample_rep": "PREG_2",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 75295,
+          "x_range": [
+            -10.525116920471191,
+            -1.158291220664978
+          ],
+          "y_range": [
+            -7.4362711906433105,
+            -0.5105763673782349
+          ],
+          "file": "merfish/PREG_2.bin"
+        },
+        {
+          "sample_rep": "PREG_3",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 91275,
+          "x_range": [
+            -10.552000999450684,
+            -1.3611834049224854
+          ],
+          "y_range": [
+            -7.179879188537598,
+            -0.6368318796157837
+          ],
+          "file": "merfish/PREG_3.bin"
+        }
+      ]
+    },
+    "slidetags": {
+      "n_cells": 71429,
+      "x_range": [
+        -10.86599063873291,
+        -0.6940608620643616
+      ],
+      "y_range": [
+        -7.803676128387451,
+        -0.12237268686294556
+      ],
+      "samples": [
+        {
+          "sample_rep": "CTRL_1_1",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 5407,
+          "x_range": [
+            -10.72961711883545,
+            -0.7617392539978027
+          ],
+          "y_range": [
+            -7.520699977874756,
+            -0.19164012372493744
+          ],
+          "file": "slidetags/CTRL_1_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_1_2",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 4445,
+          "x_range": [
+            -10.652420043945312,
+            -0.7949291467666626
+          ],
+          "y_range": [
+            -7.549088478088379,
+            -0.1637597382068634
+          ],
+          "file": "slidetags/CTRL_1_2.bin"
+        },
+        {
+          "sample_rep": "CTRL_2_1",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 6756,
+          "x_range": [
+            -10.751603126525879,
+            -0.9704970121383667
+          ],
+          "y_range": [
+            -7.555913925170898,
+            -0.2714666426181793
+          ],
+          "file": "slidetags/CTRL_2_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_1",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 5582,
+          "x_range": [
+            -10.589808464050293,
+            -1.011077642440796
+          ],
+          "y_range": [
+            -7.345925331115723,
+            -0.12237268686294556
+          ],
+          "file": "slidetags/CTRL_3_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_2",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 5628,
+          "x_range": [
+            -10.51870059967041,
+            -1.0046716928482056
+          ],
+          "y_range": [
+            -7.3848185539245605,
+            -0.16319513320922852
+          ],
+          "file": "slidetags/CTRL_3_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1_1",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 5037,
+          "x_range": [
+            -10.86599063873291,
+            -0.8428760766983032
+          ],
+          "y_range": [
+            -7.4051103591918945,
+            -0.3701518177986145
+          ],
+          "file": "slidetags/POSTPART_1_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1_2",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 4560,
+          "x_range": [
+            -10.630553245544434,
+            -0.7936181426048279
+          ],
+          "y_range": [
+            -7.414420127868652,
+            -0.38051432371139526
+          ],
+          "file": "slidetags/POSTPART_1_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2_1",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 6226,
+          "x_range": [
+            -10.6471529006958,
+            -0.7660155892372131
+          ],
+          "y_range": [
+            -7.769631862640381,
+            -0.1356176882982254
+          ],
+          "file": "slidetags/POSTPART_2_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2_2",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 5308,
+          "x_range": [
+            -10.848661422729492,
+            -0.7789991497993469
+          ],
+          "y_range": [
+            -7.747719764709473,
+            -0.18170584738254547
+          ],
+          "file": "slidetags/POSTPART_2_2.bin"
+        },
+        {
+          "sample_rep": "PREG_1_1",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 5747,
+          "x_range": [
+            -10.606931686401367,
+            -0.8073437809944153
+          ],
+          "y_range": [
+            -7.594860553741455,
+            -0.1815023422241211
+          ],
+          "file": "slidetags/PREG_1_1.bin"
+        },
+        {
+          "sample_rep": "PREG_1_2",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 5219,
+          "x_range": [
+            -10.547162055969238,
+            -0.7481682300567627
+          ],
+          "y_range": [
+            -7.451716423034668,
+            -0.16038046777248383
+          ],
+          "file": "slidetags/PREG_1_2.bin"
+        },
+        {
+          "sample_rep": "PREG_2_1",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 4531,
+          "x_range": [
+            -10.719393730163574,
+            -0.7955253720283508
+          ],
+          "y_range": [
+            -7.792311668395996,
+            -0.14249250292778015
+          ],
+          "file": "slidetags/PREG_2_1.bin"
+        },
+        {
+          "sample_rep": "PREG_2_2",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 4543,
+          "x_range": [
+            -10.738452911376953,
+            -0.6940608620643616
+          ],
+          "y_range": [
+            -7.7926130294799805,
+            -0.19726668298244476
+          ],
+          "file": "slidetags/PREG_2_2.bin"
+        },
+        {
+          "sample_rep": "PREG_3_1",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 889,
+          "x_range": [
+            -10.429157257080078,
+            -0.7338593006134033
+          ],
+          "y_range": [
+            -7.803676128387451,
+            -0.2667419910430908
+          ],
+          "file": "slidetags/PREG_3_1.bin"
+        },
+        {
+          "sample_rep": "PREG_3_2",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 1551,
+          "x_range": [
+            -10.712959289550781,
+            -0.7466186285018921
+          ],
+          "y_range": [
+            -7.785200595855713,
+            -0.16533838212490082
+          ],
+          "file": "slidetags/PREG_3_2.bin"
+        }
+      ]
+    },
+    "xenium": {
+      "n_cells": 757964,
+      "x_range": [
+        -10.695638656616211,
+        -0.591905951499939
+      ],
+      "y_range": [
+        -7.487788200378418,
+        -0.14177954196929932
+      ],
+      "samples": [
+        {
+          "sample_rep": "CTRL_1_1",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 94106,
+          "x_range": [
+            -10.481555938720703,
+            -0.8839417099952698
+          ],
+          "y_range": [
+            -7.369762420654297,
+            -0.3976893424987793
+          ],
+          "file": "xenium/CTRL_1_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_2_1",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 70831,
+          "x_range": [
+            -10.599431991577148,
+            -0.8043392300605774
+          ],
+          "y_range": [
+            -7.251402854919434,
+            -0.29874783754348755
+          ],
+          "file": "xenium/CTRL_2_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_2_2",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 76730,
+          "x_range": [
+            -10.576719284057617,
+            -0.8411082625389099
+          ],
+          "y_range": [
+            -7.487788200378418,
+            -0.14177954196929932
+          ],
+          "file": "xenium/CTRL_2_2.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_1",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 80459,
+          "x_range": [
+            -10.68445110321045,
+            -0.8112542033195496
+          ],
+          "y_range": [
+            -7.137035846710205,
+            -0.42899560928344727
+          ],
+          "file": "xenium/CTRL_3_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_2",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 76260,
+          "x_range": [
+            -10.679407119750977,
+            -0.7378882765769958
+          ],
+          "y_range": [
+            -7.462892055511475,
+            -0.44294917583465576
+          ],
+          "file": "xenium/CTRL_3_2.bin"
+        },
+        {
+          "sample_rep": "PREG_2_1",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 95986,
+          "x_range": [
+            -10.642502784729004,
+            -0.591905951499939
+          ],
+          "y_range": [
+            -7.3841938972473145,
+            -0.4359093904495239
+          ],
+          "file": "xenium/PREG_2_1.bin"
+        },
+        {
+          "sample_rep": "PREG_2_2",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 83865,
+          "x_range": [
+            -10.628436088562012,
+            -0.7782636284828186
+          ],
+          "y_range": [
+            -7.3420491218566895,
+            -0.4355930685997009
+          ],
+          "file": "xenium/PREG_2_2.bin"
+        },
+        {
+          "sample_rep": "PREG_3_1",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 85162,
+          "x_range": [
+            -10.685636520385742,
+            -0.7847784757614136
+          ],
+          "y_range": [
+            -7.4160356521606445,
+            -0.44099536538124084
+          ],
+          "file": "xenium/PREG_3_1.bin"
+        },
+        {
+          "sample_rep": "PREG_3_2",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 94565,
+          "x_range": [
+            -10.695638656616211,
+            -0.7630816102027893
+          ],
+          "y_range": [
+            -7.437521934509277,
+            -0.47994938492774963
+          ],
+          "file": "xenium/PREG_3_2.bin"
+        }
+      ]
+    }
+  },
+  "binary_layout": {
+    "fields": [
+      {
+        "name": "x",
+        "dtype": "float32",
+        "count": "n"
+      },
+      {
+        "name": "y",
+        "dtype": "float32",
+        "count": "n"
+      },
+      {
+        "name": "subclass_id",
+        "dtype": "uint16",
+        "count": "n"
+      },
+      {
+        "name": "class_id",
+        "dtype": "uint8",
+        "count": "n"
+      },
+      {
+        "name": "subclass_confidence",
+        "dtype": "uint8",
+        "count": "n",
+        "scale": 0.00392156862745098
+      },
+      {
+        "name": "subclass_margin",
+        "dtype": "uint8",
+        "count": "n",
+        "scale": 0.00392156862745098
+      },
+      {
+        "name": "min_cos_dist",
+        "dtype": "uint8",
+        "count": "n",
+        "scale": 0.00392156862745098
+      }
+    ],
+    "bytes_per_cell": 14
+  }
+}

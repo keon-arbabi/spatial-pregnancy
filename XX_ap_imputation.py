@@ -127,10 +127,6 @@ print(f'\n[CV] template matching: MAE={mean_err:.3f} ± '
       f'{cv_df["error"].std():.3f} '
       f'({mean_err / ap_range * 100:.1f}% of AP range)')
 
-#endregion
-
-#region visualizations #########################################################
-
 # predicted vs true AP
 fig, ax = plt.subplots(figsize=(8, 8))
 ax.plot([0, 13], [0, 13], 'k--', lw=1, zorder=1)
@@ -185,23 +181,26 @@ print('figures saved to figures/')
 
 #region inference on query data ################################################
 
-import scanpy as sc_
+import scanpy as sc
 
 datasets_config = {
-    'merfish': 'sample',
-    'slidetags': 'sample',
-    'xenium': 'sample_rep',
+    'merfish':   {'sample_col': 'sample',     's': 1.0},
+    'slidetags': {'sample_col': 'sample',     's': 2.0},
+    'xenium':    {'sample_col': 'sample_rep', 's': 0.5},
 }
+ref_s = 0.5
+
+ref_section_names = ['C57BL6J-638850.46', 'C57BL6J-638850.47',
+                     'C57BL6J-638850.48', 'C57BL6J-638850.49']
+ref_section_aps = section_ap[ref_section_names].sort_values()
 
 all_sample_ap = []
+for name, cfg in datasets_config.items():
+    sample_col = cfg['sample_col']
+    s_query = cfg['s']
 
-for name, sample_col in datasets_config.items():
     query_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
-    if not os.path.exists(query_path):
-        print(f'[{name}] skipping (run 04_cast_project.py first)')
-        continue
-
-    adata = sc_.read_h5ad(query_path)
+    adata = sc.read_h5ad(query_path)
     print(f'[{name}] {adata.shape[0]:,} cells')
 
     # convert CAST-aligned coords to original CCF space
@@ -210,7 +209,6 @@ for name, sample_col in datasets_config.items():
     z_ccf_q = -adata.obs['x_ffd'].values
 
     samples = sorted(adata.obs[sample_col].unique())
-
     for s in samples:
         mask = adata.obs[sample_col] == s
         sec_df = pd.DataFrame({
@@ -235,61 +233,72 @@ for name, sample_col in datasets_config.items():
 
         print(f'[{name}] {s}: AP={pred_ap:.2f} (top: {top3_str})')
 
-    adata.write(query_path)
-    print(f'[{name}] saved to {query_path}')
+    out_path = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
+    # adata.write(out_path)
+    print(f'[{name}] saved to {out_path}')
 
-    # 2D per-sample sections colored by class
-    ncols = min(5, len(samples))
-    nrows = int(np.ceil(len(samples) / ncols))
+    # per-dataset figure: row 0 = 4 ref sections, rows 1-2 = query slices
+    # all colored by class, ordered anterior to posterior
+    sample_aps_q = (adata.obs.groupby(sample_col)['ap_predicted']
+                    .first().sort_values())
+    query_samples_ord = list(sample_aps_q.index)
+    n_query = len(query_samples_ord)
+    half = int(np.ceil(n_query / 2))
+    ncols = max(len(ref_section_names), half)
+    nrows = 3
+
     fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(5 * ncols, 5 * nrows), squeeze=False)
-    fig.suptitle(f'{name}: Predicted AP Coordinate', fontsize=16)
+                             figsize=(4 * ncols, 4 * nrows),
+                             squeeze=False)
+    fig.suptitle(f'{name}: Reference + Query Slices (anterior→posterior)',
+                 fontsize=14)
 
-    for i, s in enumerate(samples):
-        ax = axes[i // ncols, i % ncols]
-        obs_s = adata.obs[adata.obs[sample_col] == s]
-        pred_ap = obs_s['ap_predicted'].iloc[0]
-        if 'class_color' in obs_s.columns:
-            colors = obs_s['class_color']
-        else:
-            colors = 'steelblue'
-        ax.scatter(-obs_s['x_ffd'], -obs_s['y_ffd'],
-                   s=0.5, alpha=0.3, c=colors, rasterized=True)
-        ax.set_title(f'{s} (n={len(obs_s):,})\nAP={pred_ap:.2f}')
-        ax.invert_xaxis()
-        ax.invert_yaxis()
+    # row 0: reference sections
+    for i, sec_name in enumerate(ref_section_aps.index):
+        ax = axes[0, i]
+        sec_cells = cells[cells['brain_section_label'] == sec_name]
+        ax.scatter(sec_cells['z_ccf'], sec_cells['y_ccf'],
+                   s=ref_s, c=sec_cells['class_color'],
+                   alpha=0.5, rasterized=True)
+        ax.set_title(f'ref {sec_name.split(".")[-1]} '
+                     f'(AP={ref_section_aps[sec_name]:.2f})', fontsize=10)
         ax.set_aspect('equal')
+        ax.invert_yaxis()
         ax.axis('off')
 
-    for j in range(len(samples), nrows * ncols):
-        axes[j // ncols, j % ncols].set_visible(False)
+    # rows 1-2: query slices, split anterior half / posterior half
+    for q_idx, samp in enumerate(query_samples_ord):
+        r = 1 if q_idx < half else 2
+        c = q_idx if q_idx < half else q_idx - half
+        ax = axes[r, c]
+        sm = (adata.obs[sample_col] == samp).values
+        cls = adata.obs.loc[sm, 'class'].values
+        colors = [class_colors.get(c_, '#d3d3d3') for c_ in cls]
+        ax.scatter(z_ccf_q[sm], y_ccf_q[sm],
+                   s=s_query, c=colors, alpha=0.5, rasterized=True)
+        ap_val = sample_aps_q[samp]
+        ax.set_title(f'{samp} (AP={ap_val:.2f})', fontsize=10)
+        ax.set_aspect('equal')
+        ax.invert_yaxis()
+        ax.axis('off')
+
+    # hide unused axes
+    n_row1, n_row2 = half, n_query - half
+    for c in range(ncols):
+        if c >= len(ref_section_names):
+            axes[0, c].set_visible(False)
+        if c >= n_row1:
+            axes[1, c].set_visible(False)
+        if c >= n_row2:
+            axes[2, c].set_visible(False)
 
     plt.tight_layout()
-    fig.savefig(f'{fig_dir}/ap_imputation_{name}_sections.png', dpi=200)
+    fig.savefig(f'{fig_dir}/ap_imputation_{name}.png',
+                dpi=200, bbox_inches='tight')
     plt.close()
 
-# summary bar chart across all datasets
 if all_sample_ap:
     ap_df = pd.DataFrame(all_sample_ap).sort_values('ap_predicted')
-
-    fig, ax = plt.subplots(figsize=(12, max(4, len(ap_df) * 0.4)))
-    dataset_colors = {
-        'merfish': 'steelblue', 'slidetags': 'coral', 'xenium': 'seagreen'}
-    ax.barh(range(len(ap_df)), ap_df['ap_predicted'],
-            color=[dataset_colors.get(d, '#333') for d in ap_df['dataset']])
-    ax.set_yticks(range(len(ap_df)))
-    ax.set_yticklabels(
-        [f'{r["dataset"]}: {r["sample"]}' for _, r in ap_df.iterrows()],
-        fontsize=8)
-    ax.set_xlabel('Predicted AP')
-    ax.set_title('Predicted AP Across Query Datasets')
-    for d, c in dataset_colors.items():
-        if d in ap_df['dataset'].values:
-            ax.barh([], [], color=c, label=d)
-    ax.legend(loc='lower right')
-    plt.tight_layout()
-    fig.savefig(f'{fig_dir}/ap_imputation_all_samples.png', dpi=200)
-    plt.close()
     print(f'\n[summary] {len(ap_df)} samples across '
           f'{ap_df["dataset"].nunique()} datasets')
 

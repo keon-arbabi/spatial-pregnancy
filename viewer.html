@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>spatial-pregnancy viewer</title>
+<style>
+:root {
+    --bg: #111;
+    --panel-bg: #1a1a1a;
+    --side-bg: #181818;
+    --border: #2a2a2a;
+    --text: #e5e5e5;
+    --muted: #888;
+    --accent: #5aa3ff;
+}
+* { box-sizing: border-box; }
+html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: var(--bg); color: var(--text);
+    font: 12px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+}
+body { display: flex; }
+#sidebar {
+    width: 300px; flex: 0 0 300px;
+    background: var(--side-bg);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 14px;
+}
+#sidebar h1 { font-size: 14px; margin: 0 0 10px; }
+#sidebar h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); margin: 16px 0 6px;
+}
+#stage {
+    flex: 1; position: relative; overflow: hidden;
+    background: var(--bg);
+    cursor: grab;
+    user-select: none; -webkit-user-select: none;
+}
+#stage.dragging { cursor: grabbing; }
+#canvas {
+    position: absolute; left: 0; top: 0;
+    pointer-events: none;
+    z-index: 1;
+}
+#world {
+    position: absolute; left: 0; top: 0;
+    width: 100%; min-height: 100%;
+    transform-origin: 0 0;
+    will-change: transform;
+    z-index: 2;
+}
+#zoom-info {
+    position: absolute; right: 10px; bottom: 10px;
+    font-size: 11px; color: var(--muted);
+    background: rgba(0,0,0,0.6);
+    padding: 3px 8px; border-radius: 3px;
+    pointer-events: none; z-index: 5;
+}
+#help {
+    position: absolute; left: 10px; bottom: 10px;
+    font-size: 10px; color: var(--muted);
+    background: rgba(0,0,0,0.6);
+    padding: 3px 8px; border-radius: 3px;
+    pointer-events: none; z-index: 5;
+}
+
+/* sidebar widgets */
+.row { margin-bottom: 6px; }
+label { display: block; cursor: pointer; user-select: none; }
+.radio-row label, .check-row label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0;
+}
+.radio-row input, .check-row input { margin: 0; }
+input[type="search"], input[type="text"] {
+    width: 100%; padding: 5px 7px; border: 1px solid var(--border);
+    background: #111; color: var(--text); border-radius: 3px;
+    font: inherit;
+}
+input[type="range"] { width: 100%; }
+button {
+    background: #2a2a2a; color: var(--text); border: 1px solid var(--border);
+    padding: 3px 8px; border-radius: 3px; cursor: pointer; font: inherit;
+}
+button:hover { background: #333; }
+.btn-row { display: flex; gap: 4px; }
+
+.list {
+    max-height: 240px; overflow-y: auto;
+    border: 1px solid var(--border); padding: 4px 6px;
+    background: #111; border-radius: 3px;
+}
+.list label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 1px 0; font-size: 11px;
+}
+.swatch {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; flex: 0 0 10px;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.label-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* panels */
+.panel-section {
+    padding: 12px;
+}
+.section-header {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 8px;
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+}
+.section-header b {
+    color: var(--text); font-size: 13px; text-transform: none;
+    letter-spacing: 0; font-weight: 600;
+}
+.panel-grid {
+    display: grid; gap: 10px;
+}
+.panel {
+    background: transparent; border: 1px solid var(--border);
+    border-radius: 4px;
+    position: relative;
+    pointer-events: auto;
+}
+.panel .label {
+    position: absolute; left: 6px; top: 5px;
+    font-size: 12px; font-weight: 600; color: #fff;
+    background: rgba(0,0,0,0.65);
+    padding: 2px 7px; border-radius: 3px;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    letter-spacing: 0.02em;
+}
+.panel .label .cond {
+    display: inline-block;
+    font-size: 9px; font-weight: 700;
+    margin-right: 6px; padding: 0 4px;
+    border-radius: 2px;
+    vertical-align: 1px;
+    letter-spacing: 0.04em;
+}
+.cond-CTRL     { background: #4a8de0; color: #fff; }
+.cond-PREG     { background: #d96b6b; color: #fff; }
+.cond-POSTPART { background: #cf9039; color: #fff; }
+.cond-REF      { background: #555;    color: #fff; }
+.panel .count {
+    position: absolute; right: 6px; top: 5px;
+    font-size: 10px; color: #ddd;
+    background: rgba(0,0,0,0.55);
+    padding: 1px 5px; border-radius: 3px;
+    pointer-events: none;
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+.note { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+    <h1>spatial-pregnancy</h1>
+    <div class="note" id="status">loading manifest…</div>
+
+    <h2>dataset</h2>
+    <div id="dataset-radio" class="radio-row"></div>
+
+    <h2>color by</h2>
+    <div id="colormode-radio" class="radio-row">
+        <label><input type="radio" name="cmode" value="class" checked>class</label>
+        <label><input type="radio" name="cmode" value="subclass">subclass</label>
+    </div>
+
+    <h2>point size</h2>
+    <input id="pointsize" type="range" min="0.5" max="6" step="0.1" value="1.5">
+
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+        <span>class filter</span>
+        <span class="btn-row">
+            <button data-act="all-class">all</button>
+            <button data-act="none-class">none</button>
+        </span>
+    </h2>
+    <div id="class-list" class="list"></div>
+
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+        <span>subclass filter</span>
+        <span class="btn-row">
+            <button data-act="all-sub">all</button>
+            <button data-act="none-sub">none</button>
+        </span>
+    </h2>
+    <input id="sub-search" type="search" placeholder="search subclass…">
+    <div id="subclass-list" class="list" style="margin-top:4px;max-height:300px"></div>
+
+    <hr>
+    <div class="note">
+        coords: <code>x_ffd</code>/<code>y_ffd</code> for query,
+        <code>x_raw</code>/<code>y_raw</code> for ref.
+        cells filtered out are hidden in both ref and query panels.
+    </div>
+</aside>
+
+<main id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="world">
+        <div class="panel-section">
+            <div class="section-header">
+                <b>reference</b>
+                <span>Zeng MERFISH C57BL6J-638850 sections 46-49</span>
+            </div>
+            <div id="ref-grid" class="panel-grid"></div>
+        </div>
+        <div class="panel-section">
+            <div class="section-header">
+                <b id="qhead">query</b>
+                <span id="qsub"></span>
+            </div>
+            <div id="query-grid" class="panel-grid"></div>
+        </div>
+    </div>
+    <div id="zoom-info">100%</div>
+    <div id="help">scroll = zoom · drag = pan · double-click = reset</div>
+</main>
+
+<script>
+//----------------------------------------------------------------------------
+// state
+//----------------------------------------------------------------------------
+const state = {
+    manifest: null,
+    dataset: 'merfish',
+    colorMode: 'class',
+    pointSize: 1.5,
+    panels: [],            // {el, slice, vp:{x,y,w,h}}
+    slices: new Map(),     // file -> {n, posBuf, classBuf, subBuf, xRange, yRange}
+    classVisible: null,    // Uint8Array
+    subVisible: null,      // Uint8Array
+    classPaletteTex: null,
+    subPaletteTex: null,
+    classVisTex: null,
+    subVisTex: null,
+    program: null,
+    canvas: null,
+    gl: null,
+    locs: null,
+    // pan/zoom
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    minZoom: 0.3,
+    maxZoom: 25,
+    dragging: false,
+    dragLastX: 0,
+    dragLastY: 0,
+};
+
+//----------------------------------------------------------------------------
+// boot
+//----------------------------------------------------------------------------
+async function boot() {
+    state.canvas = document.getElementById('canvas');
+    const gl = state.canvas.getContext('webgl2', {antialias: false, premultipliedAlpha: false});
+    if (!gl) { setStatus('webgl2 not available'); return; }
+    state.gl = gl;
+
+    setStatus('fetching manifest…');
+    const r = await fetch('viewer_data/manifest.json');
+    if (!r.ok) { setStatus('failed to load viewer_data/manifest.json'); return; }
+    state.manifest = await r.json();
+    setStatus(`manifest v${state.manifest.version} loaded`);
+
+    initPalettes();
+    initVisibility();
+    initShader();
+    buildSidebar();
+    initInteraction();
+
+    // initial dataset
+    await selectDataset(state.dataset);
+
+    window.addEventListener('resize', () => { layout(); render(); });
+}
+
+function setStatus(s) { document.getElementById('status').textContent = s; }
+
+//----------------------------------------------------------------------------
+// palettes & visibility textures
+//----------------------------------------------------------------------------
+function hexToRgb(hex) {
+    let h = hex.replace('#','');
+    if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+    return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+
+function buildPaletteTexture(palette) {
+    const gl = state.gl;
+    const n = palette.length;
+    const data = new Uint8Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        const rgb = hexToRgb(palette[i].color);
+        data[i*3] = rgb[0]; data[i*3+1] = rgb[1]; data[i*3+2] = rgb[2];
+    }
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, n, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
+    return tex;
+}
+
+function buildVisibilityTexture(n) {
+    const gl = state.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    const data = new Uint8Array(n).fill(255);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, n, 1, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+    return tex;
+}
+
+function uploadVisibility(tex, arr) {
+    const gl = state.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, arr.length, 1, gl.RED, gl.UNSIGNED_BYTE, arr);
+}
+
+function initPalettes() {
+    state.classPaletteTex = buildPaletteTexture(state.manifest.class_palette);
+    state.subPaletteTex   = buildPaletteTexture(state.manifest.subclass_palette);
+}
+
+function initVisibility() {
+    const cN = state.manifest.class_palette.length;
+    const sN = state.manifest.subclass_palette.length;
+    state.classVisible = new Uint8Array(cN).fill(255);
+    state.subVisible   = new Uint8Array(sN).fill(255);
+    // index 0 is "Unlabelled" — keep visible by default but distinguishable
+    state.classVisTex = buildVisibilityTexture(cN);
+    state.subVisTex   = buildVisibilityTexture(sN);
+}
+
+//----------------------------------------------------------------------------
+// shaders
+//----------------------------------------------------------------------------
+const VS = `#version 300 es
+in vec2  a_pos;
+in float a_classId;
+in float a_subId;
+uniform vec4 u_xform;        // (sx, sy, tx, ty) maps world -> NDC
+uniform float u_pointSize;
+uniform sampler2D u_palette;
+uniform sampler2D u_classVis;
+uniform sampler2D u_subVis;
+uniform float u_classN;
+uniform float u_subN;
+uniform float u_paletteN;
+uniform int   u_useSub;       // 0=class palette, 1=subclass palette
+out vec3 v_color;
+
+void main() {
+    float idx     = (u_useSub == 1) ? a_subId : a_classId;
+    float u       = (idx + 0.5) / u_paletteN;
+    v_color       = texture(u_palette, vec2(u, 0.5)).rgb;
+
+    float visC = texture(u_classVis, vec2((a_classId + 0.5) / u_classN, 0.5)).r;
+    float visS = texture(u_subVis,   vec2((a_subId   + 0.5) / u_subN,   0.5)).r;
+    float visible = visC * visS;
+
+    vec2 p = a_pos * u_xform.xy + u_xform.zw;
+    if (visible < 0.5) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    } else {
+        gl_Position = vec4(p, 0.0, 1.0);
+    }
+    gl_PointSize = u_pointSize;
+}`;
+
+const FS = `#version 300 es
+precision mediump float;
+in vec3 v_color;
+out vec4 outColor;
+void main() {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    if (dot(d, d) > 0.25) discard;
+    outColor = vec4(v_color, 1.0);
+}`;
+
+function compile(type, src) {
+    const gl = state.gl;
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(sh));
+        throw new Error('shader compile failed');
+    }
+    return sh;
+}
+
+function initShader() {
+    const gl = state.gl;
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(prog));
+        throw new Error('link failed');
+    }
+    state.program = prog;
+    state.locs = {
+        a_pos:       gl.getAttribLocation(prog, 'a_pos'),
+        a_classId:   gl.getAttribLocation(prog, 'a_classId'),
+        a_subId:     gl.getAttribLocation(prog, 'a_subId'),
+        u_xform:     gl.getUniformLocation(prog, 'u_xform'),
+        u_pointSize: gl.getUniformLocation(prog, 'u_pointSize'),
+        u_palette:   gl.getUniformLocation(prog, 'u_palette'),
+        u_classVis:  gl.getUniformLocation(prog, 'u_classVis'),
+        u_subVis:    gl.getUniformLocation(prog, 'u_subVis'),
+        u_classN:    gl.getUniformLocation(prog, 'u_classN'),
+        u_subN:      gl.getUniformLocation(prog, 'u_subN'),
+        u_paletteN:  gl.getUniformLocation(prog, 'u_paletteN'),
+        u_useSub:    gl.getUniformLocation(prog, 'u_useSub'),
+    };
+}
+
+//----------------------------------------------------------------------------
+// slice loading (binary -> GPU buffers)
+//----------------------------------------------------------------------------
+async function loadSlice(entry) {
+    if (state.slices.has(entry.file)) return state.slices.get(entry.file);
+    const gl = state.gl;
+    const r = await fetch('viewer_data/' + entry.file);
+    if (!r.ok) throw new Error('fetch failed: ' + entry.file);
+    const buf = new Uint8Array(await r.arrayBuffer());
+    const n = entry.n_cells;
+
+    // unpack SoA layout
+    const xs  = new Float32Array(buf.buffer, buf.byteOffset + 0,  n);
+    const ys  = new Float32Array(buf.buffer, buf.byteOffset + 4*n, n);
+    const sub = new Uint16Array(buf.buffer, buf.byteOffset + 8*n,  n);
+    const cls = new Uint8Array (buf.buffer, buf.byteOffset + 10*n, n);
+
+    // interleaved positions for vec2 attribute
+    const pos = new Float32Array(2 * n);
+    for (let i = 0; i < n; i++) { pos[2*i] = xs[i]; pos[2*i+1] = ys[i]; }
+
+    const posBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+
+    const classBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, classBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cls, gl.STATIC_DRAW);
+
+    const subBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, subBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, sub, gl.STATIC_DRAW);
+
+    const slice = {
+        n,
+        posBuf, classBuf, subBuf,
+        xRange: entry.x_range,
+        yRange: entry.y_range,
+    };
+    state.slices.set(entry.file, slice);
+    return slice;
+}
+
+//----------------------------------------------------------------------------
+// dataset selection (rebuild panel grid)
+//----------------------------------------------------------------------------
+async function selectDataset(name) {
+    state.dataset = name;
+    document.querySelectorAll('input[name="ds"]').forEach(r => {
+        r.checked = (r.value === name);
+    });
+    document.getElementById('qhead').textContent = `query — ${name}`;
+    const ds = state.manifest.datasets[name];
+    document.getElementById('qsub').textContent =
+        `${ds.samples.length} sections, ${ds.n_cells.toLocaleString()} cells`;
+
+    // build refs panels (always 4)
+    const refGrid = document.getElementById('ref-grid');
+    refGrid.innerHTML = '';
+    refGrid.style.gridTemplateColumns = `repeat(4, 1fr)`;
+    const refPanels = [];
+    for (const s of state.manifest.reference.sections) {
+        const el = makePanel('REF', `section ${s.short}`, s.n_cells);
+        refGrid.appendChild(el);
+        refPanels.push({el, entry: s});
+    }
+
+    // build query panels
+    const qGrid = document.getElementById('query-grid');
+    qGrid.innerHTML = '';
+    const ncols = Math.min(5, ds.samples.length);
+    qGrid.style.gridTemplateColumns = `repeat(${ncols}, 1fr)`;
+    const queryPanels = [];
+    for (const s of ds.samples) {
+        const el = makePanel(s.condition, s.sample_rep, s.n_cells);
+        qGrid.appendChild(el);
+        queryPanels.push({el, entry: s});
+    }
+
+    state.panels = [...refPanels, ...queryPanels];
+
+    // load all binaries in parallel (~22MB total)
+    setStatus(`loading ${state.panels.length} slices…`);
+    await Promise.all(state.panels.map(p => loadSlice(p.entry)));
+    setStatus(`${state.panels.length} slices loaded · ` +
+        `${(state.panels.reduce((a,p)=>a+p.entry.n_cells,0)).toLocaleString()} cells`);
+
+    // wait for the browser to lay out the new panels before measuring them
+    await new Promise(r => requestAnimationFrame(r));
+    state.zoom = 1; state.panX = 0; state.panY = 0;
+    layout();
+    render();
+}
+
+function makePanel(condition, title, count) {
+    const el = document.createElement('div');
+    el.className = 'panel';
+    el.innerHTML = `
+        <div class="label">
+            <span class="cond cond-${condition}">${condition}</span>${title}
+        </div>
+        <div class="count">${count.toLocaleString()}</div>
+    `;
+    // sized via grid; aspect maintained at panel level
+    el.style.aspectRatio = '4 / 3';
+    return el;
+}
+
+//----------------------------------------------------------------------------
+// layout: size the canvas to the visible stage area only.
+// per-panel viewports are recomputed at draw time (they depend on transform).
+//----------------------------------------------------------------------------
+function layout() {
+    const stage = document.getElementById('stage');
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const sw = stage.clientWidth;
+    const sh = stage.clientHeight;
+    state.canvas.style.width  = sw + 'px';
+    state.canvas.style.height = sh + 'px';
+    state.canvas.width  = Math.floor(sw * dpr);
+    state.canvas.height = Math.floor(sh * dpr);
+    state.dpr = dpr;
+    applyWorldTransform();
+}
+
+function applyWorldTransform() {
+    const w = document.getElementById('world');
+    w.style.transform =
+        `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+    document.getElementById('zoom-info').textContent =
+        Math.round(state.zoom * 100) + '%';
+}
+
+function resetView() {
+    state.zoom = 1;
+    state.panX = 0;
+    state.panY = 0;
+    applyWorldTransform();
+    render();
+}
+
+function computeViewports() {
+    const stage = document.getElementById('stage');
+    const stageRect = stage.getBoundingClientRect();
+    const dpr = state.dpr || 1;
+    const cw = state.canvas.width;
+    const ch = state.canvas.height;
+    for (const p of state.panels) {
+        const r = p.el.getBoundingClientRect();
+        const left = (r.left - stageRect.left) * dpr;
+        const top  = (r.top  - stageRect.top)  * dpr;
+        const w = r.width  * dpr;
+        const h = r.height * dpr;
+        // GL viewport origin is bottom-left
+        p.vp = {
+            x: Math.round(left),
+            y: Math.round(ch - top - h),
+            w: Math.round(w),
+            h: Math.round(h),
+            // for cull
+            left, top, right: left + w, bottom: top + h,
+        };
+    }
+}
+
+//----------------------------------------------------------------------------
+// render
+//----------------------------------------------------------------------------
+function render() {
+    const gl = state.gl;
+    if (!state.program) return;
+    computeViewports();
+
+    gl.viewport(0, 0, state.canvas.width, state.canvas.height);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.SCISSOR_TEST);
+
+    gl.useProgram(state.program);
+
+    // bind palette + visibility textures (per color mode)
+    const useSub = state.colorMode === 'subclass' ? 1 : 0;
+    const palTex = useSub ? state.subPaletteTex : state.classPaletteTex;
+    const palN   = useSub ? state.manifest.subclass_palette.length
+                          : state.manifest.class_palette.length;
+
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, palTex);
+    gl.uniform1i(state.locs.u_palette, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, state.classVisTex);
+    gl.uniform1i(state.locs.u_classVis, 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, state.subVisTex);
+    gl.uniform1i(state.locs.u_subVis, 2);
+
+    gl.uniform1f(state.locs.u_paletteN, palN);
+    gl.uniform1f(state.locs.u_classN, state.manifest.class_palette.length);
+    gl.uniform1f(state.locs.u_subN,   state.manifest.subclass_palette.length);
+    gl.uniform1i(state.locs.u_useSub, useSub);
+    // gently scale point size with zoom (sqrt) so things stay legible
+    const zoomBoost = Math.sqrt(Math.max(state.zoom, 0.5));
+    gl.uniform1f(state.locs.u_pointSize,
+        state.pointSize * (state.dpr || 1) * zoomBoost);
+
+    const cw = state.canvas.width;
+    const ch = state.canvas.height;
+
+    for (const p of state.panels) {
+        if (!p.vp) continue;
+        const slice = state.slices.get(p.entry.file);
+        if (!slice) continue;
+
+        // cull panels fully outside the visible canvas
+        if (p.vp.right <= 0 || p.vp.left >= cw ||
+            p.vp.bottom <= 0 || p.vp.top >= ch) continue;
+
+        // viewport stays at the panel's full rect (may extend beyond canvas)
+        // so vertices project correctly. scissor is clamped to canvas bounds.
+        const scX = Math.max(0, p.vp.x);
+        const scY = Math.max(0, p.vp.y);
+        const scW = Math.min(p.vp.x + p.vp.w, cw) - scX;
+        const scH = Math.min(p.vp.y + p.vp.h, ch) - scY;
+        if (scW <= 0 || scH <= 0) continue;
+        gl.viewport(p.vp.x, p.vp.y, p.vp.w, p.vp.h);
+        gl.scissor(scX, scY, scW, scH);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        // world->NDC: fit slice's xRange/yRange into [-1,1] preserving aspect
+        const [x0, x1] = slice.xRange;
+        const [y0, y1] = slice.yRange;
+        const wx = x1 - x0, wy = y1 - y0;
+        const aspect = p.vp.w / p.vp.h;
+        const dataAspect = wx / wy;
+        let sx, sy, tx, ty;
+        const pad = 0.92;
+        if (dataAspect > aspect) {
+            sx = (2 / wx) * pad;
+            sy = sx * (p.vp.w / p.vp.h);
+        } else {
+            sy = (2 / wy) * pad;
+            sx = sy * (p.vp.h / p.vp.w);
+        }
+        const cx = (x0 + x1) / 2;
+        const cy = (y0 + y1) / 2;
+        tx = -cx * sx;
+        ty = -cy * sy;
+        gl.uniform4f(state.locs.u_xform, sx, sy, tx, ty);
+
+        // bind attributes
+        gl.bindBuffer(gl.ARRAY_BUFFER, slice.posBuf);
+        gl.enableVertexAttribArray(state.locs.a_pos);
+        gl.vertexAttribPointer(state.locs.a_pos, 2, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, slice.classBuf);
+        gl.enableVertexAttribArray(state.locs.a_classId);
+        gl.vertexAttribPointer(state.locs.a_classId, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, slice.subBuf);
+        gl.enableVertexAttribArray(state.locs.a_subId);
+        gl.vertexAttribPointer(state.locs.a_subId, 1, gl.UNSIGNED_SHORT, false, 0, 0);
+
+        gl.drawArrays(gl.POINTS, 0, slice.n);
+    }
+}
+
+//----------------------------------------------------------------------------
+// pan + zoom interaction on the stage
+//----------------------------------------------------------------------------
+function initInteraction() {
+    const stage = document.getElementById('stage');
+
+    stage.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect = stage.getBoundingClientRect();
+        // mouse position in stage-local coords
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        // current mouse position in world coords (pre-zoom)
+        const wx = (mx - state.panX) / state.zoom;
+        const wy = (my - state.panY) / state.zoom;
+        // zoom factor: smaller delta = smoother. trackpads emit small deltas.
+        const k = Math.exp(-e.deltaY * 0.0015);
+        const newZoom = Math.min(state.maxZoom,
+                         Math.max(state.minZoom, state.zoom * k));
+        // keep the world point under the mouse fixed
+        state.zoom = newZoom;
+        state.panX = mx - wx * state.zoom;
+        state.panY = my - wy * state.zoom;
+        applyWorldTransform();
+        render();
+    }, {passive: false});
+
+    stage.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        state.dragging = true;
+        state.dragLastX = e.clientX;
+        state.dragLastY = e.clientY;
+        stage.classList.add('dragging');
+    });
+    window.addEventListener('mousemove', e => {
+        if (!state.dragging) return;
+        const dx = e.clientX - state.dragLastX;
+        const dy = e.clientY - state.dragLastY;
+        state.dragLastX = e.clientX;
+        state.dragLastY = e.clientY;
+        state.panX += dx;
+        state.panY += dy;
+        applyWorldTransform();
+        render();
+    });
+    window.addEventListener('mouseup', () => {
+        if (!state.dragging) return;
+        state.dragging = false;
+        stage.classList.remove('dragging');
+    });
+
+    stage.addEventListener('dblclick', e => {
+        e.preventDefault();
+        resetView();
+    });
+}
+
+//----------------------------------------------------------------------------
+// sidebar
+//----------------------------------------------------------------------------
+function buildSidebar() {
+    // dataset radios
+    const dsRow = document.getElementById('dataset-radio');
+    dsRow.innerHTML = '';
+    for (const name of Object.keys(state.manifest.datasets)) {
+        const lbl = document.createElement('label');
+        const ds  = state.manifest.datasets[name];
+        lbl.innerHTML = `<input type="radio" name="ds" value="${name}"
+            ${name === state.dataset ? 'checked' : ''}>${name}
+            <span style="color:var(--muted);font-size:10px">
+                (${ds.samples.length}, ${ds.n_cells.toLocaleString()})</span>`;
+        lbl.querySelector('input').addEventListener('change', () => selectDataset(name));
+        dsRow.appendChild(lbl);
+    }
+
+    // color mode
+    document.querySelectorAll('input[name="cmode"]').forEach(r => {
+        r.addEventListener('change', () => {
+            state.colorMode = r.value;
+            render();
+        });
+    });
+
+    // point size
+    const ps = document.getElementById('pointsize');
+    ps.addEventListener('input', () => {
+        state.pointSize = parseFloat(ps.value);
+        render();
+    });
+
+    // class & subclass lists
+    buildList('class-list', state.manifest.class_palette, 'class');
+    buildList('subclass-list', state.manifest.subclass_palette, 'sub');
+
+    // search subclass
+    document.getElementById('sub-search').addEventListener('input', e => {
+        const q = e.target.value.toLowerCase();
+        document.querySelectorAll('#subclass-list label').forEach(l => {
+            const name = l.dataset.name.toLowerCase();
+            l.style.display = name.includes(q) ? '' : 'none';
+        });
+    });
+
+    // bulk buttons
+    document.querySelectorAll('button[data-act]').forEach(b => {
+        b.addEventListener('click', () => {
+            const act = b.dataset.act;
+            if (act === 'all-class')  setAll('class', true);
+            if (act === 'none-class') setAll('class', false);
+            if (act === 'all-sub')    setAll('sub', true);
+            if (act === 'none-sub')   setAll('sub', false);
+        });
+    });
+}
+
+function buildList(domId, palette, kind) {
+    const el = document.getElementById(domId);
+    el.innerHTML = '';
+    const visArr = (kind === 'class') ? state.classVisible : state.subVisible;
+    palette.forEach((p, i) => {
+        if (p.name === 'Unlabelled' && i === 0) return; // hide sentinel
+        const lbl = document.createElement('label');
+        lbl.dataset.name = p.name;
+        lbl.innerHTML = `<input type="checkbox" data-i="${i}" ${visArr[i] ? 'checked' : ''}>
+            <span class="swatch" style="background:${p.color}"></span>
+            <span class="label-name" title="${p.name}">${p.name}</span>`;
+        lbl.querySelector('input').addEventListener('change', e => {
+            const idx = parseInt(e.target.dataset.i, 10);
+            visArr[idx] = e.target.checked ? 255 : 0;
+            const tex = (kind === 'class') ? state.classVisTex : state.subVisTex;
+            uploadVisibility(tex, visArr);
+            render();
+        });
+        el.appendChild(lbl);
+    });
+}
+
+function setAll(kind, on) {
+    const visArr = (kind === 'class') ? state.classVisible : state.subVisible;
+    const tex    = (kind === 'class') ? state.classVisTex   : state.subVisTex;
+    const domId  = (kind === 'class') ? 'class-list'        : 'subclass-list';
+    visArr.fill(on ? 255 : 0);
+    visArr[0] = 255; // keep Unlabelled bit visible (sentinel)
+    document.querySelectorAll(`#${domId} input[type=checkbox]`).forEach(c => {
+        c.checked = on;
+    });
+    uploadVisibility(tex, visArr);
+    render();
+}
+
+boot().catch(e => { console.error(e); setStatus('error: ' + e.message); });
+</script>
+</body>
+</html>
