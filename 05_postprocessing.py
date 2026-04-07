@@ -4,18 +4,23 @@ import numpy as np
 import scanpy as sc
 
 working_dir = '/home/karbabi/spatial-pregnancy'
-datasets = ['merfish', 'slidetags', 'xenium']
+datasets = {
+    'merfish': 'sample',
+    'slidetags': 'sample',
+    'xenium': 'sample_rep',
+}
 thr = dict(
     subclass_confidence=0.6,
     subclass_margin=0.2,
     min_cos_dist=0.3,
     n_spatial_candidates=1,
 )
+min_cells_per_sample = 10
 
 #endregion
 #region filter ##################################################################
 
-for name in datasets:
+for name, sample_col in datasets.items():
     in_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
     out_path = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
     adata = sc.read_h5ad(in_path)
@@ -36,6 +41,18 @@ for name in datasets:
     for k, m in masks.items():
         n_drop = (~m).sum()
         print(f'  drop {k}: {n_drop:,} ({n_drop/n_total*100:.1f}%)')
+
+    # drop cells of subclasses with < min_cells_per_sample in their sample
+    counts = obs.groupby([sample_col, 'subclass'], observed=True).size()
+    rare = counts[counts < min_cells_per_sample]
+    rare_pairs = set(rare.index)
+    rare_mask = np.array([
+        (s, c) not in rare_pairs
+        for s, c in zip(obs[sample_col].values, obs['subclass'].values)])
+    n_rare_drop = (~rare_mask).sum()
+    print(f'  drop rare (<{min_cells_per_sample}/sample): '
+          f'{n_rare_drop:,} ({n_rare_drop/n_total*100:.1f}%)')
+    masks['rare_subclass'] = rare_mask
 
     keep = np.logical_and.reduce(list(masks.values()))
     n_keep = keep.sum()

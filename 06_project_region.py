@@ -18,6 +18,9 @@ os.makedirs(fig_dir, exist_ok=True)
 PRIOR_KEY = 'subclass' # 'class' (~24) or 'subclass' (~300)
 K_LOCAL = 20           # k-NN among query cells for the local composition window
 MIN_REF_CELLS = 3000   # drop divisions with too little support in this AP slice
+ALPHA = 0.5            # weight on the Bayesian division-frequency prior;
+                       # 0 = no prior, larger = pulls borderline cells toward
+                       # the more common divisions (STR, Iso)
 
 #endregion
 
@@ -89,9 +92,14 @@ def transfer_division(adata, ref, divisions,
     ref_sub = ref.obs[prior_key].astype(str).values
     for d, s in zip(ref_div, ref_sub):
         fingerprints[div_to_idx[d], sub_to_idx[s]] += 1.0
+    div_totals = fingerprints.sum(axis=1)              # cells per division
     fingerprints += 1.0
     fingerprints /= fingerprints.sum(axis=1, keepdims=True)
-    log_fp = np.log(fingerprints).astype(np.float32)  # (n_div, n_sub)
+    log_fp = np.log(fingerprints).astype(np.float32)   # (n_div, n_sub)
+
+    # division frequency prior P(div) for the Bayesian update
+    div_freq = div_totals / div_totals.sum()
+    log_div_prior = np.log(div_freq + 1e-12).astype(np.float32)  # (n_div,)
 
     # 2. per query cell -- local k-NN subclass histograms, score divisions
     query_sub_idx = np.array(
@@ -114,10 +122,13 @@ def transfer_division(adata, ref, divisions,
         cols = nbr_sub.ravel()
         np.add.at(H, (rows, cols), 1.0)
 
-        # log-likelihood under each division's fingerprint
-        log_lik = H @ log_fp.T  # (m, n_div)
-        log_lik -= log_lik.max(axis=1, keepdims=True)
-        Pi = np.exp(log_lik)
+        # log-posterior: average per-neighbor log-likelihood + Bayesian
+        # division-frequency prior. dividing by k brings the likelihood
+        # onto the same scale as the prior so ALPHA actually has bite.
+        avg_log_lik = (H @ log_fp.T) / k                    # (m, n_div)
+        log_post = avg_log_lik + ALPHA * log_div_prior[None, :]
+        log_post -= log_post.max(axis=1, keepdims=True)
+        Pi = np.exp(log_post)
         Pi /= Pi.sum(axis=1, keepdims=True)
         P[mask] = Pi
 

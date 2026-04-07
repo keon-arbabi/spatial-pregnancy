@@ -718,408 +718,22 @@
     ]
   },
   "datasets": {
-    "merfish": {
-      "n_cells": 748853,
-      "x_range": [
-        -10.783557891845703,
-        -0.6158233284950256
-      ],
-      "y_range": [
-        -7.4362711906433105,
-        -0.25588133931159973
-      ],
-      "samples": [
-        {
-          "sample_rep": "CTRL_1",
-          "sample": "CTRL_1",
-          "condition": "CTRL",
-          "n_cells": 75110,
-          "x_range": [
-            -10.709811210632324,
-            -0.9368594884872437
-          ],
-          "y_range": [
-            -7.118929862976074,
-            -0.5161904692649841
-          ],
-          "file": "merfish/CTRL_1.bin"
-        },
-        {
-          "sample_rep": "CTRL_2",
-          "sample": "CTRL_2",
-          "condition": "CTRL",
-          "n_cells": 85346,
-          "x_range": [
-            -10.599357604980469,
-            -0.6158233284950256
-          ],
-          "y_range": [
-            -7.421741008758545,
-            -0.48249292373657227
-          ],
-          "file": "merfish/CTRL_2.bin"
-        },
-        {
-          "sample_rep": "CTRL_3",
-          "sample": "CTRL_3",
-          "condition": "CTRL",
-          "n_cells": 78222,
-          "x_range": [
-            -10.514966011047363,
-            -0.7232633233070374
-          ],
-          "y_range": [
-            -7.3726887702941895,
-            -0.5328355431556702
-          ],
-          "file": "merfish/CTRL_3.bin"
-        },
-        {
-          "sample_rep": "POSTPART_1",
-          "sample": "POSTPART_1",
-          "condition": "POSTPART",
-          "n_cells": 59788,
-          "x_range": [
-            -10.783557891845703,
-            -0.819068968296051
-          ],
-          "y_range": [
-            -7.007890224456787,
-            -0.4705333113670349
-          ],
-          "file": "merfish/POSTPART_1.bin"
-        },
-        {
-          "sample_rep": "POSTPART_2",
-          "sample": "POSTPART_2",
-          "condition": "POSTPART",
-          "n_cells": 116984,
-          "x_range": [
-            -10.53069019317627,
-            -0.7978501915931702
-          ],
-          "y_range": [
-            -7.395939350128174,
-            -0.25588133931159973
-          ],
-          "file": "merfish/POSTPART_2.bin"
-        },
-        {
-          "sample_rep": "POSTPART_3",
-          "sample": "POSTPART_3",
-          "condition": "POSTPART",
-          "n_cells": 82596,
-          "x_range": [
-            -10.699673652648926,
-            -1.1019830703735352
-          ],
-          "y_range": [
-            -7.109050273895264,
-            -0.29605913162231445
-          ],
-          "file": "merfish/POSTPART_3.bin"
-        },
-        {
-          "sample_rep": "PREG_1",
-          "sample": "PREG_1",
-          "condition": "PREG",
-          "n_cells": 84237,
-          "x_range": [
-            -10.629949569702148,
-            -0.7623506784439087
-          ],
-          "y_range": [
-            -7.408932209014893,
-            -0.5200963020324707
-          ],
-          "file": "merfish/PREG_1.bin"
-        },
-        {
-          "sample_rep": "PREG_2",
-          "sample": "PREG_2",
-          "condition": "PREG",
-          "n_cells": 75295,
-          "x_range": [
-            -10.525116920471191,
-            -1.158291220664978
-          ],
-          "y_range": [
-            -7.4362711906433105,
-            -0.5105763673782349
-          ],
-          "file": "merfish/PREG_2.bin"
-        },
-        {
-          "sample_rep": "PREG_3",
-          "sample": "PREG_3",
-          "condition": "PREG",
-          "n_cells": 91275,
-          "x_range": [
-            -10.552000999450684,
-            -1.3611834049224854
-          ],
-          "y_range": [
-            -7.179879188537598,
-            -0.6368318796157837
-          ],
-          "file": "merfish/PREG_3.bin"
-        }
-      ]
-    },
-    "slidetags": {
-      "n_cells": 71429,
-      "x_range": [
-        -10.86599063873291,
-        -0.6940608620643616
-      ],
-      "y_range": [
-        -7.803676128387451,
-        -0.12237268686294556
-      ],
-      "samples": [
-        {
-          "sample_rep": "CTRL_1_1",
-          "sample": "CTRL_1",
-          "condition": "CTRL",
-          "n_cells": 5407,
-          "x_range": [
-            -10.72961711883545,
-            -0.7617392539978027
-          ],
-          "y_range": [
-            -7.520699977874756,
-            -0.19164012372493744
-          ],
-          "file": "slidetags/CTRL_1_1.bin"
-        },
-        {
-          "sample_rep": "CTRL_1_2",
-          "sample": "CTRL_1",
-          "condition": "CTRL",
-          "n_cells": 4445,
-          "x_range": [
-            -10.652420043945312,
-            -0.7949291467666626
-          ],
-          "y_range": [
-            -7.549088478088379,
-            -0.1637597382068634
-          ],
-          "file": "slidetags/CTRL_1_2.bin"
-        },
-        {
-          "sample_rep": "CTRL_2_1",
-          "sample": "CTRL_2",
-          "condition": "CTRL",
-          "n_cells": 6756,
-          "x_range": [
-            -10.751603126525879,
-            -0.9704970121383667
-          ],
-          "y_range": [
-            -7.555913925170898,
-            -0.2714666426181793
-          ],
-          "file": "slidetags/CTRL_2_1.bin"
-        },
-        {
-          "sample_rep": "CTRL_3_1",
-          "sample": "CTRL_3",
-          "condition": "CTRL",
-          "n_cells": 5582,
-          "x_range": [
-            -10.589808464050293,
-            -1.011077642440796
-          ],
-          "y_range": [
-            -7.345925331115723,
-            -0.12237268686294556
-          ],
-          "file": "slidetags/CTRL_3_1.bin"
-        },
-        {
-          "sample_rep": "CTRL_3_2",
-          "sample": "CTRL_3",
-          "condition": "CTRL",
-          "n_cells": 5628,
-          "x_range": [
-            -10.51870059967041,
-            -1.0046716928482056
-          ],
-          "y_range": [
-            -7.3848185539245605,
-            -0.16319513320922852
-          ],
-          "file": "slidetags/CTRL_3_2.bin"
-        },
-        {
-          "sample_rep": "POSTPART_1_1",
-          "sample": "POSTPART_1",
-          "condition": "POSTPART",
-          "n_cells": 5037,
-          "x_range": [
-            -10.86599063873291,
-            -0.8428760766983032
-          ],
-          "y_range": [
-            -7.4051103591918945,
-            -0.3701518177986145
-          ],
-          "file": "slidetags/POSTPART_1_1.bin"
-        },
-        {
-          "sample_rep": "POSTPART_1_2",
-          "sample": "POSTPART_1",
-          "condition": "POSTPART",
-          "n_cells": 4560,
-          "x_range": [
-            -10.630553245544434,
-            -0.7936181426048279
-          ],
-          "y_range": [
-            -7.414420127868652,
-            -0.38051432371139526
-          ],
-          "file": "slidetags/POSTPART_1_2.bin"
-        },
-        {
-          "sample_rep": "POSTPART_2_1",
-          "sample": "POSTPART_2",
-          "condition": "POSTPART",
-          "n_cells": 6226,
-          "x_range": [
-            -10.6471529006958,
-            -0.7660155892372131
-          ],
-          "y_range": [
-            -7.769631862640381,
-            -0.1356176882982254
-          ],
-          "file": "slidetags/POSTPART_2_1.bin"
-        },
-        {
-          "sample_rep": "POSTPART_2_2",
-          "sample": "POSTPART_2",
-          "condition": "POSTPART",
-          "n_cells": 5308,
-          "x_range": [
-            -10.848661422729492,
-            -0.7789991497993469
-          ],
-          "y_range": [
-            -7.747719764709473,
-            -0.18170584738254547
-          ],
-          "file": "slidetags/POSTPART_2_2.bin"
-        },
-        {
-          "sample_rep": "PREG_1_1",
-          "sample": "PREG_1",
-          "condition": "PREG",
-          "n_cells": 5747,
-          "x_range": [
-            -10.606931686401367,
-            -0.8073437809944153
-          ],
-          "y_range": [
-            -7.594860553741455,
-            -0.1815023422241211
-          ],
-          "file": "slidetags/PREG_1_1.bin"
-        },
-        {
-          "sample_rep": "PREG_1_2",
-          "sample": "PREG_1",
-          "condition": "PREG",
-          "n_cells": 5219,
-          "x_range": [
-            -10.547162055969238,
-            -0.7481682300567627
-          ],
-          "y_range": [
-            -7.451716423034668,
-            -0.16038046777248383
-          ],
-          "file": "slidetags/PREG_1_2.bin"
-        },
-        {
-          "sample_rep": "PREG_2_1",
-          "sample": "PREG_2",
-          "condition": "PREG",
-          "n_cells": 4531,
-          "x_range": [
-            -10.719393730163574,
-            -0.7955253720283508
-          ],
-          "y_range": [
-            -7.792311668395996,
-            -0.14249250292778015
-          ],
-          "file": "slidetags/PREG_2_1.bin"
-        },
-        {
-          "sample_rep": "PREG_2_2",
-          "sample": "PREG_2",
-          "condition": "PREG",
-          "n_cells": 4543,
-          "x_range": [
-            -10.738452911376953,
-            -0.6940608620643616
-          ],
-          "y_range": [
-            -7.7926130294799805,
-            -0.19726668298244476
-          ],
-          "file": "slidetags/PREG_2_2.bin"
-        },
-        {
-          "sample_rep": "PREG_3_1",
-          "sample": "PREG_3",
-          "condition": "PREG",
-          "n_cells": 889,
-          "x_range": [
-            -10.429157257080078,
-            -0.7338593006134033
-          ],
-          "y_range": [
-            -7.803676128387451,
-            -0.2667419910430908
-          ],
-          "file": "slidetags/PREG_3_1.bin"
-        },
-        {
-          "sample_rep": "PREG_3_2",
-          "sample": "PREG_3",
-          "condition": "PREG",
-          "n_cells": 1551,
-          "x_range": [
-            -10.712959289550781,
-            -0.7466186285018921
-          ],
-          "y_range": [
-            -7.785200595855713,
-            -0.16533838212490082
-          ],
-          "file": "slidetags/PREG_3_2.bin"
-        }
-      ]
-    },
     "xenium": {
-      "n_cells": 757964,
+      "n_cells": 788057,
       "x_range": [
-        -10.695638656616211,
-        -0.591905951499939
+        -10.728672981262207,
+        -0.5738998651504517
       ],
       "y_range": [
-        -7.487788200378418,
-        -0.14177954196929932
+        -7.462892055511475,
+        -0.12582024931907654
       ],
       "samples": [
         {
           "sample_rep": "CTRL_1_1",
           "sample": "CTRL_1",
           "condition": "CTRL",
-          "n_cells": 94106,
+          "n_cells": 97760,
           "x_range": [
             -10.481555938720703,
             -0.8839417099952698
@@ -1134,14 +748,14 @@
           "sample_rep": "CTRL_2_1",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 70831,
+          "n_cells": 73479,
           "x_range": [
-            -10.599431991577148,
+            -10.599467277526855,
             -0.8043392300605774
           ],
           "y_range": [
             -7.251402854919434,
-            -0.29874783754348755
+            -0.30444037914276123
           ],
           "file": "xenium/CTRL_2_1.bin"
         },
@@ -1149,14 +763,14 @@
           "sample_rep": "CTRL_2_2",
           "sample": "CTRL_2",
           "condition": "CTRL",
-          "n_cells": 76730,
+          "n_cells": 79289,
           "x_range": [
             -10.576719284057617,
             -0.8411082625389099
           ],
           "y_range": [
-            -7.487788200378418,
-            -0.14177954196929932
+            -7.341771602630615,
+            -0.12582024931907654
           ],
           "file": "xenium/CTRL_2_2.bin"
         },
@@ -1164,14 +778,14 @@
           "sample_rep": "CTRL_3_1",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 80459,
+          "n_cells": 82902,
           "x_range": [
             -10.68445110321045,
             -0.8112542033195496
           ],
           "y_range": [
             -7.137035846710205,
-            -0.42899560928344727
+            -0.4278756380081177
           ],
           "file": "xenium/CTRL_3_1.bin"
         },
@@ -1179,14 +793,14 @@
           "sample_rep": "CTRL_3_2",
           "sample": "CTRL_3",
           "condition": "CTRL",
-          "n_cells": 76260,
+          "n_cells": 78728,
           "x_range": [
             -10.679407119750977,
             -0.7378882765769958
           ],
           "y_range": [
             -7.462892055511475,
-            -0.44294917583465576
+            -0.4349334239959717
           ],
           "file": "xenium/CTRL_3_2.bin"
         },
@@ -1194,10 +808,10 @@
           "sample_rep": "PREG_2_1",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 95986,
+          "n_cells": 100120,
           "x_range": [
-            -10.642502784729004,
-            -0.591905951499939
+            -10.728672981262207,
+            -0.5738998651504517
           ],
           "y_range": [
             -7.3841938972473145,
@@ -1209,9 +823,9 @@
           "sample_rep": "PREG_2_2",
           "sample": "PREG_2",
           "condition": "PREG",
-          "n_cells": 83865,
+          "n_cells": 87584,
           "x_range": [
-            -10.628436088562012,
+            -10.701827049255371,
             -0.7782636284828186
           ],
           "y_range": [
@@ -1224,7 +838,7 @@
           "sample_rep": "PREG_3_1",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 85162,
+          "n_cells": 89177,
           "x_range": [
             -10.685636520385742,
             -0.7847784757614136
@@ -1239,9 +853,9 @@
           "sample_rep": "PREG_3_2",
           "sample": "PREG_3",
           "condition": "PREG",
-          "n_cells": 94565,
+          "n_cells": 99018,
           "x_range": [
-            -10.695638656616211,
+            -10.69110107421875,
             -0.7630816102027893
           ],
           "y_range": [
@@ -1249,6 +863,392 @@
             -0.47994938492774963
           ],
           "file": "xenium/PREG_3_2.bin"
+        }
+      ]
+    },
+    "merfish": {
+      "n_cells": 829593,
+      "x_range": [
+        -10.783557891845703,
+        -0.6158233284950256
+      ],
+      "y_range": [
+        -7.490657806396484,
+        -0.21535101532936096
+      ],
+      "samples": [
+        {
+          "sample_rep": "CTRL_1",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 83733,
+          "x_range": [
+            -10.709811210632324,
+            -0.9368594884872437
+          ],
+          "y_range": [
+            -7.112657070159912,
+            -0.5161904692649841
+          ],
+          "file": "merfish/CTRL_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_2",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 94144,
+          "x_range": [
+            -10.599357604980469,
+            -0.6158233284950256
+          ],
+          "y_range": [
+            -7.490657806396484,
+            -0.48249292373657227
+          ],
+          "file": "merfish/CTRL_2.bin"
+        },
+        {
+          "sample_rep": "CTRL_3",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 86508,
+          "x_range": [
+            -10.514966011047363,
+            -0.7232633233070374
+          ],
+          "y_range": [
+            -7.3720173835754395,
+            -0.5328355431556702
+          ],
+          "file": "merfish/CTRL_3.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 66452,
+          "x_range": [
+            -10.783557891845703,
+            -0.819068968296051
+          ],
+          "y_range": [
+            -7.005261421203613,
+            -0.4705333113670349
+          ],
+          "file": "merfish/POSTPART_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 128190,
+          "x_range": [
+            -10.53069019317627,
+            -0.8014578819274902
+          ],
+          "y_range": [
+            -7.400193214416504,
+            -0.25588133931159973
+          ],
+          "file": "merfish/POSTPART_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_3",
+          "sample": "POSTPART_3",
+          "condition": "POSTPART",
+          "n_cells": 90601,
+          "x_range": [
+            -10.699673652648926,
+            -1.1019830703735352
+          ],
+          "y_range": [
+            -7.109050273895264,
+            -0.21535101532936096
+          ],
+          "file": "merfish/POSTPART_3.bin"
+        },
+        {
+          "sample_rep": "PREG_1",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 94612,
+          "x_range": [
+            -10.652837753295898,
+            -0.7623506784439087
+          ],
+          "y_range": [
+            -7.408932209014893,
+            -0.5200963020324707
+          ],
+          "file": "merfish/PREG_1.bin"
+        },
+        {
+          "sample_rep": "PREG_2",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 83480,
+          "x_range": [
+            -10.525116920471191,
+            -1.158291220664978
+          ],
+          "y_range": [
+            -7.4366068840026855,
+            -0.5105763673782349
+          ],
+          "file": "merfish/PREG_2.bin"
+        },
+        {
+          "sample_rep": "PREG_3",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 101873,
+          "x_range": [
+            -10.552000999450684,
+            -1.3611834049224854
+          ],
+          "y_range": [
+            -7.180271625518799,
+            -0.6368318796157837
+          ],
+          "file": "merfish/PREG_3.bin"
+        }
+      ]
+    },
+    "slidetags": {
+      "n_cells": 70940,
+      "x_range": [
+        -10.86599063873291,
+        -0.6940608620643616
+      ],
+      "y_range": [
+        -7.843960762023926,
+        -0.07291103154420853
+      ],
+      "samples": [
+        {
+          "sample_rep": "CTRL_1_1",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 5393,
+          "x_range": [
+            -10.72961711883545,
+            -0.7617392539978027
+          ],
+          "y_range": [
+            -7.520699977874756,
+            -0.19164012372493744
+          ],
+          "file": "slidetags/CTRL_1_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_1_2",
+          "sample": "CTRL_1",
+          "condition": "CTRL",
+          "n_cells": 4420,
+          "x_range": [
+            -10.652420043945312,
+            -0.7949291467666626
+          ],
+          "y_range": [
+            -7.549088478088379,
+            -0.1637597382068634
+          ],
+          "file": "slidetags/CTRL_1_2.bin"
+        },
+        {
+          "sample_rep": "CTRL_2_1",
+          "sample": "CTRL_2",
+          "condition": "CTRL",
+          "n_cells": 6693,
+          "x_range": [
+            -10.751603126525879,
+            -0.9704970121383667
+          ],
+          "y_range": [
+            -7.555913925170898,
+            -0.2714666426181793
+          ],
+          "file": "slidetags/CTRL_2_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_1",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 5543,
+          "x_range": [
+            -10.589808464050293,
+            -1.011077642440796
+          ],
+          "y_range": [
+            -7.345925331115723,
+            -0.12237268686294556
+          ],
+          "file": "slidetags/CTRL_3_1.bin"
+        },
+        {
+          "sample_rep": "CTRL_3_2",
+          "sample": "CTRL_3",
+          "condition": "CTRL",
+          "n_cells": 5597,
+          "x_range": [
+            -10.51870059967041,
+            -1.0046716928482056
+          ],
+          "y_range": [
+            -7.3848185539245605,
+            -0.16319513320922852
+          ],
+          "file": "slidetags/CTRL_3_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1_1",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 5008,
+          "x_range": [
+            -10.86599063873291,
+            -0.8428760766983032
+          ],
+          "y_range": [
+            -7.36842679977417,
+            -0.3701518177986145
+          ],
+          "file": "slidetags/POSTPART_1_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_1_2",
+          "sample": "POSTPART_1",
+          "condition": "POSTPART",
+          "n_cells": 4528,
+          "x_range": [
+            -10.630553245544434,
+            -0.7936181426048279
+          ],
+          "y_range": [
+            -7.398411273956299,
+            -0.38051432371139526
+          ],
+          "file": "slidetags/POSTPART_1_2.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2_1",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 6188,
+          "x_range": [
+            -10.6471529006958,
+            -0.7660155892372131
+          ],
+          "y_range": [
+            -7.769631862640381,
+            -0.1356176882982254
+          ],
+          "file": "slidetags/POSTPART_2_1.bin"
+        },
+        {
+          "sample_rep": "POSTPART_2_2",
+          "sample": "POSTPART_2",
+          "condition": "POSTPART",
+          "n_cells": 5283,
+          "x_range": [
+            -10.848661422729492,
+            -0.7789991497993469
+          ],
+          "y_range": [
+            -7.747719764709473,
+            -0.18170584738254547
+          ],
+          "file": "slidetags/POSTPART_2_2.bin"
+        },
+        {
+          "sample_rep": "PREG_1_1",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 5725,
+          "x_range": [
+            -10.606931686401367,
+            -0.8073437809944153
+          ],
+          "y_range": [
+            -7.594860553741455,
+            -0.1815023422241211
+          ],
+          "file": "slidetags/PREG_1_1.bin"
+        },
+        {
+          "sample_rep": "PREG_1_2",
+          "sample": "PREG_1",
+          "condition": "PREG",
+          "n_cells": 5198,
+          "x_range": [
+            -10.547162055969238,
+            -0.7481682300567627
+          ],
+          "y_range": [
+            -7.451716423034668,
+            -0.16038046777248383
+          ],
+          "file": "slidetags/PREG_1_2.bin"
+        },
+        {
+          "sample_rep": "PREG_2_1",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 4498,
+          "x_range": [
+            -10.719393730163574,
+            -0.7955253720283508
+          ],
+          "y_range": [
+            -7.792311668395996,
+            -0.14249250292778015
+          ],
+          "file": "slidetags/PREG_2_1.bin"
+        },
+        {
+          "sample_rep": "PREG_2_2",
+          "sample": "PREG_2",
+          "condition": "PREG",
+          "n_cells": 4531,
+          "x_range": [
+            -10.738452911376953,
+            -0.6940608620643616
+          ],
+          "y_range": [
+            -7.7926130294799805,
+            -0.19726668298244476
+          ],
+          "file": "slidetags/PREG_2_2.bin"
+        },
+        {
+          "sample_rep": "PREG_3_1",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 849,
+          "x_range": [
+            -10.429157257080078,
+            -0.7338593006134033
+          ],
+          "y_range": [
+            -7.803676128387451,
+            -0.2667419910430908
+          ],
+          "file": "slidetags/PREG_3_1.bin"
+        },
+        {
+          "sample_rep": "PREG_3_2",
+          "sample": "PREG_3",
+          "condition": "PREG",
+          "n_cells": 1486,
+          "x_range": [
+            -10.712959289550781,
+            -0.7466186285018921
+          ],
+          "y_range": [
+            -7.843960762023926,
+            -0.07291103154420853
+          ],
+          "file": "slidetags/PREG_3_2.bin"
         }
       ]
     }

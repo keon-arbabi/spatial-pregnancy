@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="pragma" content="no-cache">
+<meta http-equiv="expires" content="0">
 <title>spatial-pregnancy viewer</title>
 <style>
 :root {
@@ -87,6 +90,11 @@ button {
     padding: 3px 8px; border-radius: 3px; cursor: pointer; font: inherit;
 }
 button:hover { background: #333; }
+button.active {
+    background: var(--accent); border-color: var(--accent);
+    color: #000;
+}
+button.active:hover { background: #79b5ff; }
 .btn-row { display: flex; gap: 4px; }
 
 .list {
@@ -178,23 +186,20 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
     <input id="pointsize" type="range" min="0.5" max="6" step="0.1" value="1.5">
 
     <h2 style="display:flex;justify-content:space-between;align-items:center">
-        <span>class filter</span>
+        <span>filter</span>
         <span class="btn-row">
-            <button data-act="all-class">all</button>
-            <button data-act="none-class">none</button>
+            <button data-act="all">all</button>
+            <button data-act="none">none</button>
+            <button data-act="solo" title="one-at-a-time: clicking an item shows only that one">solo</button>
         </span>
     </h2>
-    <div id="class-list" class="list"></div>
-
-    <h2 style="display:flex;justify-content:space-between;align-items:center">
-        <span>subclass filter</span>
-        <span class="btn-row">
-            <button data-act="all-sub">all</button>
-            <button data-act="none-sub">none</button>
-        </span>
-    </h2>
-    <input id="sub-search" type="search" placeholder="search subclass…">
-    <div id="subclass-list" class="list" style="margin-top:4px;max-height:300px"></div>
+    <div id="filter-by-radio" class="radio-row"
+         style="display:flex;gap:10px;margin-bottom:6px">
+        <label><input type="radio" name="fmode" value="class" checked>class</label>
+        <label><input type="radio" name="fmode" value="subclass">subclass</label>
+    </div>
+    <input id="filter-search" type="search" placeholder="search…">
+    <div id="filter-list" class="list" style="margin-top:4px;max-height:340px"></div>
 
     <hr>
     <div class="note">
@@ -232,8 +237,9 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 //----------------------------------------------------------------------------
 const state = {
     manifest: null,
-    dataset: 'merfish',
+    dataset: 'xenium',
     colorMode: 'class',
+    filterLevel: 'class',  // which level the (single) filter list operates on
     pointSize: 1.5,
     panels: [],            // {el, slice, vp:{x,y,w,h}}
     slices: new Map(),     // file -> {n, posBuf, classBuf, subBuf, xRange, yRange}
@@ -256,7 +262,17 @@ const state = {
     dragging: false,
     dragLastX: 0,
     dragLastY: 0,
+    // solo (one-at-a-time) per filter level (state survives level toggles)
+    solo: { class: false, sub: false },
 };
+
+const KIND = {
+    class:    { vis: 'classVisible', tex: 'classVisTex',
+                pal: 'class_palette' },
+    subclass: { vis: 'subVisible',   tex: 'subVisTex',
+                pal: 'subclass_palette' },
+};
+const soloKey = lvl => (lvl === 'subclass' ? 'sub' : 'class');
 
 //----------------------------------------------------------------------------
 // boot
@@ -358,28 +374,27 @@ const VS = `#version 300 es
 in vec2  a_pos;
 in float a_classId;
 in float a_subId;
-uniform vec4 u_xform;        // (sx, sy, tx, ty) maps world -> NDC
+uniform vec4 u_xform;          // (sx, sy, tx, ty) maps world -> NDC
 uniform float u_pointSize;
-uniform sampler2D u_palette;
-uniform sampler2D u_classVis;
-uniform sampler2D u_subVis;
-uniform float u_classN;
-uniform float u_subN;
-uniform float u_paletteN;
-uniform int   u_useSub;       // 0=class palette, 1=subclass palette
+uniform sampler2D u_palette;   // bound to whichever level we color by
+uniform sampler2D u_filterVis; // bound to whichever level we filter by
+uniform int   u_useSubColor;   // 0=class palette, 1=subclass palette
+uniform int   u_useSubFilter;  // 0=filter by class, 1=filter by subclass
 out vec3 v_color;
 
 void main() {
-    float idx     = (u_useSub == 1) ? a_subId : a_classId;
-    float u       = (idx + 0.5) / u_paletteN;
-    v_color       = texture(u_palette, vec2(u, 0.5)).rgb;
+    int clsi = int(a_classId);
+    int subi = int(a_subId);
+    int colorIdx, filterIdx;
+    if (u_useSubColor == 1) colorIdx = subi; else colorIdx = clsi;
+    if (u_useSubFilter == 1) filterIdx = subi; else filterIdx = clsi;
 
-    float visC = texture(u_classVis, vec2((a_classId + 0.5) / u_classN, 0.5)).r;
-    float visS = texture(u_subVis,   vec2((a_subId   + 0.5) / u_subN,   0.5)).r;
-    float visible = visC * visS;
+    // texelFetch with explicit integer coords — no UV float math
+    v_color = texelFetch(u_palette, ivec2(colorIdx, 0), 0).rgb;
+    float vis = texelFetch(u_filterVis, ivec2(filterIdx, 0), 0).r;
 
     vec2 p = a_pos * u_xform.xy + u_xform.zw;
-    if (visible < 0.5) {
+    if (vis < 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     } else {
         gl_Position = vec4(p, 0.0, 1.0);
@@ -421,18 +436,15 @@ function initShader() {
     }
     state.program = prog;
     state.locs = {
-        a_pos:       gl.getAttribLocation(prog, 'a_pos'),
-        a_classId:   gl.getAttribLocation(prog, 'a_classId'),
-        a_subId:     gl.getAttribLocation(prog, 'a_subId'),
-        u_xform:     gl.getUniformLocation(prog, 'u_xform'),
-        u_pointSize: gl.getUniformLocation(prog, 'u_pointSize'),
-        u_palette:   gl.getUniformLocation(prog, 'u_palette'),
-        u_classVis:  gl.getUniformLocation(prog, 'u_classVis'),
-        u_subVis:    gl.getUniformLocation(prog, 'u_subVis'),
-        u_classN:    gl.getUniformLocation(prog, 'u_classN'),
-        u_subN:      gl.getUniformLocation(prog, 'u_subN'),
-        u_paletteN:  gl.getUniformLocation(prog, 'u_paletteN'),
-        u_useSub:    gl.getUniformLocation(prog, 'u_useSub'),
+        a_pos:          gl.getAttribLocation(prog, 'a_pos'),
+        a_classId:      gl.getAttribLocation(prog, 'a_classId'),
+        a_subId:        gl.getAttribLocation(prog, 'a_subId'),
+        u_xform:        gl.getUniformLocation(prog, 'u_xform'),
+        u_pointSize:    gl.getUniformLocation(prog, 'u_pointSize'),
+        u_palette:      gl.getUniformLocation(prog, 'u_palette'),
+        u_filterVis:    gl.getUniformLocation(prog, 'u_filterVis'),
+        u_useSubColor:  gl.getUniformLocation(prog, 'u_useSubColor'),
+        u_useSubFilter: gl.getUniformLocation(prog, 'u_useSubFilter'),
     };
 }
 
@@ -457,17 +469,22 @@ async function loadSlice(entry) {
     const pos = new Float32Array(2 * n);
     for (let i = 0; i < n; i++) { pos[2*i] = xs[i]; pos[2*i+1] = ys[i]; }
 
+    // upload class/subclass ids as floats (most compatible across drivers)
+    const clsF = new Float32Array(n);
+    const subF = new Float32Array(n);
+    for (let i = 0; i < n; i++) { clsF[i] = cls[i]; subF[i] = sub[i]; }
+
     const posBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
     gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
 
     const classBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, classBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, cls, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, clsF, gl.STATIC_DRAW);
 
     const subBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, subBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, sub, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, subF, gl.STATIC_DRAW);
 
     const slice = {
         n,
@@ -617,23 +634,27 @@ function render() {
 
     gl.useProgram(state.program);
 
-    // bind palette + visibility textures (per color mode)
-    const useSub = state.colorMode === 'subclass' ? 1 : 0;
-    const palTex = useSub ? state.subPaletteTex : state.classPaletteTex;
-    const palN   = useSub ? state.manifest.subclass_palette.length
-                          : state.manifest.class_palette.length;
+    // pick palette (color mode) and filter visibility (filter level) — both
+    // are independent. shader checks visibility only for the chosen filter
+    // level, so class/subclass selections can never disagree.
+    const useSubColor  = state.colorMode === 'subclass'  ? 1 : 0;
+    const useSubFilter = state.filterLevel === 'subclass' ? 1 : 0;
+    const palTex = useSubColor  ? state.subPaletteTex : state.classPaletteTex;
+    const palN   = useSubColor
+        ? state.manifest.subclass_palette.length
+        : state.manifest.class_palette.length;
+    const visTex = useSubFilter ? state.subVisTex : state.classVisTex;
+    const visN   = useSubFilter
+        ? state.manifest.subclass_palette.length
+        : state.manifest.class_palette.length;
 
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, palTex);
     gl.uniform1i(state.locs.u_palette, 0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, state.classVisTex);
-    gl.uniform1i(state.locs.u_classVis, 1);
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, state.subVisTex);
-    gl.uniform1i(state.locs.u_subVis, 2);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, visTex);
+    gl.uniform1i(state.locs.u_filterVis, 1);
 
-    gl.uniform1f(state.locs.u_paletteN, palN);
-    gl.uniform1f(state.locs.u_classN, state.manifest.class_palette.length);
-    gl.uniform1f(state.locs.u_subN,   state.manifest.subclass_palette.length);
-    gl.uniform1i(state.locs.u_useSub, useSub);
+    gl.uniform1i(state.locs.u_useSubColor,  useSubColor);
+    gl.uniform1i(state.locs.u_useSubFilter, useSubFilter);
     // gently scale point size with zoom (sqrt) so things stay legible
     const zoomBoost = Math.sqrt(Math.max(state.zoom, 0.5));
     gl.uniform1f(state.locs.u_pointSize,
@@ -691,11 +712,11 @@ function render() {
 
         gl.bindBuffer(gl.ARRAY_BUFFER, slice.classBuf);
         gl.enableVertexAttribArray(state.locs.a_classId);
-        gl.vertexAttribPointer(state.locs.a_classId, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+        gl.vertexAttribPointer(state.locs.a_classId, 1, gl.FLOAT, false, 0, 0);
 
         gl.bindBuffer(gl.ARRAY_BUFFER, slice.subBuf);
         gl.enableVertexAttribArray(state.locs.a_subId);
-        gl.vertexAttribPointer(state.locs.a_subId, 1, gl.UNSIGNED_SHORT, false, 0, 0);
+        gl.vertexAttribPointer(state.locs.a_subId, 1, gl.FLOAT, false, 0, 0);
 
         gl.drawArrays(gl.POINTS, 0, slice.n);
     }
@@ -791,35 +812,45 @@ function buildSidebar() {
         render();
     });
 
-    // class & subclass lists
-    buildList('class-list', state.manifest.class_palette, 'class');
-    buildList('subclass-list', state.manifest.subclass_palette, 'sub');
+    // filter level toggle (rebuilds the single list)
+    document.querySelectorAll('input[name="fmode"]').forEach(r => {
+        r.addEventListener('change', () => {
+            state.filterLevel = r.value;
+            rebuildFilterList();
+            render();
+        });
+    });
 
-    // search subclass
-    document.getElementById('sub-search').addEventListener('input', e => {
+    // initial list build
+    rebuildFilterList();
+
+    // search box
+    document.getElementById('filter-search').addEventListener('input', e => {
         const q = e.target.value.toLowerCase();
-        document.querySelectorAll('#subclass-list label').forEach(l => {
+        document.querySelectorAll('#filter-list label').forEach(l => {
             const name = l.dataset.name.toLowerCase();
             l.style.display = name.includes(q) ? '' : 'none';
         });
     });
 
-    // bulk buttons
+    // bulk buttons (operate on the active filter level)
     document.querySelectorAll('button[data-act]').forEach(b => {
         b.addEventListener('click', () => {
             const act = b.dataset.act;
-            if (act === 'all-class')  setAll('class', true);
-            if (act === 'none-class') setAll('class', false);
-            if (act === 'all-sub')    setAll('sub', true);
-            if (act === 'none-sub')   setAll('sub', false);
+            if (act === 'all')  setAll(true);
+            if (act === 'none') setAll(false);
+            if (act === 'solo') toggleSolo();
         });
     });
 }
 
-function buildList(domId, palette, kind) {
-    const el = document.getElementById(domId);
+function rebuildFilterList() {
+    const lvl = state.filterLevel;
+    const palette = state.manifest[KIND[lvl].pal];
+    const visArr  = state[KIND[lvl].vis];
+    const tex     = state[KIND[lvl].tex];
+    const el = document.getElementById('filter-list');
     el.innerHTML = '';
-    const visArr = (kind === 'class') ? state.classVisible : state.subVisible;
     palette.forEach((p, i) => {
         if (p.name === 'Unlabelled' && i === 0) return; // hide sentinel
         const lbl = document.createElement('label');
@@ -829,22 +860,41 @@ function buildList(domId, palette, kind) {
             <span class="label-name" title="${p.name}">${p.name}</span>`;
         lbl.querySelector('input').addEventListener('change', e => {
             const idx = parseInt(e.target.dataset.i, 10);
-            visArr[idx] = e.target.checked ? 255 : 0;
-            const tex = (kind === 'class') ? state.classVisTex : state.subVisTex;
+            if (state.solo[soloKey(lvl)]) {
+                visArr.fill(0);
+                visArr[0] = 255;
+                visArr[idx] = 255;
+                document.querySelectorAll('#filter-list input[type=checkbox]').forEach(c => {
+                    c.checked = (parseInt(c.dataset.i, 10) === idx);
+                });
+            } else {
+                visArr[idx] = e.target.checked ? 255 : 0;
+            }
             uploadVisibility(tex, visArr);
             render();
         });
         el.appendChild(lbl);
     });
+    // re-apply search filter and reflect solo state on the button
+    document.getElementById('filter-search').value = '';
+    document.querySelector('button[data-act="solo"]')
+        .classList.toggle('active', state.solo[soloKey(lvl)]);
 }
 
-function setAll(kind, on) {
-    const visArr = (kind === 'class') ? state.classVisible : state.subVisible;
-    const tex    = (kind === 'class') ? state.classVisTex   : state.subVisTex;
-    const domId  = (kind === 'class') ? 'class-list'        : 'subclass-list';
+function toggleSolo() {
+    const k = soloKey(state.filterLevel);
+    state.solo[k] = !state.solo[k];
+    document.querySelector('button[data-act="solo"]')
+        .classList.toggle('active', state.solo[k]);
+}
+
+function setAll(on) {
+    const lvl = state.filterLevel;
+    const visArr = state[KIND[lvl].vis];
+    const tex    = state[KIND[lvl].tex];
     visArr.fill(on ? 255 : 0);
-    visArr[0] = 255; // keep Unlabelled bit visible (sentinel)
-    document.querySelectorAll(`#${domId} input[type=checkbox]`).forEach(c => {
+    visArr[0] = 255; // sentinel
+    document.querySelectorAll('#filter-list input[type=checkbox]').forEach(c => {
         c.checked = on;
     });
     uploadVisibility(tex, visArr);

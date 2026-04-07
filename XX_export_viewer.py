@@ -29,7 +29,7 @@ working_dir = '/home/karbabi/spatial-pregnancy'
 out_dir = f'{working_dir}/viewer_data'
 os.makedirs(out_dir, exist_ok=True)
 
-datasets = ['merfish', 'slidetags', 'xenium']
+datasets = ['xenium', 'merfish', 'slidetags']
 ref_path = f'{working_dir}/input/adata_ref_zeng_raw.h5ad'
 metadata_csv = '/home/karbabi/single-cell/ABC/metadata/cells_joined.csv'
 

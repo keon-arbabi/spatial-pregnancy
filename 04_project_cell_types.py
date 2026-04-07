@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-from scipy.spatial import cKDTree, Delaunay
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 sys.path.insert(0, os.path.expanduser('~'))
 from single_cell import SingleCell
@@ -39,19 +39,19 @@ phase_a_config = dict(
 datasets = {
     'xenium': dict(
         sample_col='sample_rep',
-        ave_dist_fold=10, alignment_shift_adjustment=0,
+        ave_dist_fold=100, alignment_shift_adjustment=0,
         n_pcs=30, use_scanorama=True,
         harmony_kwargs=dict(
             theta=12, alpha=0.05, tolerance=0.001, max_iterations=20)),
     'slidetags': dict(
         sample_col='sample',
-        ave_dist_fold=10, alignment_shift_adjustment=0,
+        ave_dist_fold=30, alignment_shift_adjustment=0,
         n_pcs=30, use_scanorama=True,
         harmony_kwargs=dict(
             theta=12, alpha=0.05, tolerance=0.001, max_iterations=20)),
     'merfish': dict(
         sample_col='sample',
-        ave_dist_fold=10, alignment_shift_adjustment=0,
+        ave_dist_fold=100, alignment_shift_adjustment=0,
         n_pcs=30, use_scanorama=True,
         harmony_kwargs=dict(
             theta=12, alpha=0.05, tolerance=0.001, max_iterations=20)),
@@ -389,33 +389,11 @@ def prepare_query(name, sample_col='sample'):
 
 #region Phase B: spatial cell type transfer ####################################
 
-# average Delaunay edge distance, filtering edges above `quantile`.
-# reimplements CAST's average_dist without the O(n^2) pairwise matrix.
-# subsamples large datasets for speed.
-def compute_avg_delaunay_dist(coords, quantile=0.99, max_subsample=50_000,
-                              seed=0):
-
-    if coords.shape[0] > max_subsample:
-        rng = np.random.default_rng(seed)
-        idx = rng.choice(coords.shape[0], max_subsample, replace=False)
-        coords = coords[idx]
-    # deduplicate (Delaunay fails on duplicate points)
-    coords = np.unique(coords, axis=0)
-    tri = Delaunay(coords)
-    # extract unique edges from simplices
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            a, b = int(simplex[i]), int(simplex[(i + 1) % 3])
-            edges.add((min(a, b), max(a, b)))
-    edges = np.array(list(edges))
-    # compute edge lengths directly
-    edge_dists = np.linalg.norm(
-        coords[edges[:, 0]] - coords[edges[:, 1]], axis=1)
-    # filter outlier edges (long-range Delaunay artifacts)
-    threshold = np.percentile(edge_dists, quantile * 100)
-    edge_dists = edge_dists[edge_dists <= threshold]
-    return edge_dists.mean()
+# mean nearest-neighbor distance on full data (no subsampling).
+def avg_nn_dist(coords):
+    tree = cKDTree(coords)
+    dists, _ = tree.query(coords, k=2)
+    return dists[:, 1].mean()
 
 # spatially-constrained expression-based cell type transfer.
 # for each query cell:
@@ -446,22 +424,22 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
     print(f'[{name}] query: {adata.shape[0]:,} cells')
     # load aligned query coords
     coords_ffd = torch.load(f'{output_dir}/coords_ffd.pt', weights_only=False)
-    # load ref coords from coords_raw.pt (ref section entries)
-    coords_raw = torch.load(f'{output_dir}/coords_raw.pt', weights_only=False)
-    ref_sections = sorted(
-        s for s in coords_raw if s.startswith('C57BL6J-638850'))
-    ref_coords = np.vstack([coords_raw[s] for s in ref_sections])
 
-    # load bridge (Phase A)
+    # load bridge (Phase A) and derive ref coords from it directly.
     adata_ref, scrna_indices, _ = prepare_reference(k_harmony=k_harmony)
-    ref_obs = pd.concat([
-        adata_ref.obs[adata_ref.obs['sample'] == s] for s in ref_sections])
+    ref_sections = sorted(
+        s for s in adata_ref.obs['sample'].unique()
+        if s.startswith('C57BL6J-638850'))
     ref_global_idx = np.concatenate([
         np.where(adata_ref.obs['sample'] == s)[0] for s in ref_sections])
+    ref_obs = adata_ref.obs.iloc[ref_global_idx]
+    ref_coords = ref_obs[['x_raw', 'y_raw']].values
     print(f'[{name}] ref: {len(ref_obs):,} cells across '
           f'{len(ref_sections)} sections')
-    assert len(ref_obs) == ref_coords.shape[0], \
-        f'ref obs ({len(ref_obs)}) != ref coords ({ref_coords.shape[0]})'
+    assert np.allclose(
+        ref_coords,
+        adata_ref.obs.iloc[ref_global_idx][['x_raw', 'y_raw']].values), \
+        'ref_coords and ref_global_idx are misaligned'
 
     # load query-scRNA Harmony embeddings (Phase A')
     query_harmony, scrna_harmony = prepare_query(name, sample_col)
@@ -485,8 +463,8 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
     query_coords = adata.obs[['x_ffd', 'y_ffd']].values
 
     # hop 1: spatial constraint with adaptive radius
-    print(f'[{name}] computing Delaunay avg edge dist...')
-    avg_edge_dist = compute_avg_delaunay_dist(query_coords)
+    print(f'[{name}] computing avg nearest-neighbor dist...')
+    avg_edge_dist = avg_nn_dist(query_coords)
     pdist_thres = ave_dist_fold * avg_edge_dist + alignment_shift_adjustment
     print(f'[{name}] adaptive radius: {avg_edge_dist:.4f} avg edge x '
           f'{ave_dist_fold} + {alignment_shift_adjustment} = '
@@ -741,37 +719,66 @@ if __name__ == '__main__':
         print(f'Unknown dataset: {t}. Choose from {list(datasets.keys())} or all')
         sys.exit(1)
 
-    # adaptive radius visualization (one random query cell per dataset)
-    from matplotlib.patches import Circle
-    fig, axes = plt.subplots(1, len(datasets),
-                            figsize=(6 * len(datasets), 6), squeeze=False)
-    rng = np.random.default_rng(42)
-    for col, (name, cfg) in enumerate(datasets.items()):
-        coords_ffd = torch.load(f'{working_dir}/output/{name}/coords_ffd.pt',
-                                weights_only=False)
-        coords_raw = torch.load(f'{working_dir}/output/{name}/coords_raw.pt',
-                                weights_only=False)
-        ref_sections = sorted(s for s in coords_raw if s.startswith('C57BL6J-638850'))
-        ref_coords = np.vstack([coords_raw[s] for s in ref_sections])
-        query_coords = np.vstack(
-            [coords_ffd[s] for s in sorted(coords_ffd.keys())])
-        avg_edge = compute_avg_delaunay_dist(query_coords)
-        radius = cfg['ave_dist_fold'] * avg_edge + cfg['alignment_shift_adjustment']
-        cell = query_coords[rng.integers(len(query_coords))]
-        n_cands = len(cKDTree(ref_coords).query_ball_point(cell, r=radius))
-        ax = axes[0, col]
-        ax.scatter(ref_coords[:, 0], ref_coords[:, 1],
-                s=0.05, c='lightgray', alpha=0.2, rasterized=True)
-        ax.scatter(cell[0], cell[1], s=40, c='red', zorder=5)
-        ax.add_patch(Circle(cell, radius, fill=False, color='red',
-                            linewidth=1.5, linestyle='--'))
-        ax.set_aspect('equal')
-        ax.set_title(f'{name}\navg_edge={avg_edge:.4f}, r={radius:.4f}, '
-                    f'{n_cands} candidates')
-        ax.axis('off')
-    plt.tight_layout()
-    fig.savefig(f'{working_dir}/figures/radius_visualization.png', dpi=200)
-    plt.close()
+# # adaptive radius visualization (zoomed views per dataset)
+# from matplotlib.patches import Circle
+# ref = sc.read_h5ad(f'{working_dir}/input/adata_ref_zeng_bridge.h5ad')
+# ref_sections = sorted(s for s in ref.obs['sample'].unique()
+#                       if s.startswith('C57BL6J-638850'))
+# ref_obs_sub = ref.obs[ref.obs['sample'].isin(ref_sections)]
+# ref_coords_full = ref_obs_sub[['x_raw', 'y_raw']].values
+# ref_tree = cKDTree(ref_coords_full)
+# n_samples = 5
+# fig, axes = plt.subplots(len(datasets), n_samples + 1,
+#                          figsize=(4 * (n_samples + 1), 4 * len(datasets)),
+#                          squeeze=False)
+# rng = np.random.default_rng(42)
+# for row, (name, cfg) in enumerate(datasets.items()):
+#     coords_ffd = torch.load(f'{working_dir}/output/{name}/coords_ffd.pt',
+#                              weights_only=False)
+#     query_coords = np.vstack(
+#         [coords_ffd[s] for s in sorted(coords_ffd.keys())])
+#     edge = avg_nn_dist(query_coords)
+#     radius = (cfg['ave_dist_fold'] * edge +
+#               cfg['alignment_shift_adjustment'])
+#     ax = axes[row, 0]
+#     ax.scatter(ref_coords_full[:, 0], ref_coords_full[:, 1],
+#                s=0.05, c='lightgray', alpha=0.3, rasterized=True)
+#     sample_idx = rng.integers(len(query_coords), size=n_samples)
+#     sample_cells = query_coords[sample_idx]
+#     ax.scatter(sample_cells[:, 0], sample_cells[:, 1], s=20, c='red', zorder=5)
+#     for cell in sample_cells:
+#         ax.add_patch(Circle(cell, radius, fill=False, color='red',
+#                             linewidth=1, linestyle='--'))
+#     ax.set_aspect('equal')
+#     ax.set_title(f'{name} overview\n'
+#                  f'edge={edge:.5f} (fold={cfg["ave_dist_fold"]}, '
+#                  f'shift={cfg["alignment_shift_adjustment"]})\n'
+#                  f'r={radius:.4f}', fontsize=10)
+#     ax.axis('off')
+#     for col, cell in enumerate(sample_cells, start=1):
+#         cands = ref_tree.query_ball_point(cell, r=radius)
+#         zoom = max(radius * 3, 0.05)
+#         ax = axes[row, col]
+#         in_zoom = ((np.abs(ref_coords_full[:, 0] - cell[0]) < zoom * 1.5) &
+#                    (np.abs(ref_coords_full[:, 1] - cell[1]) < zoom * 1.5))
+#         ax.scatter(ref_coords_full[in_zoom, 0], ref_coords_full[in_zoom, 1],
+#                    s=4, c='lightgray', alpha=0.6, rasterized=True)
+#         if len(cands) > 0:
+#             ax.scatter(ref_coords_full[cands, 0], ref_coords_full[cands, 1],
+#                        s=8, c='steelblue', alpha=0.8, rasterized=True)
+#         ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
+#                    edgecolors='white', linewidths=1)
+#         ax.add_patch(Circle(cell, radius, fill=False, color='red',
+#                             linewidth=2, linestyle='--'))
+#         ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
+#         ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
+#         ax.set_aspect('equal')
+#         ax.set_title(f'{len(cands):,} candidates', fontsize=10)
+#         ax.set_xticks([])
+#         ax.set_yticks([])
+# plt.tight_layout()
+# fig.savefig(f'{working_dir}/figures/radius_tuning.png', dpi=200)
+# plt.close()
 
 #endregion
 
