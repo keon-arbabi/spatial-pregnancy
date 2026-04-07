@@ -10,20 +10,23 @@
 #   {dataset}/{sample_rep}.bin         packed binary per query sample
 #
 # Per-sample binary layout (little-endian, n = n_cells for that sample):
-#   bytes [        0 ..  4n)   x                float32   (ref: x_raw, query: x_ffd)
-#   bytes [       4n ..  8n)   y                float32   (ref: y_raw, query: y_ffd)
-#   bytes [       8n .. 10n)   subclass_id      uint16    index into palette
-#   bytes [      10n .. 11n)   class_id         uint8     index into palette
-#   bytes [      11n .. 12n)   subclass_conf    uint8     round(255*v) (1.0 for ref)
-#   bytes [      12n .. 13n)   subclass_margin  uint8     round(255*v) (1.0 for ref)
-#   bytes [      13n .. 14n)   min_cos_dist     uint8     round(255*v) (0.0 for ref)
-# Total size = 14 * n bytes.
+#   bytes [        0 ..  4n)   x_ffd            float32
+#   bytes [       4n ..  8n)   y_ffd            float32
+#   bytes [       8n .. 12n)   x_affine         float32   (= ffd for ref)
+#   bytes [      12n .. 16n)   y_affine         float32   (= ffd for ref)
+#   bytes [      16n .. 18n)   subclass_id      uint16    index into palette
+#   bytes [      18n .. 19n)   class_id         uint8     index into palette
+#   bytes [      19n .. 20n)   subclass_conf    uint8     round(255*v) (1.0 for ref)
+#   bytes [      20n .. 21n)   subclass_margin  uint8     round(255*v) (1.0 for ref)
+#   bytes [      21n .. 22n)   min_cos_dist     uint8     round(255*v) (0.0 for ref)
+# Total size = 22 * n bytes.
 
 import os
 import json
 import h5py
 import numpy as np
 import pandas as pd
+import torch
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 out_dir = f'{working_dir}/viewer_data'
@@ -32,6 +35,14 @@ os.makedirs(out_dir, exist_ok=True)
 datasets = ['xenium', 'merfish', 'slidetags']
 ref_path = f'{working_dir}/input/adata_ref_zeng_raw.h5ad'
 metadata_csv = '/home/karbabi/single-cell/ABC/metadata/cells_joined.csv'
+
+# which obs column was used as the matching key during CAST-STACK alignment.
+# (must match `sample_col` in 04_project_cell_types.py per dataset)
+sample_col_map = {
+    'xenium':    'sample_rep',
+    'merfish':   'sample',
+    'slidetags': 'sample',
+}
 
 #endregion
 #region helpers ################################################################
@@ -71,24 +82,83 @@ def write_atomic(path, data):
     os.replace(tmp, path)
 
 
-def pack_sample(x, y, class_ids, subclass_ids, conf, margin, cos):
-    """Pack one sample into a 14*n byte buffer with the layout above."""
-    n = len(x)
-    buf = bytearray(14 * n)
+def f32pair_to_u64(x, y):
+    """Bit-exact (float32, float32) -> uint64 key for hashing."""
+    xb = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    yb = np.ascontiguousarray(y, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    return (xb << np.uint64(32)) | yb
+
+
+def gather_affine_coords(name, sample_key_arr, x_ffd, y_ffd):
+    """For each query cell (with its dataset-level sample key, x_ffd, y_ffd),
+    return matching (x_affine, y_affine) by looking up the row in
+    coords_ffd[s] then reading from coords_affine[s] at that index.
+
+    Falls back to ffd coords for unmatched cells (and prints a warning)."""
+    n = len(sample_key_arr)
+    x_aff = x_ffd.copy()
+    y_aff = y_ffd.copy()
+
+    ffd_path = f'{working_dir}/output/{name}/coords_ffd.pt'
+    aff_path = f'{working_dir}/output/{name}/coords_affine.pt'
+    if not (os.path.exists(ffd_path) and os.path.exists(aff_path)):
+        print(f'  [{name}] no coords_*.pt — affine view will mirror ffd')
+        return x_aff, y_aff
+
+    cffd = torch.load(ffd_path, weights_only=False)
+    caff = torch.load(aff_path, weights_only=False)
+
+    matched = 0
+    for s in np.unique(sample_key_arr):
+        if s not in cffd or s not in caff:
+            continue
+        cf = np.asarray(cffd[s], dtype=np.float32)
+        ca = np.asarray(caff[s], dtype=np.float32)
+        # bit-exact (x_ffd, y_ffd) -> row index in coords_ffd[s]
+        ref_keys = f32pair_to_u64(cf[:, 0], cf[:, 1])
+        idx_map = dict(zip(ref_keys.tolist(), range(ref_keys.shape[0])))
+
+        m = (sample_key_arr == s)
+        cell_idx = np.where(m)[0]
+        q_keys = f32pair_to_u64(x_ffd[cell_idx], y_ffd[cell_idx]).tolist()
+        for i, k in zip(cell_idx, q_keys):
+            j = idx_map.get(int(k))
+            if j is not None:
+                x_aff[i] = ca[j, 0]
+                y_aff[i] = ca[j, 1]
+                matched += 1
+
+    if matched < n:
+        print(f'  [{name}] affine match: {matched:,}/{n:,} '
+              f'({100*matched/max(n,1):.1f}%) — unmatched cells fall back to ffd')
+    else:
+        print(f'  [{name}] affine match: {matched:,}/{n:,} (100%)')
+    return x_aff, y_aff
+
+
+def pack_sample(x_ffd, y_ffd, x_aff, y_aff,
+                class_ids, subclass_ids, conf, margin, cos):
+    """Pack one sample into a 22*n byte buffer with the layout above."""
+    n = len(x_ffd)
+    buf = bytearray(22 * n)
     view = memoryview(buf)
-    np.frombuffer(view[0 * n:4 * n], dtype=np.float32)[:] = \
-        x.astype(np.float32, copy=False)
-    np.frombuffer(view[4 * n:8 * n], dtype=np.float32)[:] = \
-        y.astype(np.float32, copy=False)
-    np.frombuffer(view[8 * n:10 * n], dtype=np.uint16)[:] = \
+    np.frombuffer(view[0  * n:4  * n], dtype=np.float32)[:] = \
+        x_ffd.astype(np.float32, copy=False)
+    np.frombuffer(view[4  * n:8  * n], dtype=np.float32)[:] = \
+        y_ffd.astype(np.float32, copy=False)
+    np.frombuffer(view[8  * n:12 * n], dtype=np.float32)[:] = \
+        x_aff.astype(np.float32, copy=False)
+    np.frombuffer(view[12 * n:16 * n], dtype=np.float32)[:] = \
+        y_aff.astype(np.float32, copy=False)
+    np.frombuffer(view[16 * n:18 * n], dtype=np.uint16)[:] = \
         subclass_ids.astype(np.uint16, copy=False)
-    np.frombuffer(view[10 * n:11 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[18 * n:19 * n], dtype=np.uint8)[:] = \
         class_ids.astype(np.uint8, copy=False)
-    np.frombuffer(view[11 * n:12 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[19 * n:20 * n], dtype=np.uint8)[:] = \
         conf.astype(np.uint8, copy=False)
-    np.frombuffer(view[12 * n:13 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[20 * n:21 * n], dtype=np.uint8)[:] = \
         margin.astype(np.uint8, copy=False)
-    np.frombuffer(view[13 * n:14 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[21 * n:22 * n], dtype=np.uint8)[:] = \
         cos.astype(np.uint8, copy=False)
     return buf
 
@@ -172,17 +242,19 @@ assert len(class_palette) < 2**8, 'too many classes for u8'
 #region manifest skeleton ######################################################
 
 manifest = {
-    'version': 2,
+    'version': 3,
     'class_palette': class_palette,
     'subclass_palette': subclass_palette,
     'reference': None,
     'datasets': {},
     'binary_layout': {
         'fields': [
-            {'name': 'x', 'dtype': 'float32', 'count': 'n'},
-            {'name': 'y', 'dtype': 'float32', 'count': 'n'},
+            {'name': 'x_ffd',    'dtype': 'float32', 'count': 'n'},
+            {'name': 'y_ffd',    'dtype': 'float32', 'count': 'n'},
+            {'name': 'x_affine', 'dtype': 'float32', 'count': 'n'},
+            {'name': 'y_affine', 'dtype': 'float32', 'count': 'n'},
             {'name': 'subclass_id', 'dtype': 'uint16', 'count': 'n'},
-            {'name': 'class_id', 'dtype': 'uint8', 'count': 'n'},
+            {'name': 'class_id',    'dtype': 'uint8',  'count': 'n'},
             {'name': 'subclass_confidence', 'dtype': 'uint8',
              'count': 'n', 'scale': 1 / 255},
             {'name': 'subclass_margin', 'dtype': 'uint8',
@@ -190,7 +262,7 @@ manifest = {
             {'name': 'min_cos_dist', 'dtype': 'uint8',
              'count': 'n', 'scale': 1 / 255},
         ],
-        'bytes_per_cell': 14,
+        'bytes_per_cell': 22,
     },
 }
 
@@ -225,8 +297,9 @@ for section in sorted(np.unique(ref_sample).tolist()):
     full = np.full(n, 255, dtype=np.uint8)
     zero = np.zeros(n, dtype=np.uint8)
 
+    # ref isn't transformed: ffd == affine == raw
     buf = pack_sample(
-        x_s, y_s,
+        x_s, y_s, x_s, y_s,
         ref_class_ids[m], ref_subclass_ids[m],
         full, full, zero)
 
@@ -234,19 +307,27 @@ for section in sorted(np.unique(ref_sample).tolist()):
     rel = f'reference/{short}.bin'
     write_atomic(f'{out_dir}/{rel}', buf)
 
+    rng = {
+        'ffd':    [[float(x_s.min()), float(x_s.max())],
+                   [float(y_s.min()), float(y_s.max())]],
+        'affine': [[float(x_s.min()), float(x_s.max())],
+                   [float(y_s.min()), float(y_s.max())]],
+    }
     ref_section_list.append({
         'section': section,
         'short': short,
         'n_cells': n,
-        'x_range': [float(x_s.min()), float(x_s.max())],
-        'y_range': [float(y_s.min()), float(y_s.max())],
+        'x_range_ffd':    rng['ffd'][0],    'y_range_ffd':    rng['ffd'][1],
+        'x_range_affine': rng['affine'][0], 'y_range_affine': rng['affine'][1],
         'file': rel,
     })
 
 manifest['reference'] = {
     'n_cells': int(len(ref_x)),
-    'x_range': [float(ref_x.min()), float(ref_x.max())],
-    'y_range': [float(ref_y.min()), float(ref_y.max())],
+    'x_range_ffd':    [float(ref_x.min()), float(ref_x.max())],
+    'y_range_ffd':    [float(ref_y.min()), float(ref_y.max())],
+    'x_range_affine': [float(ref_x.min()), float(ref_x.max())],
+    'y_range_affine': [float(ref_y.min()), float(ref_y.max())],
     'sections': ref_section_list,
 }
 print(f'[reference] wrote {len(ref_section_list)} sections '
@@ -273,11 +354,17 @@ for name in datasets:
     condition = obs['condition'].astype(str)
     cls = obs['class'].astype(str)
     sub = obs['subclass'].astype(str)
-    x = obs['x_ffd'].astype(np.float32)
-    y = obs['y_ffd'].astype(np.float32)
+    x_ffd_arr = obs['x_ffd'].astype(np.float32)
+    y_ffd_arr = obs['y_ffd'].astype(np.float32)
     conf = obs['subclass_confidence'].astype(np.float32)
     margin = obs['subclass_margin'].astype(np.float32)
     cos = obs['min_cos_dist'].astype(np.float32)
+
+    # match each cell to its row in coords_affine.pt via coords_ffd.pt
+    sample_col = sample_col_map.get(name, 'sample')
+    sample_key = (sample_rep if sample_col == 'sample_rep' else sample)
+    x_aff_arr, y_aff_arr = gather_affine_coords(
+        name, sample_key, x_ffd_arr, y_ffd_arr)
 
     class_ids = np.array(
         [class_to_id.get(c, 0) for c in cls], dtype=np.uint8)
@@ -298,11 +385,11 @@ for name in datasets:
         if n == 0:
             continue
 
-        x_s = x[m]
-        y_s = y[m]
+        xf = x_ffd_arr[m]; yf = y_ffd_arr[m]
+        xa = x_aff_arr[m]; ya = y_aff_arr[m]
 
         buf = pack_sample(
-            x_s, y_s,
+            xf, yf, xa, ya,
             class_ids[m], subclass_ids[m],
             conf_q[m], margin_q[m], cos_q[m])
 
@@ -315,15 +402,19 @@ for name in datasets:
             'sample': str(sample[first]),
             'condition': str(condition[first]),
             'n_cells': n,
-            'x_range': [float(x_s.min()), float(x_s.max())],
-            'y_range': [float(y_s.min()), float(y_s.max())],
+            'x_range_ffd':    [float(xf.min()), float(xf.max())],
+            'y_range_ffd':    [float(yf.min()), float(yf.max())],
+            'x_range_affine': [float(xa.min()), float(xa.max())],
+            'y_range_affine': [float(ya.min()), float(ya.max())],
             'file': rel,
         })
 
     manifest['datasets'][name] = {
         'n_cells': int(n_total),
-        'x_range': [float(x.min()), float(x.max())],
-        'y_range': [float(y.min()), float(y.max())],
+        'x_range_ffd':    [float(x_ffd_arr.min()), float(x_ffd_arr.max())],
+        'y_range_ffd':    [float(y_ffd_arr.min()), float(y_ffd_arr.max())],
+        'x_range_affine': [float(x_aff_arr.min()), float(x_aff_arr.max())],
+        'y_range_affine': [float(y_aff_arr.min()), float(y_aff_arr.max())],
         'samples': samples,
     }
 

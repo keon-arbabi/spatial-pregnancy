@@ -202,6 +202,12 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
         <label><input type="radio" name="cmode" value="subclass">subclass</label>
     </div>
 
+    <h2>coords</h2>
+    <div id="coordsmode-radio" class="radio-row">
+        <label><input type="radio" name="coords" value="ffd" checked>ffd</label>
+        <label><input type="radio" name="coords" value="affine">affine</label>
+    </div>
+
     <h2>point size</h2>
     <input id="pointsize" type="range" min="0.5" max="6" step="0.1" value="1.5">
 
@@ -261,6 +267,7 @@ const state = {
     dataset: 'xenium',
     colorMode: 'class',
     filterLevel: 'class',  // which level the (single) filter list operates on
+    coordsMode: 'ffd',     // 'ffd' or 'affine'
     pointSize: 1.5,
     panels: [],            // {el, slice, vp:{x,y,w,h}}
     slices: new Map(),     // file -> {n, posBuf, classBuf, subBuf, xRange, yRange}
@@ -480,24 +487,31 @@ async function loadSlice(entry) {
     const buf = new Uint8Array(await r.arrayBuffer());
     const n = entry.n_cells;
 
-    // unpack SoA layout
-    const xs  = new Float32Array(buf.buffer, buf.byteOffset + 0,  n);
-    const ys  = new Float32Array(buf.buffer, buf.byteOffset + 4*n, n);
-    const sub = new Uint16Array(buf.buffer, buf.byteOffset + 8*n,  n);
-    const cls = new Uint8Array (buf.buffer, buf.byteOffset + 10*n, n);
+    // SoA layout (matches XX_export_viewer.py pack_sample, 22 bytes/cell):
+    //   x_ffd:f32  y_ffd:f32  x_aff:f32  y_aff:f32
+    //   sub:u16    cls:u8     conf:u8    margin:u8  cos:u8
+    const xsFfd = new Float32Array(buf.buffer, buf.byteOffset + 0  * n, n);
+    const ysFfd = new Float32Array(buf.buffer, buf.byteOffset + 4  * n, n);
+    const xsAff = new Float32Array(buf.buffer, buf.byteOffset + 8  * n, n);
+    const ysAff = new Float32Array(buf.buffer, buf.byteOffset + 12 * n, n);
+    const sub   = new Uint16Array (buf.buffer, buf.byteOffset + 16 * n, n);
+    const cls   = new Uint8Array  (buf.buffer, buf.byteOffset + 18 * n, n);
 
-    // interleaved positions for vec2 attribute
-    const pos = new Float32Array(2 * n);
-    for (let i = 0; i < n; i++) { pos[2*i] = xs[i]; pos[2*i+1] = ys[i]; }
+    function makePosBuf(xs, ys) {
+        const pos = new Float32Array(2 * n);
+        for (let i = 0; i < n; i++) { pos[2*i] = xs[i]; pos[2*i+1] = ys[i]; }
+        const b = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+        return b;
+    }
+    const posBufFfd = makePosBuf(xsFfd, ysFfd);
+    const posBufAff = makePosBuf(xsAff, ysAff);
 
     // upload class/subclass ids as floats (most compatible across drivers)
     const clsF = new Float32Array(n);
     const subF = new Float32Array(n);
     for (let i = 0; i < n; i++) { clsF[i] = cls[i]; subF[i] = sub[i]; }
-
-    const posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
 
     const classBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, classBuf);
@@ -507,18 +521,21 @@ async function loadSlice(entry) {
     gl.bindBuffer(gl.ARRAY_BUFFER, subBuf);
     gl.bufferData(gl.ARRAY_BUFFER, subF, gl.STATIC_DRAW);
 
-    // keep CPU-side copies for hit testing (small: ~10 bytes/cell)
-    const xsCopy = new Float32Array(xs);   // detach from buf so it can GC
-    const ysCopy = new Float32Array(ys);
-    const subCopy = new Uint16Array(sub);
-    const clsCopy = new Uint8Array(cls);
-
+    // keep CPU-side copies for hit testing
     const slice = {
         n,
-        posBuf, classBuf, subBuf,
-        xRange: entry.x_range,
-        yRange: entry.y_range,
-        xs: xsCopy, ys: ysCopy, cls: clsCopy, sub: subCopy,
+        posBufFfd, posBufAff,
+        classBuf, subBuf,
+        xRangeFfd: entry.x_range_ffd,
+        yRangeFfd: entry.y_range_ffd,
+        xRangeAffine: entry.x_range_affine,
+        yRangeAffine: entry.y_range_affine,
+        xsFfd: new Float32Array(xsFfd),
+        ysFfd: new Float32Array(ysFfd),
+        xsAff: new Float32Array(xsAff),
+        ysAff: new Float32Array(ysAff),
+        cls: new Uint8Array(cls),
+        sub: new Uint16Array(sub),
     };
     state.slices.set(entry.file, slice);
     return slice;
@@ -647,11 +664,28 @@ function computeViewports() {
     }
 }
 
-// fit slice's xRange/yRange into the panel preserving aspect, with padding.
+function sliceRange(slice) {
+    return state.coordsMode === 'affine'
+        ? { x: slice.xRangeAffine, y: slice.yRangeAffine }
+        : { x: slice.xRangeFfd,    y: slice.yRangeFfd };
+}
+
+function slicePosBuf(slice) {
+    return state.coordsMode === 'affine' ? slice.posBufAff : slice.posBufFfd;
+}
+
+function sliceXY(slice) {
+    return state.coordsMode === 'affine'
+        ? { xs: slice.xsAff, ys: slice.ysAff }
+        : { xs: slice.xsFfd, ys: slice.ysFfd };
+}
+
+// fit slice's range into the panel preserving aspect, with padding.
 // returns (sx, sy, cx, cy) such that ndc = (world - c) * s.
 function panelTransform(p, slice) {
-    const [x0, x1] = slice.xRange;
-    const [y0, y1] = slice.yRange;
+    const r = sliceRange(slice);
+    const [x0, x1] = r.x;
+    const [y0, y1] = r.y;
     const wx = x1 - x0, wy = y1 - y0;
     const aspect = p.vp.w / p.vp.h;
     const dataAspect = wx / wy;
@@ -738,7 +772,7 @@ function render() {
             t.sx, t.sy, -t.cx * t.sx, -t.cy * t.sy);
 
         // bind attributes
-        gl.bindBuffer(gl.ARRAY_BUFFER, slice.posBuf);
+        gl.bindBuffer(gl.ARRAY_BUFFER, slicePosBuf(slice));
         gl.enableVertexAttribArray(state.locs.a_pos);
         gl.vertexAttribPointer(state.locs.a_pos, 2, gl.FLOAT, false, 0, 0);
 
@@ -861,8 +895,9 @@ function handleHover(mx, my) {
     const thrWX = thr * pxToWorldX;
     const thrWY = thr * pxToWorldY;
 
-    // brute-force NN over visible cells only
-    const xs = slice.xs, ys = slice.ys;
+    // brute-force NN over visible cells only (using active coords)
+    const xy = sliceXY(slice);
+    const xs = xy.xs, ys = xy.ys;
     const cls = slice.cls, sub = slice.sub;
     const useSubFilter = state.filterLevel === 'subclass';
     const visArr = useSubFilter ? state.subVisible : state.classVisible;
@@ -938,6 +973,14 @@ function buildSidebar() {
     document.querySelectorAll('input[name="cmode"]').forEach(r => {
         r.addEventListener('change', () => {
             state.colorMode = r.value;
+            render();
+        });
+    });
+
+    // coords mode (ffd / affine)
+    document.querySelectorAll('input[name="coords"]').forEach(r => {
+        r.addEventListener('change', () => {
+            state.coordsMode = r.value;
             render();
         });
     });
