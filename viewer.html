@@ -120,6 +120,7 @@ button.active:hover { background: #79b5ff; }
     max-height: 240px; overflow-y: auto;
     border: 1px solid var(--border); padding: 4px 6px;
     background: #111; border-radius: 3px;
+    display: flex; flex-direction: column;
 }
 .list label {
     display: flex; align-items: center; gap: 6px;
@@ -960,13 +961,9 @@ function buildSidebar() {
     // initial list build
     rebuildFilterList();
 
-    // search box
+    // fuzzy search box
     document.getElementById('filter-search').addEventListener('input', e => {
-        const q = e.target.value.toLowerCase();
-        document.querySelectorAll('#filter-list label').forEach(l => {
-            const name = l.dataset.name.toLowerCase();
-            l.style.display = name.includes(q) ? '' : 'none';
-        });
+        applySearch(e.target.value);
     });
 
     // bulk buttons (operate on the active filter level)
@@ -991,6 +988,7 @@ function rebuildFilterList() {
         if (p.name === 'Unlabelled' && i === 0) return; // hide sentinel
         const lbl = document.createElement('label');
         lbl.dataset.name = p.name;
+        lbl.dataset.nameLower = p.name.toLowerCase();
         lbl.innerHTML = `<input type="checkbox" data-i="${i}" ${visArr[i] ? 'checked' : ''}>
             <span class="swatch" style="background:${p.color}"></span>
             <span class="label-name" title="${p.name}">${p.name}</span>`;
@@ -1011,8 +1009,8 @@ function rebuildFilterList() {
         });
         el.appendChild(lbl);
     });
-    // re-apply search filter and reflect solo state on the button
-    document.getElementById('filter-search').value = '';
+    // re-apply current search and reflect solo state on the button
+    applySearch(document.getElementById('filter-search').value);
     document.querySelector('button[data-act="solo"]')
         .classList.toggle('active', state.solo[soloKey(lvl)]);
 }
@@ -1022,6 +1020,54 @@ function toggleSolo() {
     state.solo[k] = !state.solo[k];
     document.querySelector('button[data-act="solo"]')
         .classList.toggle('active', state.solo[k]);
+}
+
+// fuzzy matcher: returns null on no match, else a non-negative score where
+// LOWER is better. matches characters of `q` in order anywhere in `name`,
+// scoring on the gap distance and rewarding hits at start / after separators.
+function fuzzyScore(q, name) {
+    if (!q) return 0;
+    const ql = q.length, nl = name.length;
+    let qi = 0, ni = 0;
+    let score = 0;
+    let lastMatch = -2;
+    while (qi < ql && ni < nl) {
+        const qc = q.charCodeAt(qi);
+        const nc = name.charCodeAt(ni);
+        if (qc === nc) {
+            // gap penalty since the last match
+            const gap = ni - lastMatch - 1;
+            score += gap;
+            // bonus (negative) for matching at start or after separator
+            if (lastMatch === -2 && ni === 0) score -= 4;
+            else if (ni > 0) {
+                const prev = name.charCodeAt(ni - 1);
+                // ' ', '-', '/', '_', '.', '(' -> separator
+                if (prev === 32 || prev === 45 || prev === 47 ||
+                    prev === 95 || prev === 46 || prev === 40) score -= 2;
+            }
+            lastMatch = ni;
+            qi++;
+        }
+        ni++;
+    }
+    return qi === ql ? score : null;
+}
+
+function applySearch(query) {
+    const q = (query || '').toLowerCase().trim();
+    const labels = document.querySelectorAll('#filter-list label');
+    labels.forEach(l => {
+        const name = l.dataset.nameLower;
+        const score = fuzzyScore(q, name);
+        if (score === null) {
+            l.style.display = 'none';
+        } else {
+            l.style.display = '';
+            // CSS `order` is integer-only; offset to keep it non-negative
+            l.style.order = String(score + 1000);
+        }
+    });
 }
 
 function setAll(on) {

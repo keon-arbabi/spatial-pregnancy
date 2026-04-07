@@ -1,164 +1,101 @@
 import numpy as np
+import pandas as pd
 import scanpy as sc
-import torch
 from scipy.spatial import cKDTree
+from scipy.stats import zscore
 
 working_dir = '/home/karbabi/spatial-pregnancy'
-target = '05 OB-IMN GABA'
-
 datasets = {
-    'merfish': 'sample',
+    'merfish':   'sample',
     'slidetags': 'sample',
-    'xenium': 'sample_rep',
+    'xenium':    'sample_rep',
 }
 
 ref = sc.read_h5ad(f'{working_dir}/input/adata_ref_zeng_bridge.h5ad')
-nbrs = np.load(f'{working_dir}/input/ref_scrna_neighbors.npz')
-scrna_class_labels = np.asarray(ref.uns['scrna_class_labels']).astype(str)
-scrna_subclass_labels = np.asarray(ref.uns['scrna_subclass_labels']).astype(str)
+ref_sections = sorted(s for s in ref.obs['sample'].unique()
+                      if s.startswith('C57BL6J-638850'))
+ref_obs = ref.obs[ref.obs['sample'].isin(ref_sections)].copy()
+ref_coords_all = ref_obs[['x_raw', 'y_raw']].values
+ref_class_all = ref_obs['class'].astype(str).values
 
-# ref stats
-ref_class = ref.obs['class'].astype(str).values
-ref_subclass = ref.obs['subclass'].astype(str).values
-n_ref_total = len(ref)
-n_ref_target = (ref_class == target).sum()
-print(f'=== REF STATS ===')
-print(f'total ref cells: {n_ref_total:,}')
-print(f'ref cells of class {target}: {n_ref_target:,} '
-      f'({n_ref_target/n_ref_total*100:.2f}%)')
-ref_target_subs = np.unique(ref_subclass[ref_class == target])
-print(f'subclasses in {target}: {list(ref_target_subs)}')
+# per-class within-ref NN distance (localization scale)
+ref_nn_by_class = {}
+for c in np.unique(ref_class_all):
+    pts = ref_coords_all[ref_class_all == c]
+    if len(pts) < 2:
+        continue
+    t = cKDTree(pts)
+    d, _ = t.query(pts, k=2)
+    ref_nn_by_class[c] = d[:, 1].mean()
 
-# scRNA stats
-n_scrna_target = (scrna_class_labels == target).sum()
-print(f'\nscRNA cells of class {target}: {n_scrna_target:,} '
-      f'/ {len(scrna_class_labels):,} '
-      f'({n_scrna_target/len(scrna_class_labels)*100:.2f}%)')
-print()
+ref_tree_all = cKDTree(ref_coords_all)
+ref_trees_by_class = {
+    c: cKDTree(ref_coords_all[ref_class_all == c])
+    for c in np.unique(ref_class_all)
+    if (ref_class_all == c).sum() > 0
+}
 
 for name, sample_col in datasets.items():
-    print(f'\n=== {name.upper()} ===')
+    print(f'\n=== {name} ===')
     adata = sc.read_h5ad(
         f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad')
-    data = np.load(
-        f'{working_dir}/output/{name}/query_scrna_harmony.npz',
-        allow_pickle=True)
-    query_harmony = data['query_harmony']
-    scrna_harmony = data['scrna_harmony']
+    q_coords = adata.obs[['x_ffd', 'y_ffd']].values
+    q_class = adata.obs['class'].astype(str).values
 
-    # load query coords via bridge indexing (post-fix)
-    coords_ffd = torch.load(
-        f'{working_dir}/output/{name}/coords_ffd.pt', weights_only=False)
-    ref_sections = sorted(
-        s for s in ref.obs['sample'].unique()
-        if s.startswith('C57BL6J-638850'))
-    ref_global_idx = np.concatenate([
-        np.where(ref.obs['sample'] == s)[0] for s in ref_sections])
-    ref_coords = ref.obs.iloc[ref_global_idx][['x_raw', 'y_raw']].values
+    # radius matched to pipeline
+    fold = 30 if name == 'slidetags' else 100
+    t = cKDTree(q_coords)
+    d, _ = t.query(q_coords, k=2)
+    radius = fold * d[:, 1].mean()
 
-    query_coords = adata.obs[['x_ffd', 'y_ffd']].values
-
-    n_total = len(adata)
-    target_mask = adata.obs['class'] == target
-    n_target = target_mask.sum()
-    print(f'assigned {target}: {n_target:,} / {n_total:,} '
-          f'({n_target/n_total*100:.2f}%)')
-    print(f'expected (ref proportion): '
-          f'{n_ref_target/n_ref_total*100:.2f}% '
-          f'= {int(n_total * n_ref_target/n_ref_total):,}')
-    print(f'over-assignment ratio: '
-          f'{(n_target/n_total)/(n_ref_target/n_ref_total):.1f}x')
-
-    # unconstrained comparison
-    if 'class_unconstrained' in adata.obs.columns:
-        unc_mask = adata.obs['class_unconstrained'] == target
-        n_unc = unc_mask.sum()
-        print(f'unconstrained {target}: {n_unc:,} '
-              f'({n_unc/n_total*100:.2f}%)')
-        overlap = (target_mask & unc_mask).sum()
-        print(f'  constrained∩unconstrained: {overlap:,} '
-              f'({overlap/max(n_target,1)*100:.0f}% of constrained)')
-
-    # QC metrics for target cells
-    tgt_obs = adata.obs[target_mask]
-    print(f'\n  QC metrics for {target}-assigned cells:')
-    for col in ['subclass_confidence', 'subclass_margin', 'min_cos_dist',
-                'n_spatial_candidates', 'subclass_bridge_consistency']:
-        if col in tgt_obs.columns:
-            med = tgt_obs[col].median()
-            q25, q75 = tgt_obs[col].quantile([0.25, 0.75])
-            print(f'    {col}: median={med:.3f} '
-                  f'(Q25={q25:.3f}, Q75={q75:.3f})')
-
-    # what subclasses within the target class are being assigned?
-    tgt_subclass_counts = tgt_obs['subclass'].value_counts().head(10)
-    print(f'\n  top subclasses assigned under {target}:')
-    for s, c in tgt_subclass_counts.items():
-        print(f'    {s}: {c:,}')
-
-    # sample 5 spatially diverse target cells
-    tgt_idx = np.where(target_mask)[0]
-    if len(tgt_idx) == 0:
-        continue
-    tgt_y = query_coords[tgt_idx, 1]
-    sample_idx = tgt_idx[np.argsort(tgt_y)[::max(len(tgt_idx)//5, 1)][:5]]
-
-    # compute radius (same as production)
-    def avg_nn_dist(c):
-        t = cKDTree(c)
-        d, _ = t.query(c, k=2)
-        return d[:, 1].mean()
-    edge = avg_nn_dist(query_coords)
-    fold = {'merfish': 100, 'slidetags': 30, 'xenium': 100}[name]
-    radius = fold * edge
-    tree = cKDTree(ref_coords)
-
-    print(f'\n  radius: edge={edge:.5f} * fold={fold} = {radius:.4f}')
-    print(f'  ref total in class {target} across 4 ref sections: '
-          f'{(ref_class[ref_global_idx] == target).sum():,}')
-
-    # 5-cell diagnostic
-    print(f'\n  {len(sample_idx)} sample {target} cells:')
-    for i in sample_idx:
-        qc = query_coords[i]
-        cands = tree.query_ball_point(qc, r=radius)
-        if len(cands) == 0:
+    # 1) local-ref support
+    nbrs = ref_tree_all.query_ball_point(q_coords, r=radius)
+    support = np.zeros(len(adata))
+    for i, nb in enumerate(nbrs):
+        if not nb:
+            support[i] = np.nan
             continue
-        cands = np.array(cands)
-        ref_g = ref_global_idx[cands]
-        ref_classes_near = ref_class[ref_g]
-        ref_subs_near = ref_subclass[ref_g]
+        support[i] = (ref_class_all[nb] == q_class[i]).mean()
 
-        n_target_in_ref = (ref_classes_near == target).sum()
+    # 2) distance to nearest same-class ref cell, normalized
+    dist_ratio = np.full(len(adata), np.nan)
+    for c in np.unique(q_class):
+        if c not in ref_trees_by_class or c not in ref_nn_by_class:
+            continue
+        idx = np.where(q_class == c)[0]
+        d_c, _ = ref_trees_by_class[c].query(q_coords[idx], k=1)
+        dist_ratio[idx] = d_c / ref_nn_by_class[c]
 
-        # nearest target ref cell (within all 4 sections)
-        target_ref_mask = ref_class[ref_global_idx] == target
-        if target_ref_mask.any():
-            nearest_d, _ = cKDTree(ref_coords[target_ref_mask]).query(qc, k=1)
-        else:
-            nearest_d = np.inf
+    # 3) spatial dispersion ratio (per class, pooled across sections)
+    rows = []
+    for c in np.unique(q_class):
+        if c not in ref_trees_by_class:
+            continue
+        q_pts = q_coords[q_class == c]
+        if len(q_pts) < 5:
+            continue
+        r_pts = ref_coords_all[ref_class_all == c]
+        if len(r_pts) < 5:
+            continue
+        q_disp = np.sqrt(q_pts.var(axis=0).sum())
+        r_disp = np.sqrt(r_pts.var(axis=0).sum())
+        if r_disp == 0:
+            continue
+        rows.append(dict(
+            cls=c,
+            n_query=len(q_pts),
+            local_support=np.nanmedian(support[q_class == c]),
+            dist_ratio=np.nanmedian(dist_ratio[q_class == c]),
+            disp_ratio=q_disp / r_disp,
+        ))
 
-        # scRNA pool
-        scrna_pool = nbrs['indices'][ref_g].ravel()
-        pool_target = (scrna_class_labels[scrna_pool] == target).sum()
-        pool_unique = len(np.unique(scrna_pool))
+    df = pd.DataFrame(rows).dropna()
+    df = df[df['n_query'] >= 50]  # ignore tiny populations
+    df['z_support'] = zscore(-df['local_support'])  # invert: low = bad
+    df['z_dist']    = zscore(np.log1p(df['dist_ratio']))
+    df['z_disp']    = zscore(np.log1p(df['disp_ratio']))
+    df['suspicion'] = df[['z_support', 'z_dist', 'z_disp']].sum(axis=1)
+    df = df.sort_values('suspicion', ascending=False)
 
-        # ref-anchored filtering: is target subclass present in ref neighbors?
-        ref_subs_present = set(ref_subs_near)
-        target_sub_present = any(
-            s in ref_subs_present for s in ref_target_subs)
-
-        conf = adata.obs['subclass_confidence'].iloc[i]
-        marg = adata.obs['subclass_margin'].iloc[i]
-        cos = adata.obs['min_cos_dist'].iloc[i]
-
-        print(f'    cell {i}: ({qc[0]:.2f}, {qc[1]:.2f})')
-        print(f'      conf={conf:.2f}, margin={marg:.2f}, cos={cos:.3f}')
-        print(f'      {len(cands):,} ref neighbors, '
-              f'{n_target_in_ref:,} of class {target}')
-        print(f'      nearest target ref cell: d={nearest_d:.4f} '
-              f'(radius={radius:.4f})')
-        print(f'      scRNA pool: {pool_unique:,} unique, '
-              f'{pool_target:,} of class {target}')
-        print(f'      target subclass in ref_subs_present: '
-              f'{target_sub_present}')
+    print(df[['cls', 'n_query', 'local_support', 'dist_ratio',
+              'disp_ratio', 'suspicion']].head(20).to_string(index=False))
