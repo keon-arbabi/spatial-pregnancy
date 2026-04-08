@@ -32,6 +32,16 @@ working_dir = '/home/karbabi/spatial-pregnancy'
 out_dir = f'{working_dir}/viewer_data'
 os.makedirs(out_dir, exist_ok=True)
 
+# one-shot env diagnostic so permission failures are easy to debug
+import getpass, socket
+_um = os.umask(0o022); os.umask(_um)
+print(f'[env] host={socket.gethostname()} '
+      f'user={getpass.getuser()} uid={os.getuid()} euid={os.geteuid()} '
+      f'umask={oct(_um)}')
+for _d in ['', '/reference', '/xenium', '/merfish', '/slidetags']:
+    _p = out_dir + _d
+    print(f'[env] writable {_p}: {os.access(_p, os.W_OK) if os.path.exists(_p) else "missing"}')
+
 datasets = ['xenium', 'merfish', 'slidetags']
 ref_path = f'{working_dir}/input/adata_ref_zeng_raw.h5ad'
 metadata_csv = '/home/karbabi/single-cell/ABC/metadata/cells_joined.csv'

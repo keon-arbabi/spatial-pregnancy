@@ -1,8 +1,5 @@
 #region imports and setup #######################################################
 
-import subprocess
-import sys
-
 import numpy as np
 import scanpy as sc
 
@@ -66,13 +63,6 @@ for name, sample_col in datasets.items():
     adata = adata[keep].copy()
     adata.write(out_path)
     print(f'[{name}] saved {out_path}')
-
-# regenerate viewer_data/ from the freshly written 03 h5ads
-print('\n[viewer] regenerating viewer_data/...')
-subprocess.run(
-    [sys.executable, f'{working_dir}/XX_export_viewer.py'], check=True)
-
-print('\ndone')
 
 '''
 [merfish] 990,647 cells
