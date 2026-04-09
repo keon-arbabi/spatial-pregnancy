@@ -8,15 +8,76 @@
 <meta http-equiv="expires" content="0">
 <title>spatial-pregnancy viewer</title>
 <style>
+/* dark (default) */
 :root {
-    --bg: #f6f7f9;
-    --panel-bg: #ffffff;
-    --side-bg: #fbfbfd;
-    --border: #d8dce3;
-    --text: #1a1d23;
-    --muted: #6a7280;
-    --accent: #2563eb;
-    --canvas-bg: #ffffff;
+    --bg:           #111;
+    --panel-bg:     #1a1a1a;
+    --side-bg:      #181818;
+    --border:       #2a2a2a;
+    --text:         #e5e5e5;
+    --muted:        #888;
+    --accent:       #5aa3ff;
+    --accent-text:  #000;
+    --accent-hover: #79b5ff;
+    --input-bg:     #111;
+    --button-bg:    #2a2a2a;
+    --button-hover: #333;
+    --list-bg:      #111;
+    --label-bg:     rgba(0,0,0,0.65);
+    --label-text:   #fff;
+    --label-border: rgba(255,255,255,0.06);
+    --count-bg:     rgba(0,0,0,0.55);
+    --count-text:   #ddd;
+    --tooltip-bg:   rgba(0,0,0,0.92);
+    --tooltip-border: #444;
+    --tooltip-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    --swatch-border: rgba(255,255,255,0.1);
+    --overlay-bg:   rgba(0,0,0,0.6);
+    --overlay-border: transparent;
+    --canvas-clear-r: 0;
+    --canvas-clear-g: 0;
+    --canvas-clear-b: 0;
+    --panel-shadow: none;
+    --cond-CTRL:     #4a8de0;
+    --cond-PREG:     #d96b6b;
+    --cond-POSTPART: #cf9039;
+    --cond-REF:      #555;
+}
+
+/* light */
+[data-theme="light"] {
+    --bg:           #f6f7f9;
+    --panel-bg:     #ffffff;
+    --side-bg:      #fbfbfd;
+    --border:       #d8dce3;
+    --text:         #1a1d23;
+    --muted:        #6a7280;
+    --accent:       #2563eb;
+    --accent-text:  #fff;
+    --accent-hover: #1d4ed8;
+    --input-bg:     #fff;
+    --button-bg:    #fff;
+    --button-hover: #eef0f4;
+    --list-bg:      #fff;
+    --label-bg:     rgba(255,255,255,0.92);
+    --label-text:   #1a1d23;
+    --label-border: rgba(0,0,0,0.08);
+    --count-bg:     rgba(255,255,255,0.9);
+    --count-text:   #4b5563;
+    --tooltip-bg:   rgba(255,255,255,0.97);
+    --tooltip-border: #d8dce3;
+    --tooltip-shadow: 0 6px 16px rgba(15,23,42,0.15);
+    --swatch-border: rgba(0,0,0,0.15);
+    --overlay-bg:   rgba(255,255,255,0.92);
+    --overlay-border: #d8dce3;
+    --canvas-clear-r: 1;
+    --canvas-clear-g: 1;
+    --canvas-clear-b: 1;
+    --panel-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    --cond-CTRL:     #2563eb;
+    --cond-PREG:     #d04646;
+    --cond-POSTPART: #c97a17;
+    --cond-REF:      #4b5563;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -60,35 +121,35 @@ body { display: flex; }
 #zoom-info {
     position: absolute; right: 10px; bottom: 10px;
     font-size: 11px; color: var(--muted);
-    background: rgba(255,255,255,0.92);
+    background: var(--overlay-bg);
     padding: 3px 8px; border-radius: 3px;
     pointer-events: none; z-index: 5;
-    border: 1px solid var(--border);
+    border: 1px solid var(--overlay-border);
 }
 #help {
     position: absolute; left: 10px; bottom: 10px;
     font-size: 10px; color: var(--muted);
-    background: rgba(255,255,255,0.92);
+    background: var(--overlay-bg);
     padding: 3px 8px; border-radius: 3px;
     pointer-events: none; z-index: 5;
-    border: 1px solid var(--border);
+    border: 1px solid var(--overlay-border);
 }
 #tooltip {
     position: fixed; left: 0; top: 0;
-    background: rgba(255,255,255,0.97);
-    border: 1px solid var(--border);
+    background: var(--tooltip-bg);
+    border: 1px solid var(--tooltip-border);
     color: var(--text); font-size: 11px;
     padding: 5px 8px; border-radius: 3px;
     pointer-events: none; z-index: 100;
     display: none;
     max-width: 280px;
-    box-shadow: 0 6px 16px rgba(15,23,42,0.15);
+    box-shadow: var(--tooltip-shadow);
 }
 #tooltip .row { display: flex; gap: 6px; align-items: center; }
 #tooltip .swatch {
     display: inline-block; width: 9px; height: 9px;
     border-radius: 2px;
-    border: 1px solid rgba(0,0,0,0.15);
+    border: 1px solid var(--swatch-border);
 }
 #tooltip .k { color: var(--muted); font-size: 10px; min-width: 50px; }
 #tooltip .v { color: var(--text); }
@@ -103,26 +164,27 @@ label { display: block; cursor: pointer; user-select: none; }
 .radio-row input, .check-row input { margin: 0; }
 input[type="search"], input[type="text"] {
     width: 100%; padding: 5px 7px; border: 1px solid var(--border);
-    background: #fff; color: var(--text); border-radius: 3px;
+    background: var(--input-bg); color: var(--text); border-radius: 3px;
     font: inherit;
 }
 input[type="range"] { width: 100%; }
 button {
-    background: #fff; color: var(--text); border: 1px solid var(--border);
+    background: var(--button-bg); color: var(--text);
+    border: 1px solid var(--border);
     padding: 3px 8px; border-radius: 3px; cursor: pointer; font: inherit;
 }
-button:hover { background: #eef0f4; }
+button:hover { background: var(--button-hover); }
 button.active {
     background: var(--accent); border-color: var(--accent);
-    color: #fff;
+    color: var(--accent-text);
 }
-button.active:hover { background: #1d4ed8; }
+button.active:hover { background: var(--accent-hover); }
 .btn-row { display: flex; gap: 4px; }
 
 .list {
     max-height: 240px; overflow-y: auto;
     border: 1px solid var(--border); padding: 4px 6px;
-    background: #fff; border-radius: 3px;
+    background: var(--list-bg); border-radius: 3px;
     display: flex; flex-direction: column;
 }
 .list label {
@@ -132,7 +194,7 @@ button.active:hover { background: #1d4ed8; }
 .swatch {
     display: inline-block; width: 10px; height: 10px;
     border-radius: 2px; flex: 0 0 10px;
-    border: 1px solid rgba(0,0,0,0.15);
+    border: 1px solid var(--swatch-border);
 }
 .label-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -158,15 +220,15 @@ button.active:hover { background: #1d4ed8; }
     border-radius: 4px;
     position: relative;
     pointer-events: auto;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    box-shadow: var(--panel-shadow);
 }
 .panel .label {
     position: absolute; left: 6px; top: 5px;
-    font-size: 12px; font-weight: 600; color: #1a1d23;
-    background: rgba(255,255,255,0.92);
+    font-size: 12px; font-weight: 600; color: var(--label-text);
+    background: var(--label-bg);
     padding: 2px 7px; border-radius: 3px;
     pointer-events: none;
-    border: 1px solid rgba(0,0,0,0.08);
+    border: 1px solid var(--label-border);
     letter-spacing: 0.02em;
 }
 .panel .label .cond {
@@ -177,17 +239,17 @@ button.active:hover { background: #1d4ed8; }
     vertical-align: 1px;
     letter-spacing: 0.04em;
 }
-.cond-CTRL     { background: #2563eb; color: #fff; }
-.cond-PREG     { background: #d04646; color: #fff; }
-.cond-POSTPART { background: #c97a17; color: #fff; }
-.cond-REF      { background: #4b5563; color: #fff; }
+.cond-CTRL     { background: var(--cond-CTRL);     color: #fff; }
+.cond-PREG     { background: var(--cond-PREG);     color: #fff; }
+.cond-POSTPART { background: var(--cond-POSTPART); color: #fff; }
+.cond-REF      { background: var(--cond-REF);      color: #fff; }
 .panel .count {
     position: absolute; right: 6px; top: 5px;
-    font-size: 10px; color: #4b5563;
-    background: rgba(255,255,255,0.9);
+    font-size: 10px; color: var(--count-text);
+    background: var(--count-bg);
     padding: 1px 5px; border-radius: 3px;
     pointer-events: none;
-    border: 1px solid rgba(0,0,0,0.08);
+    border: 1px solid var(--label-border);
 }
 hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 .note { color: var(--muted); font-size: 11px; }
@@ -195,7 +257,11 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 </head>
 <body>
 <aside id="sidebar">
-    <h1>spatial-pregnancy</h1>
+    <h1 style="display:flex;justify-content:space-between;align-items:center">
+        <span>spatial-pregnancy</span>
+        <button id="theme-toggle" title="toggle dark/light"
+                style="font-size:11px;padding:2px 7px">light</button>
+    </h1>
     <div class="note" id="status">loading manifest…</div>
 
     <h2>dataset</h2>
@@ -311,6 +377,7 @@ const soloKey = lvl => (lvl === 'subclass' ? 'sub' : 'class');
 // boot
 //----------------------------------------------------------------------------
 async function boot() {
+    initTheme();
     state.canvas = document.getElementById('canvas');
     const gl = state.canvas.getContext('webgl2', {antialias: false, premultipliedAlpha: false});
     if (!gl) { setStatus('webgl2 not available'); return; }
@@ -335,6 +402,40 @@ async function boot() {
 }
 
 function setStatus(s) { document.getElementById('status').textContent = s; }
+
+//----------------------------------------------------------------------------
+// theme (dark default, light alternative)
+//----------------------------------------------------------------------------
+function initTheme() {
+    const saved = localStorage.getItem('viewer-theme') || 'dark';
+    applyTheme(saved);
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+        const next = currentTheme() === 'dark' ? 'light' : 'dark';
+        applyTheme(next);
+        localStorage.setItem('viewer-theme', next);
+        if (state.gl) render();
+    });
+}
+
+function currentTheme() {
+    return document.body.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(t) {
+    if (t === 'light') document.body.dataset.theme = 'light';
+    else delete document.body.dataset.theme;
+    document.getElementById('theme-toggle').textContent =
+        t === 'dark' ? 'light' : 'dark';
+}
+
+function canvasClearColor() {
+    const css = getComputedStyle(document.body);
+    return [
+        parseFloat(css.getPropertyValue('--canvas-clear-r')) || 0,
+        parseFloat(css.getPropertyValue('--canvas-clear-g')) || 0,
+        parseFloat(css.getPropertyValue('--canvas-clear-b')) || 0,
+    ];
+}
 
 //----------------------------------------------------------------------------
 // palettes & visibility textures
@@ -713,6 +814,7 @@ function render() {
     const gl = state.gl;
     if (!state.program) return;
     computeViewports();
+    const clear = canvasClearColor();
 
     gl.viewport(0, 0, state.canvas.width, state.canvas.height);
     gl.disable(gl.SCISSOR_TEST);
@@ -769,7 +871,7 @@ function render() {
         if (scW <= 0 || scH <= 0) continue;
         gl.viewport(p.vp.x, p.vp.y, p.vp.w, p.vp.h);
         gl.scissor(scX, scY, scW, scH);
-        gl.clearColor(1, 1, 1, 1);
+        gl.clearColor(clear[0], clear[1], clear[2], 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
         const t = panelTransform(p, slice);
