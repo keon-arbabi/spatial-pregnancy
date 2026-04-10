@@ -190,7 +190,8 @@ run_edgeR <- function(pseudobulks, ref_level, norm_method) {
                 targets$condition, levels = c(ref_level, other_level))
             if (n_distinct(targets$group) < 2) return(NULL)
 
-            design <- model.matrix(~ group, data = targets)
+            targets$log_num_cells <- log(targets$num_cells)
+            design <- model.matrix(~ group + log_num_cells, data = targets)
             y <- DGEList(counts = element$counts, samples = targets)
 
             if (norm_method %in% c("volume", "area")) {
