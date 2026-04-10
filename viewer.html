@@ -263,6 +263,12 @@ button.active:hover { background: var(--accent-hover); }
     position: relative;
     pointer-events: auto;
     box-shadow: var(--panel-shadow);
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.panel.highlight {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), 0 0 12px rgba(37,99,235,0.3);
+    z-index: 3;
 }
 .panel .label {
     position: absolute; left: 6px; top: 5px;
@@ -433,6 +439,35 @@ const soloKey = lvl => (lvl === 'subclass' ? 'sub' : 'class');
 //----------------------------------------------------------------------------
 // boot
 //----------------------------------------------------------------------------
+// data URLs: main data from relative path (works on both local and Pages),
+// gene expression from HF when not local (too large for git)
+const HF_DATASET = 'Keon-A/spatial-pregnancy-viewer';
+const HF_BASE = `https://huggingface.co/datasets/${HF_DATASET}/resolve/main`;
+
+function dataUrl(path) {
+    return 'viewer_data/' + path;
+}
+function geneUrl(dataset, gene) {
+    const base = isLocal() ? 'viewer_data' : HF_BASE;
+    if (!isLocal() && dataset === 'slidetags') {
+        // HF has a 10k files/dir limit; slidetags genes are split into
+        // genes/ (first 10k), genes2/ (next 10k), genes3/, genes4/
+        const ds = state.manifest.datasets[dataset];
+        if (ds && ds.genes) {
+            const idx = ds.genes.indexOf(gene);
+            if (idx >= 10000) {
+                const subdir = 'genes' + (Math.floor(idx / 10000) + 1);
+                return `${base}/${dataset}/${subdir}/${encodeURIComponent(gene)}.bin`;
+            }
+        }
+    }
+    return `${base}/${dataset}/genes/${encodeURIComponent(gene)}.bin`;
+}
+function isLocal() {
+    const h = location.hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '';
+}
+
 async function boot() {
     initTheme();
     state.canvas = document.getElementById('canvas');
@@ -441,7 +476,7 @@ async function boot() {
     state.gl = gl;
 
     setStatus('fetching manifest…');
-    const r = await fetch('viewer_data/manifest.json');
+    const r = await fetch(dataUrl('manifest.json'));
     if (!r.ok) { setStatus('failed to load viewer_data/manifest.json'); return; }
     state.manifest = await r.json();
     setStatus(`manifest v${state.manifest.version} loaded`);
@@ -691,7 +726,7 @@ function initShader() {
 async function loadSlice(entry) {
     if (state.slices.has(entry.file)) return state.slices.get(entry.file);
     const gl = state.gl;
-    const r = await fetch('viewer_data/' + entry.file);
+    const r = await fetch(dataUrl(entry.file));
     if (!r.ok) throw new Error('fetch failed: ' + entry.file);
     const buf = new Uint8Array(await r.arrayBuffer());
     const n = entry.n_cells;
@@ -774,13 +809,20 @@ async function selectDataset(name) {
         refPanels.push({el, entry: s});
     }
 
-    // build query panels
+    // build query panels, ordered CTRL → PREG → POSTPART then by sample_rep
     const qGrid = document.getElementById('query-grid');
     qGrid.innerHTML = '';
     const ncols = Math.min(5, ds.samples.length);
     qGrid.style.gridTemplateColumns = `repeat(${ncols}, 1fr)`;
+    const sortedSamples = [...ds.samples].sort((a, b) => {
+        const ca = COND_ORDER.indexOf(a.condition);
+        const cb = COND_ORDER.indexOf(b.condition);
+        const ia = ca >= 0 ? ca : COND_ORDER.length;
+        const ib = cb >= 0 ? cb : COND_ORDER.length;
+        return ia !== ib ? ia - ib : a.sample_rep.localeCompare(b.sample_rep);
+    });
     const queryPanels = [];
-    for (const s of ds.samples) {
+    for (const s of sortedSamples) {
         const el = makePanel(s.condition, s.sample_rep, s.n_cells);
         qGrid.appendChild(el);
         queryPanels.push({el, entry: s});
@@ -788,10 +830,14 @@ async function selectDataset(name) {
 
     state.panels = [...refPanels, ...queryPanels];
 
-    // clear stale gene data from previous dataset
-    clearGene();
-    document.getElementById('gene-input').value = '';
+    // update gene datalist; re-load the current gene for the new dataset
     updateGeneDatalist();
+    if (state.currentGene) {
+        // defer so panels are laid out first
+        const gene = state.currentGene;
+        state.currentGene = null; // reset so loadGene runs fresh
+        setTimeout(() => loadGene(gene), 0);
+    }
 
     // load all binaries in parallel
     setStatus(`loading ${state.panels.length} slices…`);
@@ -1277,6 +1323,7 @@ function rebuildFilterList() {
             }
             uploadVisibility(tex, visArr);
             render();
+            redrawViolinIfActive();
         });
         el.appendChild(lbl);
     });
@@ -1352,6 +1399,25 @@ function setAll(on) {
     });
     uploadVisibility(tex, visArr);
     render();
+    redrawViolinIfActive();
+}
+
+function redrawViolinIfActive() {
+    if (!state.currentGene) return;
+    const ds = state.manifest.datasets[state.dataset];
+    if (!ds) return;
+    // rebuild allExpr from per-slice exprData
+    const chunks = [];
+    for (const s of ds.samples) {
+        const slice = state.slices.get(s.file);
+        if (slice && slice.exprData) chunks.push(slice.exprData);
+    }
+    if (chunks.length === 0) return;
+    const total = chunks.reduce((a, c) => a + c.length, 0);
+    const allExpr = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) { allExpr.set(c, off); off += c.length; }
+    drawViolin(ds, allExpr);
 }
 
 //----------------------------------------------------------------------------
@@ -1361,6 +1427,48 @@ function initGene() {
     const input = document.getElementById('gene-input');
     const sgBox = document.getElementById('gene-suggestions');
     let activeIdx = -1;
+
+    // violin diamond hover → highlight matching spatial panel
+    const vCanvas = document.getElementById('violin-canvas');
+    let highlightedPanel = null;
+    vCanvas.addEventListener('mousemove', e => {
+        const rect = vCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        let best = null, bestD = 10 * 10; // 10px threshold
+        for (const d of violinDiamonds) {
+            const dx = d.x - mx, dy = d.y - my;
+            const dist = dx * dx + dy * dy;
+            if (dist < bestD) { bestD = dist; best = d; }
+        }
+        // clear previous highlight
+        if (highlightedPanel) {
+            highlightedPanel.classList.remove('highlight');
+            highlightedPanel = null;
+        }
+        if (best) {
+            // find the panel with this sample_rep
+            const panel = state.panels.find(p =>
+                p.entry.sample_rep === best.sampleRep);
+            if (panel) {
+                panel.el.classList.add('highlight');
+                highlightedPanel = panel.el;
+            }
+            vCanvas.style.cursor = 'pointer';
+            vCanvas.title = best.sampleRep;
+        } else {
+            vCanvas.style.cursor = '';
+            vCanvas.title = '';
+        }
+    });
+    vCanvas.addEventListener('mouseleave', () => {
+        if (highlightedPanel) {
+            highlightedPanel.classList.remove('highlight');
+            highlightedPanel = null;
+        }
+        vCanvas.style.cursor = '';
+        vCanvas.title = '';
+    });
 
     input.addEventListener('input', () => {
         updateGeneSuggestions(input.value.trim());
@@ -1480,20 +1588,26 @@ async function loadGene(name) {
     const ds = state.manifest.datasets[state.dataset];
     if (!ds || !ds.genes) {
         statusEl.textContent = 'no gene data for this dataset';
+        clearGeneBuffers();
+        render();
         return;
     }
     // case-insensitive match
     const idx = ds.genes.findIndex(g =>
         g.toLowerCase() === name.toLowerCase());
     if (idx < 0) {
-        statusEl.textContent = `"${name}" not found in ${state.dataset} (${ds.genes.length} genes)`;
+        statusEl.textContent = `"${name}" not in ${state.dataset} (${ds.genes.length} genes)`;
+        state.currentGene = name; // keep the name so it persists on next switch
+        clearGeneBuffers();
+        document.getElementById('violin-wrap').style.display = 'none';
+        render();
         return;
     }
     const gene = ds.genes[idx];
     statusEl.textContent = `loading ${gene}…`;
 
     try {
-        const url = `viewer_data/${state.dataset}/genes/${encodeURIComponent(gene)}.bin`;
+        const url = geneUrl(state.dataset, gene);
         const r = await fetch(url);
         if (!r.ok) {
             statusEl.textContent = r.status === 404
@@ -1532,7 +1646,7 @@ async function loadGene(name) {
                 if (!slice.exprBuf) slice.exprBuf = state.gl.createBuffer();
                 const zeros = new Float32Array(s.n_cells);
                 state.gl.bindBuffer(state.gl.ARRAY_BUFFER, slice.exprBuf);
-                state.gl.bufferData(state.gl.ARRAY_BUFFER, zeros, gl.DYNAMIC_DRAW);
+                state.gl.bufferData(state.gl.ARRAY_BUFFER, zeros, state.gl.DYNAMIC_DRAW);
                 slice.exprData = zeros;
             }
         }
@@ -1552,12 +1666,16 @@ async function loadGene(name) {
     }
 }
 
-function clearGene() {
-    state.currentGene = null;
+function clearGeneBuffers() {
     state.geneMax = 0;
     for (const [, slice] of state.slices) {
         slice.exprData = null;
     }
+}
+
+function clearGene() {
+    state.currentGene = null;
+    clearGeneBuffers();
     document.getElementById('violin-wrap').style.display = 'none';
     if (state.colorMode === 'gene') {
         state.colorMode = 'class';
@@ -1571,9 +1689,13 @@ function clearGene() {
 //----------------------------------------------------------------------------
 // violin plot (canvas-based)
 //----------------------------------------------------------------------------
+const COND_ORDER = ['CTRL', 'PREG', 'POSTPART'];
 const COND_COLORS = {
     CTRL: '#2563eb', PREG: '#d04646', POSTPART: '#c97a17',
 };
+
+// stored diamond hit regions for violin hover interaction
+let violinDiamonds = []; // [{x, y, sampleRep}]
 
 function drawViolin(ds, allExpr) {
     const wrap = document.getElementById('violin-wrap');
@@ -1587,37 +1709,71 @@ function drawViolin(ds, allExpr) {
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, cssW, cssH);
+    violinDiamonds = [];
 
-    // group samples by condition
-    const conditions = [];
+    // group samples by condition in fixed order (CTRL → PREG → POSTPART),
+    // filtering to cells visible under the active cell-type filter.
     const condMap = {};
     let offset = 0;
+    // determine which visibility array to use
+    const useSubFilter = state.filterLevel === 'subclass';
+    const visArr = useSubFilter ? state.subVisible : state.classVisible;
     for (const s of ds.samples) {
-        if (!condMap[s.condition]) {
+        if (!condMap[s.condition])
             condMap[s.condition] = { name: s.condition, samples: [], values: [] };
-            conditions.push(condMap[s.condition]);
+        const slice = state.slices.get(s.file);
+        const rawVals = allExpr.subarray(offset, offset + s.n_cells);
+        // filter to visible cells only
+        const filtered = [];
+        if (slice) {
+            const ids = useSubFilter ? slice.sub : slice.cls;
+            for (let i = 0; i < s.n_cells; i++) {
+                if (visArr[ids[i]]) filtered.push(rawVals[i]);
+            }
+        } else {
+            for (let i = 0; i < s.n_cells; i++) filtered.push(rawVals[i]);
         }
-        const vals = allExpr.subarray(offset, offset + s.n_cells);
+        const vals = new Float32Array(filtered);
+        const exprVals = filtered.filter(v => v > 0);
         condMap[s.condition].samples.push({
             name: s.sample_rep,
             parent: s.sample,
             values: vals,
-            median: computeMedian(vals),
+            median: computeMedian(new Float32Array(exprVals)),
+            pctExpr: vals.length > 0 ? (exprVals.length / vals.length * 100) : 0,
         });
         condMap[s.condition].values.push(vals);
         offset += s.n_cells;
     }
-    // concatenate per-condition values
+    // enforce CTRL → PREG → POSTPART order; skip absent conditions
+    const conditions = [];
+    for (const cond of COND_ORDER) {
+        if (condMap[cond]) conditions.push(condMap[cond]);
+    }
+    // also include any condition not in COND_ORDER (future-proof)
+    for (const cond of Object.keys(condMap)) {
+        if (!COND_ORDER.includes(cond)) conditions.push(condMap[cond]);
+    }
+    // sort samples within each condition by sample_rep
+    for (const c of conditions) {
+        c.samples.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    // concatenate per-condition values; separate expressing (>0) for KDE
     for (const c of conditions) {
         const total = c.values.reduce((a, v) => a + v.length, 0);
         const flat = new Float32Array(total);
         let off = 0;
         for (const v of c.values) { flat.set(v, off); off += v.length; }
         c.flat = flat;
+        c.nTotal = total;
+        const expr = [];
+        for (let i = 0; i < total; i++) if (flat[i] > 0) expr.push(flat[i]);
+        c.expressing = new Float32Array(expr);
+        c.pctExpr = total > 0 ? (expr.length / total * 100) : 0;
     }
 
     // layout
-    const margin = { top: 20, right: 10, bottom: 30, left: 36 };
+    const margin = { top: 20, right: 10, bottom: 40, left: 36 };
     const plotW = cssW - margin.left - margin.right;
     const plotH = cssH - margin.top - margin.bottom;
     const nCond = conditions.length;
@@ -1631,10 +1787,12 @@ function drawViolin(ds, allExpr) {
     const nBins = 100;
     const binW = maxVal / nBins;
 
-    // find max density across all conditions for symmetric scaling
+    // KDE on expressing cells only (excludes zeros)
     let globalMaxDens = 0;
     for (const c of conditions) {
-        c.kde = computeKDE(c.flat, nBins, maxVal);
+        c.kde = c.expressing.length > 0
+            ? computeKDE(c.expressing, nBins, maxVal)
+            : new Float32Array(nBins + 1);
         const md = Math.max(...c.kde);
         if (md > globalMaxDens) globalMaxDens = md;
     }
@@ -1698,29 +1856,42 @@ function drawViolin(ds, allExpr) {
         ctx.fill();
         ctx.stroke();
 
-        // per-sample median diamonds
-        for (const s of c.samples) {
+        // per-sample median diamonds (spread horizontally, order matches panels)
+        const nSamp = c.samples.length;
+        const spreadW = halfW * 0.6;
+        for (let si = 0; si < nSamp; si++) {
+            const s = c.samples[si];
+            if (s.median <= 0) continue;
             const y = yScale(s.median);
+            const dx = nSamp > 1
+                ? -spreadW + (2 * spreadW * si / (nSamp - 1))
+                : 0;
+            const diamondX = cx + dx;
             const sz = 4;
             ctx.fillStyle = color;
             ctx.strokeStyle = medianDiamondStroke;
             ctx.lineWidth = 0.8;
             ctx.beginPath();
-            ctx.moveTo(cx, y - sz);
-            ctx.lineTo(cx + sz, y);
-            ctx.lineTo(cx, y + sz);
-            ctx.lineTo(cx - sz, y);
+            ctx.moveTo(diamondX, y - sz);
+            ctx.lineTo(diamondX + sz, y);
+            ctx.lineTo(diamondX, y + sz);
+            ctx.lineTo(diamondX - sz, y);
             ctx.closePath();
             ctx.fill();
             ctx.stroke();
+            // store for hover hit-test
+            violinDiamonds.push({ x: diamondX, y, sampleRep: s.name });
         }
 
-        // condition label
+        // condition label + % expressing
         ctx.fillStyle = textColor;
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillText(c.name, cx, cssH - margin.bottom + 6);
+        ctx.fillText(c.name, cx, cssH - margin.bottom + 4);
+        ctx.fillStyle = isDark ? '#888' : '#999';
+        ctx.font = '9px sans-serif';
+        ctx.fillText(`${c.pctExpr.toFixed(0)}% expr`, cx, cssH - margin.bottom + 16);
     }
 
     // title

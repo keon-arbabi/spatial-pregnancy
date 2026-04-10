@@ -17,6 +17,7 @@ from single_cell import SingleCell
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
+REF_PCT_THRESHOLD = 5
 
 datasets = {
     'slidetags': {
@@ -58,6 +59,18 @@ if not os.path.exists(pct_file):
     del ref; gc.collect()
 else:
     pct_detected = pkl.load(open(pct_file, 'rb'))
+
+def get_expressed_genes(cell_type, gene_list):
+    if cell_type not in pct_detected:
+        return gene_list
+    ref = pct_detected[cell_type]
+    return [g for g in gene_list
+            if g not in ref.index or ref[g] >= REF_PCT_THRESHOLD / 100]
+
+def get_ref_pct(cell_type, gene):
+    if cell_type in pct_detected and gene in pct_detected[cell_type].index:
+        return round(pct_detected[cell_type][gene] * 100, 1)
+    return None
 
 #endregion
 #region load data ##############################################################
@@ -107,12 +120,21 @@ def make_pseudobulk(adata, name):
 def populate_r(pb, r_list, cfg, adata):
     r(f'{r_list} <- list()')
     for cell_type, (X, obs, var) in pb.items():
-        to_r(obs, 'obs')
-        to_r(cell_type, 'cell_type')
         gene_names = (
             var['_index'] if '_index' in var.columns
             else pl.Series(var.to_pandas().index.tolist()))
-        to_r(X, 'X', colnames=gene_names)
+        all_genes = gene_names.to_list()
+        keep_genes = get_expressed_genes(cell_type, all_genes)
+        keep_idx = [i for i, g in enumerate(all_genes) if g in keep_genes]
+        if len(keep_idx) == 0:
+            continue
+        X_filt = X[:, keep_idx]
+        gene_names_filt = pl.Series([all_genes[i] for i in keep_idx])
+
+        to_r(obs, 'obs')
+        to_r(cell_type, 'cell_type')
+        to_r(X_filt, 'X', colnames=gene_names_filt)
+
         size_col = {'volume': 'volume', 'area': 'cell_area'}\
             .get(cfg['norm'])
         if size_col:
@@ -214,44 +236,29 @@ for (name, contrast), (r_list, ref_level) in all_r_lists.items():
 de_results = pl.concat(de_frames)
 
 #endregion
-#region add reference detection rates ##########################################
-
-def get_ref_pct(cell_type, gene):
-    if cell_type in pct_detected and gene in pct_detected[cell_type].index:
-        return round(pct_detected[cell_type][gene] * 100, 1)
-    return None
-
-REF_PCT_THRESHOLD = 10
+#region annotate and save ######################################################
 
 de_results = de_results.with_columns(
     pl.struct(['cell_type', 'gene']).map_elements(
         lambda r: get_ref_pct(r['cell_type'], r['gene']),
         return_dtype=pl.Float64
     ).alias('ref_pct_detected')
-).with_columns(
-    (pl.col('ref_pct_detected').is_not_null() &
-     (pl.col('ref_pct_detected') >= REF_PCT_THRESHOLD))
-    .alias('expressed_in_ref')
 )
-
-#endregion
-#region save ###################################################################
 
 os.makedirs(f'{working_dir}/output', exist_ok=True)
 de_results.write_csv(f'{working_dir}/output/de_results.csv')
 de_results\
-    .filter((pl.col('FDR') < 0.10) & pl.col('expressed_in_ref'))\
+    .filter(pl.col('FDR') < 0.10)\
     .write_csv(f'{working_dir}/output/de_results_sig.csv')
 
 for name in datasets:
     df = de_results.filter(pl.col('dataset') == name)
     for contrast in df['contrast'].unique().to_list():
         sub = df.filter(pl.col('contrast') == contrast)
-        n_all = sub.filter(pl.col('FDR') < 0.10).height
-        n_filt = sub.filter(
-            (pl.col('FDR') < 0.10) & pl.col('expressed_in_ref')).height
+        n_sig = sub.filter(pl.col('FDR') < 0.10).height
         n_ct = sub['cell_type'].n_unique()
+        n_genes = sub['gene'].n_unique()
         print(f'[{name}] {contrast}: {n_ct} cell types, '
-              f'{n_filt} DEGs ({n_all} before ref filter)')
+              f'{n_genes:,} genes tested, {n_sig} DEGs')
 
 #endregion
