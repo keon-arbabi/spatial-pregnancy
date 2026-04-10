@@ -299,6 +299,14 @@ button.active:hover { background: var(--accent-hover); }
     pointer-events: none;
     border: 1px solid var(--label-border);
 }
+.panel .filtered-count {
+    position: absolute; right: 6px; top: 22px;
+    font-size: 9px; color: var(--accent);
+    background: var(--count-bg);
+    padding: 1px 5px; border-radius: 3px;
+    pointer-events: none;
+    border: 1px solid var(--label-border);
+}
 hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 .note { color: var(--muted); font-size: 11px; }
 </style>
@@ -850,6 +858,7 @@ async function selectDataset(name) {
     state.zoom = 1; state.panX = 0; state.panY = 0;
     layout();
     render();
+    updateFilteredCounts();
 }
 
 function makePanel(condition, title, count) {
@@ -860,8 +869,8 @@ function makePanel(condition, title, count) {
             <span class="cond cond-${condition}">${condition}</span>${title}
         </div>
         <div class="count">${count.toLocaleString()}</div>
+        <div class="filtered-count" style="display:none"></div>
     `;
-    // sized via grid; aspect maintained at panel level
     el.style.aspectRatio = '4 / 3';
     return el;
 }
@@ -1272,15 +1281,35 @@ function buildSidebar() {
             state.filterLevel = r.value;
             rebuildFilterList();
             render();
+            updateFilteredCounts();
         });
     });
 
     // initial list build
     rebuildFilterList();
 
-    // fuzzy search box
-    document.getElementById('filter-search').addEventListener('input', e => {
+    // fuzzy search box with Tab completion
+    const filterSearch = document.getElementById('filter-search');
+    filterSearch.addEventListener('input', e => {
         applySearch(e.target.value);
+    });
+    filterSearch.addEventListener('keydown', e => {
+        if (e.key === 'Tab') {
+            const q = filterSearch.value.toLowerCase().trim();
+            if (!q) return;
+            // find best fuzzy match among visible labels
+            const labels = document.querySelectorAll('#filter-list label');
+            let best = null, bestScore = Infinity;
+            labels.forEach(l => {
+                const s = fuzzyScore(q, l.dataset.nameLower);
+                if (s !== null && s < bestScore) { bestScore = s; best = l; }
+            });
+            if (best) {
+                e.preventDefault();
+                filterSearch.value = best.dataset.name;
+                applySearch(best.dataset.name);
+            }
+        }
     });
 
     // bulk buttons (operate on the active filter level)
@@ -1323,6 +1352,7 @@ function rebuildFilterList() {
             }
             uploadVisibility(tex, visArr);
             render();
+            updateFilteredCounts();
             redrawViolinIfActive();
         });
         el.appendChild(lbl);
@@ -1399,7 +1429,29 @@ function setAll(on) {
     });
     uploadVisibility(tex, visArr);
     render();
+    updateFilteredCounts();
     redrawViolinIfActive();
+}
+
+function updateFilteredCounts() {
+    const useSubFilter = state.filterLevel === 'subclass';
+    const visArr = useSubFilter ? state.subVisible : state.classVisible;
+    for (const p of state.panels) {
+        const slice = state.slices.get(p.entry.file);
+        const el = p.el.querySelector('.filtered-count');
+        if (!slice || !el) continue;
+        const ids = useSubFilter ? slice.sub : slice.cls;
+        let count = 0;
+        for (let i = 0; i < slice.n; i++) {
+            if (visArr[ids[i]]) count++;
+        }
+        if (count < p.entry.n_cells) {
+            el.textContent = `${count.toLocaleString()} selected`;
+            el.style.display = '';
+        } else {
+            el.style.display = 'none';
+        }
+    }
 }
 
 function redrawViolinIfActive() {
@@ -1491,6 +1543,15 @@ function initGene() {
                 selectGene(items[activeIdx].dataset.gene);
             } else {
                 selectGene(input.value.trim());
+            }
+        } else if (e.key === 'Tab') {
+            // tab-complete to the top suggestion
+            if (items.length > 0) {
+                e.preventDefault();
+                const top = items[0].dataset.gene;
+                input.value = top;
+                sgBox.style.display = 'none';
+                selectGene(top);
             }
         } else if (e.key === 'Escape') {
             sgBox.style.display = 'none';
@@ -1883,7 +1944,8 @@ function drawViolin(ds, allExpr) {
             violinDiamonds.push({ x: diamondX, y, sampleRep: s.name });
         }
 
-        // condition label + % expressing
+        // condition label + overall median + % expressing
+        const condMedian = computeMedian(c.expressing);
         ctx.fillStyle = textColor;
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'center';
@@ -1891,7 +1953,7 @@ function drawViolin(ds, allExpr) {
         ctx.fillText(c.name, cx, cssH - margin.bottom + 4);
         ctx.fillStyle = isDark ? '#888' : '#999';
         ctx.font = '9px sans-serif';
-        ctx.fillText(`${c.pctExpr.toFixed(0)}% expr`, cx, cssH - margin.bottom + 16);
+        ctx.fillText(`med ${condMedian.toFixed(2)} · ${c.pctExpr.toFixed(0)}%`, cx, cssH - margin.bottom + 16);
     }
 
     // title

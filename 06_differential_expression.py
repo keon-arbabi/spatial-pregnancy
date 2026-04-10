@@ -206,9 +206,18 @@ run_edgeR <- function(pseudobulks, ref_level, norm_method) {
             fit <- glmFit(y, design = design)
             test <- glmLRT(fit, coef = 2)
 
+            n_samples <- ncol(y$counts)
+            mu <- fitted(fit)
+            res <- (y$counts - mu) / sqrt(mu + mu^2 * y$common.dispersion)
+            hat_diag <- hat(design)
+            cooks <- (res^2 * hat_diag) /
+                     (ncol(design) * (1 - hat_diag)^2)
+            max_cooks <- apply(cooks, 1, max)
+
             topTags(test, n = Inf) %>%
                 as.data.frame() %>%
-                rownames_to_column("gene")
+                rownames_to_column("gene") %>%
+                mutate(max_cooks_d = max_cooks[gene])
         }, error = function(e) {
             warning(paste("Error in", cell_type_name, ":", e$message))
             return(NULL)
