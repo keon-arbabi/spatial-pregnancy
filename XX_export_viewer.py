@@ -431,6 +431,74 @@ for name in datasets:
     print(f'[{name}] wrote {len(samples)} samples '
           f'({sum(s["n_cells"] for s in samples):,} cells)')
 
+#endregion
+#region per-gene expression export #############################################
+
+import scipy.sparse as sp
+
+TARGET_SUM = 1e4  # library-size normalize to this
+
+for name in datasets:
+    print(f'\n[{name}] exporting gene expression...')
+    p = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
+    gene_dir = f'{out_dir}/{name}/genes'
+    os.makedirs(gene_dir, exist_ok=True)
+
+    with h5py.File(p, 'r') as f:
+        # read gene names from var
+        var = f['var']
+        if '_index' in var:
+            gene_names = var['_index'][:]
+        else:
+            gene_names = var[list(var.keys())[0]][:]
+        gene_names = [g.decode() if isinstance(g, bytes) else str(g)
+                      for g in gene_names]
+        n_genes = len(gene_names)
+
+        # read sample_rep for ordering
+        obs = f['obs']
+        sample_rep_arr = read_obs_column(obs, 'sample_rep').astype(str)
+        n_cells = len(sample_rep_arr)
+
+        # build the cell ordering that matches the main per-sample binary export
+        sorted_reps = sorted(np.unique(sample_rep_arr))
+        gene_order = np.concatenate(
+            [np.where(sample_rep_arr == rep)[0] for rep in sorted_reps])
+
+        # read sparse X matrix (CSR)
+        X_grp = f['X']
+        data = X_grp['data'][:].astype(np.float32)
+        indices = X_grp['indices'][:]
+        indptr = X_grp['indptr'][:]
+        X = sp.csr_matrix((data, indices, indptr), shape=(n_cells, n_genes))
+        del data, indices, indptr
+
+    # normalize per cell: scale each row to TARGET_SUM
+    row_sums = np.array(X.sum(axis=1)).ravel().astype(np.float32)
+    scale = np.float32(TARGET_SUM) / np.maximum(row_sums, np.float32(1.0))
+    X = sp.diags(scale, dtype=np.float32) @ X
+    del row_sums, scale
+
+    # convert to CSC for efficient column access
+    print(f'[{name}] converting to CSC ({n_genes:,} genes, '
+          f'{X.nnz:,} nnz)...')
+    X = X.tocsc()
+
+    # write per-gene binary (float32, cell order matching main binary)
+    for j in range(n_genes):
+        gene = gene_names[j]
+        col = X[:, j].toarray().ravel()
+        expr = np.log2(np.float32(1.0) + col).astype(np.float32)
+        expr_ordered = expr[gene_order]
+        write_atomic(f'{gene_dir}/{gene}.bin', expr_ordered.tobytes())
+        if (j + 1) % 500 == 0 or j + 1 == n_genes:
+            print(f'[{name}]   {j+1:,}/{n_genes:,} genes')
+
+    # add gene list to manifest
+    manifest['datasets'][name]['genes'] = gene_names
+    del X
+    print(f'[{name}] wrote {n_genes:,} gene files to {gene_dir}/')
+
 write_atomic(
     f'{out_dir}/manifest.json',
     json.dumps(manifest, indent=2).encode('utf-8'))

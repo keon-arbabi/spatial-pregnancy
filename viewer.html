@@ -198,6 +198,48 @@ button.active:hover { background: var(--accent-hover); }
 }
 .label-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* gene query + violin */
+.gene-search-wrap { position: relative; }
+#gene-input {
+    width: 100%; padding: 5px 7px; border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text); border-radius: 3px;
+    font: inherit;
+}
+#gene-suggestions {
+    position: absolute; left: 0; right: 0; top: 100%;
+    max-height: 180px; overflow-y: auto;
+    background: var(--panel-bg); border: 1px solid var(--border);
+    border-top: none; border-radius: 0 0 3px 3px;
+    z-index: 20; display: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+#gene-suggestions .sg {
+    padding: 3px 8px; cursor: pointer; font-size: 11px;
+    color: var(--text);
+}
+#gene-suggestions .sg:hover,
+#gene-suggestions .sg.active {
+    background: var(--accent); color: var(--accent-text);
+}
+#gene-suggestions .sg .match-char {
+    font-weight: 700; text-decoration: underline;
+}
+#gene-status { font-size: 10px; color: var(--muted); margin-top: 3px; }
+#violin-wrap { margin-top: 8px; }
+#violin-canvas {
+    width: 100%; border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+}
+.gene-legend {
+    display: flex; align-items: center; gap: 4px;
+    margin-top: 4px; font-size: 10px; color: var(--muted);
+}
+.gene-legend canvas {
+    height: 10px; width: 120px;
+    border-radius: 2px; border: 1px solid var(--border);
+}
+
 /* panels */
 .panel-section {
     padding: 12px;
@@ -271,6 +313,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
     <div id="colormode-radio" class="radio-row">
         <label><input type="radio" name="cmode" value="class" checked>class</label>
         <label><input type="radio" name="cmode" value="subclass">subclass</label>
+        <label><input type="radio" name="cmode" value="gene">gene</label>
     </div>
 
     <h2>coords</h2>
@@ -298,11 +341,21 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
     <input id="filter-search" type="search" placeholder="search…">
     <div id="filter-list" class="list" style="margin-top:4px;max-height:340px"></div>
 
-    <hr>
-    <div class="note">
-        coords: <code>x_ffd</code>/<code>y_ffd</code> for query,
-        <code>x_raw</code>/<code>y_raw</code> for ref.
-        cells filtered out are hidden in both ref and query panels.
+    <h2>gene expression</h2>
+    <div class="gene-search-wrap">
+        <input id="gene-input" type="text" placeholder="type a gene name…"
+               autocomplete="off">
+        <div id="gene-suggestions"></div>
+    </div>
+    <div id="gene-status"></div>
+    <div id="violin-wrap" style="display:none">
+        <canvas id="violin-canvas" height="200"></canvas>
+        <div class="gene-legend">
+            <span>0</span>
+            <canvas id="cmap-legend"></canvas>
+            <span id="cmap-max">max</span>
+            <span style="margin-left:8px">log<sub>2</sub>(norm+1)</span>
+        </div>
     </div>
 </aside>
 
@@ -363,6 +416,10 @@ const state = {
     dragLastY: 0,
     // solo (one-at-a-time) per filter level (state survives level toggles)
     solo: { class: false, sub: false },
+    // gene expression
+    currentGene: null,     // gene name string
+    geneMax: 0,            // max expression (for colormap normalization)
+    colormapTex: null,     // 256-entry viridis texture
 };
 
 const KIND = {
@@ -394,6 +451,7 @@ async function boot() {
     initShader();
     buildSidebar();
     initInteraction();
+    initGene();
 
     // initial dataset
     await selectDataset(state.dataset);
@@ -489,6 +547,40 @@ function uploadVisibility(tex, arr) {
 function initPalettes() {
     state.classPaletteTex = buildPaletteTexture(state.manifest.class_palette);
     state.subPaletteTex   = buildPaletteTexture(state.manifest.subclass_palette);
+    state.colormapTex     = buildColormapTexture();
+}
+
+function buildColormapTexture() {
+    // viridis 256-entry colormap
+    const hex = '44015444025544035745055845065a45085b46095c460b5e460c5f460e61470f6247116347126547146647156747166947186a48196b481a6c481c6e481d6f481e70482071482172482273482374472575472676472777472878472a79472b7a472c7b462d7c462f7c46307d46317e45327f45347f453580453681443781443982433a83433b83433c84423d84423e854240854141864142864043874044873f45873f47883e48883e49893d4a893d4b893d4c893c4d8a3c4e8a3b508a3b518a3a528b3a538b39548b39558b38568b38578c37588c37598c365a8c365b8c355c8c355d8c345e8d345f8d33608d33618d32628d32638d31648d31658d31668d30678d30688d2f698d2f6a8d2e6b8e2e6c8e2e6d8e2d6e8e2d6f8e2c708e2c718e2c728e2b738e2b748e2a758e2a768e2a778e29788e29798e287a8e287a8e287b8e277c8e277d8e277e8e267f8e26808e26818e25828e25838d24848d24858d24868d23878d23888d23898d22898d228a8d228b8d218c8d218d8c218e8c208f8c20908c20918c1f928c1f938b1f948b1f958b1f968b1e978a1e988a1e998a1e998a1e9a891e9b891e9c891e9d881e9e881e9f881ea0871fa1871fa2861fa38620a48520a58521a68521a78422a78423a88323a98224aa8225ab8126ac8127ad8028ae7f29af7f2ab07e2bb17d2cb17d2eb27c2fb37b30b47a32b57a33b67935b77836b87738b97639b9763bba753dbb743ebc7340bd7242be7144be7045bf6f47c06e49c16d4bc26c4dc26b4fc36951c46853c56755c66657c66559c7645bc8625ec96160c96062ca5f64cb5d67cc5c69cc5b6bcd596dce5870ce5672cf5574d05477d05279d1517cd24f7ed24e81d34c83d34b86d44988d5478bd5468dd64490d64392d74195d73f97d83e9ad83c9dd93a9fd938a2da37a5da35a7db33aadb32addc30afdc2eb2dd2cb5dd2bb7dd29bade27bdde26bfdf24c2df22c5df21c7e01fcae01ecde01dcfe11cd2e11bd4e11ad7e219dae218dce218dfe318e1e318e4e318e7e419e9e419ece41aeee51bf1e51cf3e51ef6e61ff8e621fae622fde724';
+    const gl = state.gl;
+    const data = new Uint8Array(256 * 3);
+    for (let i = 0; i < 256; i++) {
+        data[i*3]   = parseInt(hex.substr(i*6, 2), 16);
+        data[i*3+1] = parseInt(hex.substr(i*6+2, 2), 16);
+        data[i*3+2] = parseInt(hex.substr(i*6+4, 2), 16);
+    }
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 256, 1, 0,
+                  gl.RGB, gl.UNSIGNED_BYTE, data);
+    // also draw the legend
+    const leg = document.getElementById('cmap-legend');
+    if (leg) {
+        leg.width = 120; leg.height = 10;
+        const lctx = leg.getContext('2d');
+        for (let i = 0; i < 120; i++) {
+            const j = Math.floor(i / 120 * 255);
+            lctx.fillStyle = `rgb(${data[j*3]},${data[j*3+1]},${data[j*3+2]})`;
+            lctx.fillRect(i, 0, 1, 10);
+        }
+    }
+    return tex;
 }
 
 function initVisibility() {
@@ -508,25 +600,33 @@ const VS = `#version 300 es
 in vec2  a_pos;
 in float a_classId;
 in float a_subId;
-uniform vec4 u_xform;          // (sx, sy, tx, ty) maps world -> NDC
+in float a_expression;
+uniform vec4 u_xform;           // (sx, sy, tx, ty) maps world -> NDC
 uniform float u_pointSize;
-uniform sampler2D u_palette;   // bound to whichever level we color by
-uniform sampler2D u_filterVis; // bound to whichever level we filter by
-uniform int   u_useSubColor;   // 0=class palette, 1=subclass palette
-uniform int   u_useSubFilter;  // 0=filter by class, 1=filter by subclass
+uniform sampler2D u_palette;    // class or subclass palette texture
+uniform sampler2D u_filterVis;  // visibility at the active filter level
+uniform sampler2D u_colormap;   // 256-entry sequential colormap (e.g. viridis)
+uniform int   u_colorMode;      // 0=class, 1=subclass, 2=gene
+uniform int   u_useSubFilter;   // 0=filter by class, 1=filter by subclass
+uniform float u_exprMax;        // max expression for gene colormap normalization
 out vec3 v_color;
 
 void main() {
     int clsi = int(a_classId);
     int subi = int(a_subId);
-    int colorIdx, filterIdx;
-    if (u_useSubColor == 1) colorIdx = subi; else colorIdx = clsi;
+    int filterIdx;
     if (u_useSubFilter == 1) filterIdx = subi; else filterIdx = clsi;
 
-    // texelFetch with explicit integer coords — no UV float math
-    v_color = texelFetch(u_palette, ivec2(colorIdx, 0), 0).rgb;
-    float vis = texelFetch(u_filterVis, ivec2(filterIdx, 0), 0).r;
+    if (u_colorMode == 2) {
+        // gene expression: map to sequential colormap
+        float u = clamp(a_expression / max(u_exprMax, 0.001), 0.0, 1.0);
+        v_color = texture(u_colormap, vec2(u, 0.5)).rgb;
+    } else {
+        int colorIdx = (u_colorMode == 1) ? subi : clsi;
+        v_color = texelFetch(u_palette, ivec2(colorIdx, 0), 0).rgb;
+    }
 
+    float vis = texelFetch(u_filterVis, ivec2(filterIdx, 0), 0).r;
     vec2 p = a_pos * u_xform.xy + u_xform.zw;
     if (vis < 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -573,12 +673,15 @@ function initShader() {
         a_pos:          gl.getAttribLocation(prog, 'a_pos'),
         a_classId:      gl.getAttribLocation(prog, 'a_classId'),
         a_subId:        gl.getAttribLocation(prog, 'a_subId'),
+        a_expression:   gl.getAttribLocation(prog, 'a_expression'),
         u_xform:        gl.getUniformLocation(prog, 'u_xform'),
         u_pointSize:    gl.getUniformLocation(prog, 'u_pointSize'),
         u_palette:      gl.getUniformLocation(prog, 'u_palette'),
         u_filterVis:    gl.getUniformLocation(prog, 'u_filterVis'),
-        u_useSubColor:  gl.getUniformLocation(prog, 'u_useSubColor'),
+        u_colormap:     gl.getUniformLocation(prog, 'u_colormap'),
+        u_colorMode:    gl.getUniformLocation(prog, 'u_colorMode'),
         u_useSubFilter: gl.getUniformLocation(prog, 'u_useSubFilter'),
+        u_exprMax:      gl.getUniformLocation(prog, 'u_exprMax'),
     };
 }
 
@@ -685,7 +788,12 @@ async function selectDataset(name) {
 
     state.panels = [...refPanels, ...queryPanels];
 
-    // load all binaries in parallel (~22MB total)
+    // clear stale gene data from previous dataset
+    clearGene();
+    document.getElementById('gene-input').value = '';
+    updateGeneDatalist();
+
+    // load all binaries in parallel
     setStatus(`loading ${state.panels.length} slices…`);
     await Promise.all(state.panels.map(p => loadSlice(p.entry)));
     setStatus(`${state.panels.length} slices loaded · ` +
@@ -824,27 +932,23 @@ function render() {
 
     gl.useProgram(state.program);
 
-    // pick palette (color mode) and filter visibility (filter level) — both
-    // are independent. shader checks visibility only for the chosen filter
-    // level, so class/subclass selections can never disagree.
-    const useSubColor  = state.colorMode === 'subclass'  ? 1 : 0;
+    // color mode: 0=class, 1=subclass, 2=gene
+    const colorMode = state.colorMode === 'gene' ? 2
+                    : state.colorMode === 'subclass' ? 1 : 0;
     const useSubFilter = state.filterLevel === 'subclass' ? 1 : 0;
-    const palTex = useSubColor  ? state.subPaletteTex : state.classPaletteTex;
-    const palN   = useSubColor
-        ? state.manifest.subclass_palette.length
-        : state.manifest.class_palette.length;
+    const palTex = colorMode === 1 ? state.subPaletteTex : state.classPaletteTex;
     const visTex = useSubFilter ? state.subVisTex : state.classVisTex;
-    const visN   = useSubFilter
-        ? state.manifest.subclass_palette.length
-        : state.manifest.class_palette.length;
 
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, palTex);
     gl.uniform1i(state.locs.u_palette, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, visTex);
     gl.uniform1i(state.locs.u_filterVis, 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, state.colormapTex);
+    gl.uniform1i(state.locs.u_colormap, 2);
 
-    gl.uniform1i(state.locs.u_useSubColor,  useSubColor);
+    gl.uniform1i(state.locs.u_colorMode,    colorMode);
     gl.uniform1i(state.locs.u_useSubFilter, useSubFilter);
+    gl.uniform1f(state.locs.u_exprMax,      state.geneMax || 1);
     // gently scale point size with zoom (sqrt) so things stay legible
     const zoomBoost = Math.sqrt(Math.max(state.zoom, 0.5));
     gl.uniform1f(state.locs.u_pointSize,
@@ -890,6 +994,16 @@ function render() {
         gl.bindBuffer(gl.ARRAY_BUFFER, slice.subBuf);
         gl.enableVertexAttribArray(state.locs.a_subId);
         gl.vertexAttribPointer(state.locs.a_subId, 1, gl.FLOAT, false, 0, 0);
+
+        // gene expression attribute (0.0 when no gene loaded)
+        if (slice.exprBuf && colorMode === 2) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
+            gl.enableVertexAttribArray(state.locs.a_expression);
+            gl.vertexAttribPointer(state.locs.a_expression, 1, gl.FLOAT, false, 0, 0);
+        } else {
+            gl.disableVertexAttribArray(state.locs.a_expression);
+            gl.vertexAttrib1f(state.locs.a_expression, 0.0);
+        }
 
         gl.drawArrays(gl.POINTS, 0, slice.n);
     }
@@ -1036,14 +1150,21 @@ function showTooltip(mx, my, panel, slice, i) {
     const sampleLabel = panel.entry.sample_rep
         ? `${panel.entry.condition} · ${panel.entry.sample_rep}`
         : `REF · section ${panel.entry.short}`;
+    let exprLine = '';
+    if (state.currentGene && slice.exprData) {
+        const val = slice.exprData[i];
+        exprLine = `<div class="row"><span class="k">${state.currentGene}</span>
+            <span class="v">${val.toFixed(3)}</span></div>`;
+    }
     tt.innerHTML = `
-        <div class="row" style="margin-bottom:3px;color:#aaa;font-size:10px">${sampleLabel}</div>
+        <div class="row" style="margin-bottom:3px;color:var(--muted);font-size:10px">${sampleLabel}</div>
         <div class="row"><span class="k">class</span>
             <span class="swatch" style="background:${cP.color}"></span>
             <span class="v">${cP.name}</span></div>
         <div class="row"><span class="k">subclass</span>
             <span class="swatch" style="background:${sP.color}"></span>
             <span class="v">${sP.name}</span></div>
+        ${exprLine}
     `;
     // position with edge clamping
     tt.style.display = 'block';
@@ -1231,6 +1352,423 @@ function setAll(on) {
     });
     uploadVisibility(tex, visArr);
     render();
+}
+
+//----------------------------------------------------------------------------
+// gene expression loading + violin plot
+//----------------------------------------------------------------------------
+function initGene() {
+    const input = document.getElementById('gene-input');
+    const sgBox = document.getElementById('gene-suggestions');
+    let activeIdx = -1;
+
+    input.addEventListener('input', () => {
+        updateGeneSuggestions(input.value.trim());
+        activeIdx = -1;
+    });
+
+    input.addEventListener('keydown', e => {
+        const items = sgBox.querySelectorAll('.sg');
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIdx = Math.min(activeIdx + 1, items.length - 1);
+            highlightSuggestion(items, activeIdx);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIdx = Math.max(activeIdx - 1, 0);
+            highlightSuggestion(items, activeIdx);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (activeIdx >= 0 && items[activeIdx]) {
+                selectGene(items[activeIdx].dataset.gene);
+            } else {
+                selectGene(input.value.trim());
+            }
+        } else if (e.key === 'Escape') {
+            sgBox.style.display = 'none';
+        }
+    });
+
+    input.addEventListener('blur', () => {
+        // small delay so click on suggestion fires before hide
+        setTimeout(() => { sgBox.style.display = 'none'; }, 150);
+    });
+    input.addEventListener('focus', () => {
+        if (input.value.trim()) updateGeneSuggestions(input.value.trim());
+    });
+}
+
+function selectGene(name) {
+    const sgBox = document.getElementById('gene-suggestions');
+    sgBox.style.display = 'none';
+    document.getElementById('gene-input').value = name;
+    loadGene(name);
+}
+
+function highlightSuggestion(items, idx) {
+    items.forEach((el, i) => el.classList.toggle('active', i === idx));
+    if (items[idx]) items[idx].scrollIntoView({block: 'nearest'});
+}
+
+function highlightMatches(name, query) {
+    // highlight the matched chars from fuzzyScore
+    if (!query) return escHtml(name);
+    const ql = query.toLowerCase();
+    const nl = name.toLowerCase();
+    let qi = 0;
+    let out = '';
+    for (let ni = 0; ni < name.length; ni++) {
+        if (qi < ql.length && nl[ni] === ql[qi]) {
+            out += `<span class="match-char">${escHtml(name[ni])}</span>`;
+            qi++;
+        } else {
+            out += escHtml(name[ni]);
+        }
+    }
+    return out;
+}
+
+function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function updateGeneSuggestions(query) {
+    const sgBox = document.getElementById('gene-suggestions');
+    const ds = state.manifest.datasets[state.dataset];
+    if (!ds || !ds.genes || !query) {
+        sgBox.style.display = 'none';
+        return;
+    }
+    const q = query.toLowerCase();
+    const scored = [];
+    for (const gene of ds.genes) {
+        const s = fuzzyScore(q, gene.toLowerCase());
+        if (s !== null) scored.push([s, gene]);
+    }
+    scored.sort((a, b) => a[0] - b[0]);
+    const top = scored.slice(0, 20);
+    if (top.length === 0) {
+        sgBox.style.display = 'none';
+        return;
+    }
+    sgBox.innerHTML = '';
+    for (const [, gene] of top) {
+        const div = document.createElement('div');
+        div.className = 'sg';
+        div.dataset.gene = gene;
+        div.innerHTML = highlightMatches(gene, query);
+        div.addEventListener('mousedown', e => {
+            e.preventDefault(); // keep focus on input
+            selectGene(gene);
+        });
+        sgBox.appendChild(div);
+    }
+    sgBox.style.display = 'block';
+}
+
+function updateGeneDatalist() {
+    // no-op: replaced by fuzzy suggestion dropdown
+}
+
+async function loadGene(name) {
+    const statusEl = document.getElementById('gene-status');
+    if (!name) {
+        clearGene();
+        statusEl.textContent = '';
+        return;
+    }
+    const ds = state.manifest.datasets[state.dataset];
+    if (!ds || !ds.genes) {
+        statusEl.textContent = 'no gene data for this dataset';
+        return;
+    }
+    // case-insensitive match
+    const idx = ds.genes.findIndex(g =>
+        g.toLowerCase() === name.toLowerCase());
+    if (idx < 0) {
+        statusEl.textContent = `"${name}" not found in ${state.dataset} (${ds.genes.length} genes)`;
+        return;
+    }
+    const gene = ds.genes[idx];
+    statusEl.textContent = `loading ${gene}…`;
+
+    try {
+        const url = `viewer_data/${state.dataset}/genes/${encodeURIComponent(gene)}.bin`;
+        const r = await fetch(url);
+        if (!r.ok) {
+            statusEl.textContent = r.status === 404
+                ? `"${gene}" not yet exported — run XX_export_viewer.py`
+                : `error fetching ${gene}: HTTP ${r.status}`;
+            return;
+        }
+        const buf = await r.arrayBuffer();
+        const allExpr = new Float32Array(buf);
+
+        // find max across all cells
+        let mx = 0;
+        for (let i = 0; i < allExpr.length; i++) if (allExpr[i] > mx) mx = allExpr[i];
+        state.geneMax = mx;
+        state.currentGene = gene;
+
+        // split by sample_rep and upload to each slice's exprBuf
+        const samples = ds.samples;
+        let offset = 0;
+        for (const s of samples) {
+            const slice = state.slices.get(s.file);
+            if (!slice) continue;
+            const chunk = allExpr.subarray(offset, offset + s.n_cells);
+            slice.exprData = new Float32Array(chunk); // copy for violin
+            const gl = state.gl;
+            if (!slice.exprBuf) slice.exprBuf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
+            gl.bufferData(gl.ARRAY_BUFFER, chunk, gl.DYNAMIC_DRAW);
+            offset += s.n_cells;
+        }
+        // also upload zeros to ref slices
+        if (state.manifest.reference) {
+            for (const s of state.manifest.reference.sections) {
+                const slice = state.slices.get(s.file);
+                if (!slice) continue;
+                if (!slice.exprBuf) slice.exprBuf = state.gl.createBuffer();
+                const zeros = new Float32Array(s.n_cells);
+                state.gl.bindBuffer(state.gl.ARRAY_BUFFER, slice.exprBuf);
+                state.gl.bufferData(state.gl.ARRAY_BUFFER, zeros, gl.DYNAMIC_DRAW);
+                slice.exprData = zeros;
+            }
+        }
+
+        statusEl.textContent = `${gene}  max=${mx.toFixed(2)}`;
+        document.getElementById('cmap-max').textContent = mx.toFixed(1);
+        // auto-switch to gene color mode
+        state.colorMode = 'gene';
+        document.querySelectorAll('input[name="cmode"]').forEach(r => {
+            r.checked = (r.value === 'gene');
+        });
+        render();
+        drawViolin(ds, allExpr);
+    } catch (e) {
+        statusEl.textContent = `error: ${e.message}`;
+        console.error(e);
+    }
+}
+
+function clearGene() {
+    state.currentGene = null;
+    state.geneMax = 0;
+    for (const [, slice] of state.slices) {
+        slice.exprData = null;
+    }
+    document.getElementById('violin-wrap').style.display = 'none';
+    if (state.colorMode === 'gene') {
+        state.colorMode = 'class';
+        document.querySelectorAll('input[name="cmode"]').forEach(r => {
+            r.checked = (r.value === 'class');
+        });
+    }
+    render();
+}
+
+//----------------------------------------------------------------------------
+// violin plot (canvas-based)
+//----------------------------------------------------------------------------
+const COND_COLORS = {
+    CTRL: '#2563eb', PREG: '#d04646', POSTPART: '#c97a17',
+};
+
+function drawViolin(ds, allExpr) {
+    const wrap = document.getElementById('violin-wrap');
+    wrap.style.display = 'block';
+    const canvas = document.getElementById('violin-canvas');
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = canvas.clientWidth || 270;
+    const cssH = 200;
+    canvas.width = cssW * dpr; canvas.height = cssH * dpr;
+    canvas.style.height = cssH + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    // group samples by condition
+    const conditions = [];
+    const condMap = {};
+    let offset = 0;
+    for (const s of ds.samples) {
+        if (!condMap[s.condition]) {
+            condMap[s.condition] = { name: s.condition, samples: [], values: [] };
+            conditions.push(condMap[s.condition]);
+        }
+        const vals = allExpr.subarray(offset, offset + s.n_cells);
+        condMap[s.condition].samples.push({
+            name: s.sample_rep,
+            parent: s.sample,
+            values: vals,
+            median: computeMedian(vals),
+        });
+        condMap[s.condition].values.push(vals);
+        offset += s.n_cells;
+    }
+    // concatenate per-condition values
+    for (const c of conditions) {
+        const total = c.values.reduce((a, v) => a + v.length, 0);
+        const flat = new Float32Array(total);
+        let off = 0;
+        for (const v of c.values) { flat.set(v, off); off += v.length; }
+        c.flat = flat;
+    }
+
+    // layout
+    const margin = { top: 20, right: 10, bottom: 30, left: 36 };
+    const plotW = cssW - margin.left - margin.right;
+    const plotH = cssH - margin.top - margin.bottom;
+    const nCond = conditions.length;
+    const violinW = plotW / nCond;
+    const maxVal = state.geneMax || 1;
+
+    // y scale: 0 → maxVal
+    const yScale = v => margin.top + plotH * (1 - v / maxVal);
+
+    // KDE bins
+    const nBins = 100;
+    const binW = maxVal / nBins;
+
+    // find max density across all conditions for symmetric scaling
+    let globalMaxDens = 0;
+    for (const c of conditions) {
+        c.kde = computeKDE(c.flat, nBins, maxVal);
+        const md = Math.max(...c.kde);
+        if (md > globalMaxDens) globalMaxDens = md;
+    }
+
+    // is dark theme?
+    const isDark = currentTheme() === 'dark';
+    const axisColor = isDark ? '#666' : '#aaa';
+    const textColor = isDark ? '#ccc' : '#333';
+    const medianDiamondStroke = isDark ? '#fff' : '#000';
+
+    ctx.save();
+    // y axis
+    ctx.strokeStyle = axisColor;
+    ctx.fillStyle = textColor;
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    const nTicks = 5;
+    for (let i = 0; i <= nTicks; i++) {
+        const v = maxVal * i / nTicks;
+        const y = yScale(v);
+        ctx.beginPath();
+        ctx.moveTo(margin.left - 3, y);
+        ctx.lineTo(margin.left, y);
+        ctx.stroke();
+        ctx.fillText(v.toFixed(1), margin.left - 5, y);
+        // faint grid line
+        ctx.save();
+        ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+        ctx.beginPath();
+        ctx.moveTo(margin.left, y);
+        ctx.lineTo(cssW - margin.right, y);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // draw each violin
+    for (let ci = 0; ci < nCond; ci++) {
+        const c = conditions[ci];
+        const cx = margin.left + violinW * (ci + 0.5);
+        const halfW = violinW * 0.4;
+        const color = COND_COLORS[c.name] || '#888';
+
+        // violin shape
+        ctx.fillStyle = color + '40'; // 25% alpha
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        for (let b = 0; b <= nBins; b++) {
+            const y = yScale(b * binW);
+            const w = (c.kde[b] || 0) / globalMaxDens * halfW;
+            if (b === 0) ctx.moveTo(cx - w, y);
+            else ctx.lineTo(cx - w, y);
+        }
+        for (let b = nBins; b >= 0; b--) {
+            const y = yScale(b * binW);
+            const w = (c.kde[b] || 0) / globalMaxDens * halfW;
+            ctx.lineTo(cx + w, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // per-sample median diamonds
+        for (const s of c.samples) {
+            const y = yScale(s.median);
+            const sz = 4;
+            ctx.fillStyle = color;
+            ctx.strokeStyle = medianDiamondStroke;
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(cx, y - sz);
+            ctx.lineTo(cx + sz, y);
+            ctx.lineTo(cx, y + sz);
+            ctx.lineTo(cx - sz, y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        // condition label
+        ctx.fillStyle = textColor;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(c.name, cx, cssH - margin.bottom + 6);
+    }
+
+    // title
+    ctx.fillStyle = textColor;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.currentGene || '', cssW / 2, 6);
+
+    ctx.restore();
+}
+
+function computeKDE(values, nBins, maxVal) {
+    // histogram-based KDE: bin → Gaussian smooth
+    const bins = new Float32Array(nBins + 1);
+    const bw = maxVal / nBins;
+    for (let i = 0; i < values.length; i++) {
+        const b = Math.min(nBins, Math.floor(values[i] / bw));
+        bins[b]++;
+    }
+    // normalize
+    const total = values.length || 1;
+    for (let i = 0; i <= nBins; i++) bins[i] /= total;
+    // Gaussian smooth (sigma ~ 2 bins)
+    const sigma = 2;
+    const kSize = Math.ceil(sigma * 3);
+    const kernel = new Float32Array(2 * kSize + 1);
+    let kSum = 0;
+    for (let i = -kSize; i <= kSize; i++) {
+        kernel[i + kSize] = Math.exp(-0.5 * (i / sigma) ** 2);
+        kSum += kernel[i + kSize];
+    }
+    for (let i = 0; i < kernel.length; i++) kernel[i] /= kSum;
+    const smooth = new Float32Array(nBins + 1);
+    for (let i = 0; i <= nBins; i++) {
+        for (let k = -kSize; k <= kSize; k++) {
+            const j = i + k;
+            if (j >= 0 && j <= nBins) smooth[i] += bins[j] * kernel[k + kSize];
+        }
+    }
+    return smooth;
+}
+
+function computeMedian(arr) {
+    const sorted = Array.from(arr).sort((a, b) => a - b);
+    const n = sorted.length;
+    if (n === 0) return 0;
+    return n % 2 === 1 ? sorted[Math.floor(n / 2)]
+        : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
 }
 
 boot().catch(e => { console.error(e); setStatus('error: ' + e.message); });
