@@ -190,8 +190,10 @@ run_edgeR <- function(pseudobulks, ref_level, norm_method) {
                 targets$condition, levels = c(ref_level, other_level))
             if (n_distinct(targets$group) < 2) return(NULL)
 
-            targets$log_num_cells <- log(targets$num_cells)
-            design <- model.matrix(~ group + log_num_cells, data = targets)
+            targets$log_num_cells <- log2(targets$num_cells)
+            targets$log_lib_size <- log2(colSums(element$counts))
+            design <- model.matrix(~ group + log_num_cells + log_lib_size,
+                                   data = targets)
             y <- DGEList(counts = element$counts, samples = targets)
 
             if (norm_method %in% c("volume", "area")) {
@@ -206,7 +208,6 @@ run_edgeR <- function(pseudobulks, ref_level, norm_method) {
             fit <- glmFit(y, design = design)
             test <- glmLRT(fit, coef = 2)
 
-            n_samples <- ncol(y$counts)
             mu <- fitted(fit)
             res <- (y$counts - mu) / sqrt(mu + mu^2 * y$common.dispersion)
             hat_diag <- hat(design)
@@ -214,10 +215,11 @@ run_edgeR <- function(pseudobulks, ref_level, norm_method) {
                      (ncol(design) * (1 - hat_diag)^2)
             max_cooks <- apply(cooks, 1, max)
 
-            topTags(test, n = Inf) %>%
+            tt <- topTags(test, n = Inf) %>%
                 as.data.frame() %>%
-                rownames_to_column("gene") %>%
-                mutate(max_cooks_d = max_cooks[gene])
+                rownames_to_column("gene")
+            tt$max_cooks_d <- as.numeric(max_cooks[tt$gene])
+            tt
         }, error = function(e) {
             warning(paste("Error in", cell_type_name, ":", e$message))
             return(NULL)

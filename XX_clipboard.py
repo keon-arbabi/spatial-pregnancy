@@ -3,124 +3,102 @@ import numpy as np
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 de = pl.read_csv(f'{working_dir}/output/de_results.csv')
+preg = de.filter(pl.col('contrast') == 'PREG_vs_CTRL')
 
-###############################################################################
-# For each FDR<0.10 DEG: show what the other platforms say
-###############################################################################
-
-contrast = 'PREG_vs_CTRL'
-sub = de.filter(pl.col('contrast') == contrast)
-
-# Get all FDR<0.10 hits
-fdr_hits = sub.filter(pl.col('FDR') < 0.10)\
-    .select(['gene', 'cell_type', 'dataset', 'logFC', 'PValue', 'FDR',
-             'ref_pct_detected'])\
-    .sort(['dataset', 'FDR'])
-
-# Get all results (for lookup)
-all_results = sub.select(['gene', 'cell_type', 'dataset', 'logFC', 'PValue',
-                           'FDR', 'ref_pct_detected'])
-
-# For each FDR hit, find matching gene-cell in other platforms
-rows = []
-for row in fdr_hits.iter_rows(named=True):
-    others = all_results.filter(
-        (pl.col('gene') == row['gene']) &
-        (pl.col('cell_type') == row['cell_type']) &
-        (pl.col('dataset') != row['dataset']))
-
-    other_data = {}
-    for o in others.iter_rows(named=True):
-        other_data[o['dataset']] = o
-
-    same_dir_any = False
-    same_dir_sig = False
-    for ds, o in other_data.items():
-        if (row['logFC'] > 0) == (o['logFC'] > 0):
-            same_dir_any = True
-            if o['PValue'] < 0.05:
-                same_dir_sig = True
-
-    rows.append({
-        'gene': row['gene'],
-        'cell_type': row['cell_type'],
-        'lead_ds': row['dataset'],
-        'lead_lfc': row['logFC'],
-        'lead_fdr': row['FDR'],
-        'lead_ref': row['ref_pct_detected'],
-        'n_other': len(other_data),
-        'other_data': other_data,
-        'same_dir_any': same_dir_any,
-        'same_dir_sig': same_dir_sig,
-    })
-
-# --- Summary stats ---
-total = len(rows)
-has_other = sum(1 for r in rows if r['n_other'] > 0)
-same_dir = sum(1 for r in rows if r['same_dir_any'])
-same_dir_sig = sum(1 for r in rows if r['same_dir_sig'])
-opp_dir_all = sum(1 for r in rows if r['n_other'] > 0 and not r['same_dir_any'])
-
-print(f'=== {contrast}: {total} FDR<0.10 DEGs ===\n')
-print(f'  Testable in other platform(s): {has_other}')
-print(f'  Same direction in ≥1 other:    {same_dir} '
-      f'({same_dir/max(has_other,1)*100:.0f}%)')
-print(f'  Same dir + p<0.05 in ≥1:       {same_dir_sig} '
-      f'({same_dir_sig/max(has_other,1)*100:.0f}%)')
-print(f'  Opposite dir in ALL others:    {opp_dir_all} '
-      f'({opp_dir_all/max(has_other,1)*100:.0f}%)')
-
-# --- By lead platform ---
-for lead_ds in ['slidetags', 'xenium', 'merfish']:
-    ds_rows = [r for r in rows if r['lead_ds'] == lead_ds]
-    if not ds_rows:
+# --- 1. Overview ---
+print('=== 1. Overview (with log2 num_cells + log2 lib_size covariates) ===\n')
+for ds in ['slidetags', 'xenium', 'merfish']:
+    sub = preg.filter(pl.col('dataset') == ds)
+    sig = sub.filter(pl.col('FDR') < 0.10)
+    if sig.height == 0:
+        print(f'{ds}: 0 DEGs')
         continue
-    ds_has = sum(1 for r in ds_rows if r['n_other'] > 0)
-    ds_same = sum(1 for r in ds_rows if r['same_dir_any'])
-    ds_sig = sum(1 for r in ds_rows if r['same_dir_sig'])
-    ds_opp = sum(1 for r in ds_rows if r['n_other'] > 0 and not r['same_dir_any'])
+    up = (sig['logFC'] > 0).sum()
+    down = sig.height - up
+    pct_up = up / sig.height * 100
+    n_ct = sig['cell_type'].n_unique()
+    print(f'{ds:10s} {sig.height:>5d} DEGs ({up} up, {down} down, '
+          f'{pct_up:.0f}% up) in {n_ct} cell types')
 
-    print(f'\n--- {lead_ds} ({len(ds_rows)} FDR DEGs) ---')
-    print(f'  Testable: {ds_has}, Same dir: {ds_same} '
-          f'({ds_same/max(ds_has,1)*100:.0f}%), '
-          f'Same+sig: {ds_sig} ({ds_sig/max(ds_has,1)*100:.0f}%), '
-          f'All opposite: {ds_opp} ({ds_opp/max(ds_has,1)*100:.0f}%)')
+# --- 2. Conditional concordance ---
+print('\n=== 2. Conditional concordance ===\n')
 
-# --- Print all hits with other-platform detail ---
-for lead_ds in ['slidetags', 'xenium', 'merfish']:
-    ds_rows = sorted([r for r in rows if r['lead_ds'] == lead_ds],
-                     key=lambda r: r['lead_fdr'])
-    if not ds_rows:
-        continue
+pairs = [('slidetags', 'xenium', 'st', 'xn')]
+for ds1, ds2, lab1, lab2 in pairs:
+    d1 = preg.filter((pl.col('dataset') == ds1) & (pl.col('PValue') < 0.05))\
+        .select(['gene', 'cell_type', pl.col('logFC').alias('lfc1')])
+    d2 = preg.filter(pl.col('dataset') == ds2)\
+        .select(['gene', 'cell_type', pl.col('logFC').alias('lfc2')])
+    joined = d1.join(d2, on=['gene', 'cell_type'])
+    if joined.height > 0:
+        x, y = joined['lfc1'].to_numpy(), joined['lfc2'].to_numpy()
+        conc = (x * y > 0).sum() / len(x) * 100
+        up_mask = x > 0
+        dn_mask = x < 0
+        up_c = (y[up_mask] > 0).sum() / up_mask.sum() * 100
+        dn_c = (y[dn_mask] < 0).sum() / dn_mask.sum() * 100
+        print(f'{lab1} sig→{lab2}: n={joined.height}, conc={conc:.0f}% '
+              f'(up:{up_c:.0f}%, down:{dn_c:.0f}%)')
 
-    print(f'\n{"=" * 100}')
-    print(f'{lead_ds} FDR<0.10 DEGs with cross-platform evidence')
-    print(f'{"=" * 100}\n')
+    # Reverse
+    d1r = preg.filter(pl.col('dataset') == ds1)\
+        .select(['gene', 'cell_type', pl.col('logFC').alias('lfc1')])
+    d2r = preg.filter((pl.col('dataset') == ds2) & (pl.col('PValue') < 0.05))\
+        .select(['gene', 'cell_type', pl.col('logFC').alias('lfc2')])
+    joined_r = d1r.join(d2r, on=['gene', 'cell_type'])
+    if joined_r.height > 0:
+        xr, yr = joined_r['lfc1'].to_numpy(), joined_r['lfc2'].to_numpy()
+        conc_r = (xr * yr > 0).sum() / len(xr) * 100
+        print(f'{lab2} sig→{lab1}: n={joined_r.height}, conc={conc_r:.0f}%')
 
-    for r in ds_rows:
-        dir_str = '↑' if r['lead_lfc'] > 0 else '↓'
-        ref_str = f'{r["lead_ref"]:.0f}%' if r['lead_ref'] is not None else '-'
+# --- 3. Replication rate ---
+print('\n=== 3. Replication rate (FDR<0.10 in A, p<0.05 same dir in B) ===\n')
 
-        # Status
-        if r['same_dir_sig']:
-            status = '✓ REPLICATED'
-        elif r['same_dir_any']:
-            status = '~ concordant'
-        elif r['n_other'] > 0:
-            status = '✗ discordant'
-        else:
-            status = '- no overlap'
+for ds1, ds2, lab1, lab2 in pairs:
+    degs = preg.filter(
+        (pl.col('dataset') == ds1) & (pl.col('FDR') < 0.10))\
+        .select(['gene', 'cell_type', pl.col('logFC').alias('lfc1')])
+    d2 = preg.filter(pl.col('dataset') == ds2)\
+        .select(['gene', 'cell_type',
+                 pl.col('logFC').alias('lfc2'),
+                 pl.col('PValue').alias('p2')])
+    joined = degs.join(d2, on=['gene', 'cell_type'])
+    if joined.height > 0:
+        repl = joined.filter(
+            (pl.col('p2') < 0.05) &
+            ((pl.col('lfc1') * pl.col('lfc2')) > 0)).height
+        anti = joined.filter(
+            (pl.col('p2') < 0.05) &
+            ((pl.col('lfc1') * pl.col('lfc2')) < 0)).height
+        print(f'{lab1}→{lab2}: {degs.height} DEGs, '
+              f'{joined.height} testable, '
+              f'{repl} replicated ({repl/max(joined.height,1)*100:.1f}%), '
+              f'{anti} anti ({anti/max(joined.height,1)*100:.1f}%)')
 
-        print(f'{dir_str} {r["gene"]:15s} {r["cell_type"]:40s} '
-              f'{lead_ds[:2]}:FDR={r["lead_fdr"]:.1e},lfc={r["lead_lfc"]:+.2f} '
-              f'ref={ref_str}  {status}')
+# --- 4. Top cell types ---
+print('\n=== 4. Top cell types by DEG count ===\n')
+for ds in ['slidetags', 'xenium']:
+    top = preg.filter((pl.col('dataset') == ds) & (pl.col('FDR') < 0.10))\
+        .group_by('cell_type').agg(
+            pl.len().alias('n'),
+            (pl.col('logFC') > 0).sum().alias('up'),
+            (pl.col('logFC') < 0).sum().alias('down'),
+        ).sort('n', descending=True).head(10)
+    print(f'  {ds}:')
+    for row in top.iter_rows(named=True):
+        print(f'    {row["cell_type"]:45s} {row["n"]:>4d} '
+              f'({row["up"]} up, {row["down"]} down)')
+    print()
 
-        for ds in ['merfish', 'slidetags', 'xenium']:
-            if ds == lead_ds or ds not in r['other_data']:
-                continue
-            o = r['other_data'][ds]
-            same = (r['lead_lfc'] > 0) == (o['logFC'] > 0)
-            arrow = '→' if same else '←'
-            sig = '*' if o['PValue'] < 0.05 else ' '
-            print(f'    {arrow}{sig} {ds[:2]}: lfc={o["logFC"]:+.3f}, '
-                  f'p={o["PValue"]:.1e}, FDR={o["FDR"]:.2f}')
+# --- 5. Compare with previous run ---
+print('=== 5. Comparison to previous model ===')
+print('(paste previous values manually for comparison)\n')
+print('Previous (log_num_cells only):')
+print('  slidetags: 1553 DEGs, 36% up')
+print('  xenium: 12150 DEGs, 41% up')
+print('  st sig→xn: conc=50%')
+print('  xn sig→st: conc=51%')
+print('  st→xn replication: 44/590 (7.5%)')
+print()
+print('Current (log2_num_cells + log2_lib_size):')
+# Will be filled in by the run

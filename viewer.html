@@ -459,17 +459,30 @@ function geneUrl(dataset, gene) {
     const base = isLocal() ? 'viewer_data' : HF_BASE;
     if (!isLocal() && dataset === 'slidetags') {
         // HF has a 10k files/dir limit; slidetags genes are split into
-        // genes/ (first 10k), genes2/ (next 10k), genes3/, genes4/
+        // genes_00/ through genes_06/ (5000 each, alphabetically sorted)
         const ds = state.manifest.datasets[dataset];
         if (ds && ds.genes) {
-            const idx = ds.genes.indexOf(gene);
-            if (idx >= 10000) {
-                const subdir = 'genes' + (Math.floor(idx / 10000) + 1);
+            // cache the alphabetically sorted gene list for subdir lookup
+            if (!ds._sortedGenes) ds._sortedGenes = [...ds.genes].sort();
+            const idx = binarySearch(ds._sortedGenes, gene);
+            if (idx >= 0) {
+                const subdir = 'genes_' + String(Math.floor(idx / 5000)).padStart(2, '0');
                 return `${base}/${dataset}/${subdir}/${encodeURIComponent(gene)}.bin`;
             }
         }
     }
     return `${base}/${dataset}/genes/${encodeURIComponent(gene)}.bin`;
+}
+
+function binarySearch(sorted, target) {
+    let lo = 0, hi = sorted.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const cmp = sorted[mid].localeCompare(target);
+        if (cmp === 0) return mid;
+        if (cmp < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
 }
 function isLocal() {
     const h = location.hostname;
