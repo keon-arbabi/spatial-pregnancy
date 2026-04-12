@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 os.environ['R_HOME'] = os.path.expanduser('~/miniforge3/lib/R')
 from ryp import r, to_r, to_py
 
@@ -246,7 +248,7 @@ for name in datasets:
 
 plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
-plt.rcParams['figure.dpi'] = 300
+plt.rcParams['figure.dpi'] = 400
 
 FDR_STRICT = 0.10
 FDR_LOOSE = 0.20
@@ -255,7 +257,7 @@ seismic_cmap = plt.get_cmap('seismic')
 UP_COLOR = seismic_cmap(0.9)
 DN_COLOR = seismic_cmap(0.1)
 
-de_plot = pl.read_csv(f'{working_dir}/output/de_results.csv')
+de_fig = pl.read_csv(f'{working_dir}/output/de_results.csv')
 
 def get_type(ct):
     if 'Glut' in ct:
@@ -271,7 +273,7 @@ contrast_titles = {
     'POSTPART_vs_CTRL': 'Postpartum vs\nNulliparous',
 }
 
-deg_counts = de_plot\
+deg_counts = de_fig\
     .filter((pl.col('FDR') < FDR_LOOSE) &
             (pl.col('dataset').is_in(['slidetags', 'xenium'])))\
     .group_by(['cell_type', 'contrast', 'dataset'])\
@@ -424,10 +426,12 @@ legend_elements = [
           label='FDR<0.10'),
     Patch(facecolor='none', edgecolor='black', linewidth=0.4,
           hatch='////', label='FDR<0.20'),
+    Line2D([0], [0], marker='s', color='w', markerfacecolor='#555555',
+           markersize=5, label='Xenium only'),
 ]
 fig.legend(handles=legend_elements, loc='lower right',
            bbox_to_anchor=(0.98, 0.02), fontsize=7,
-           frameon=False, ncol=3)
+           frameon=False, ncol=4)
 
 os.makedirs(f'{working_dir}/figures', exist_ok=True)
 plt.savefig(f'{working_dir}/figures/deg_barplot.png',
@@ -441,18 +445,19 @@ plt.close()
 #region DEG exemplar violins ###################################################
 
 EXEMPLAR_GENES = [
-    ('Fabp7', '319 Astro-TE NN'),
-    ('Mfsd2a', '319 Astro-TE NN'),
-    ('Fkbp5', '319 Astro-TE NN'),
-    ('Idi1', '319 Astro-TE NN'),
-    ('Vwf', '333 Endo NN'),
-    ('Rgcc', '333 Endo NN'),
-    ('Egr3', '006 L4/5 IT CTX Glut'),
-    ('Grik1', '054 STR Prox1 Lhx6 Gaba'),
     ('Grm1', '058 PAL-STR Gaba-Chol'),
-    ('Ntrk3', '085 SI-MPO-LPO Lhx8 Gaba'),
-    ('Irs2', '106 PVpo-VMPO-MPN Hmx2 Gaba'),
-    ('Bdnf', '124 MPN-MPO-PVpo Hmx2 Glut'),
+    ('Slc17a8', '058 PAL-STR Gaba-Chol'),
+    ('Gpr88', '009 L2/3 IT PIR-ENTl Glut'),
+    ('Dusp7', '006 L4/5 IT CTX Glut'),
+    ('Kdr', '333 Endo NN'),
+    ('Igfbp3', '333 Endo NN'),
+    ('Idi1', '319 Astro-TE NN'),
+    ('Gjb6', '319 Astro-TE NN'),
+    ('Grm8', '085 SI-MPO-LPO Lhx8 Gaba'),
+    ('Calcr', '085 SI-MPO-LPO Lhx8 Gaba'),
+    ('Gal', '086 MPO-ADP Lhx8 Gaba'),
+    ('Brs3', '106 PVpo-VMPO-MPN Hmx2 Gaba'),
+    ('Rxfp1', '124 MPN-MPO-PVpo Hmx2 Glut'),
 ]
 
 condition_colors = {
@@ -461,8 +466,6 @@ condition_colors = {
     'POSTPART': '#f72585',
 }
 
-de_exemplar = pl.read_csv(f'{working_dir}/output/de_results.csv')
-
 def get_pseudobulk_expr(adata_src, gene, cell_type):
     if gene not in adata_src.var_names:
         return {}
@@ -470,163 +473,225 @@ def get_pseudobulk_expr(adata_src, gene, cell_type):
     if cell_mask.sum() == 0:
         return {}
     subset = adata_src[cell_mask, gene]
+    groups = subset.obs.groupby('sample')['condition'].first()
     result = {}
-    for sample in subset.obs['sample'].unique():
+    for sample, cond in groups.items():
         s_mask = subset.obs['sample'] == sample
-        cond = subset.obs.loc[s_mask, 'condition'].iloc[0]
-        counts = subset[s_mask].X.toarray().flatten()
-        total = counts.sum()
+        total = subset[s_mask].X.sum()
         n_cells = s_mask.sum()
-        cpm = np.log2(total / n_cells * 1e4 + 1) if n_cells > 0 else 0
-        result[sample] = {'cond': cond, 'cpm': cpm}
+        result[sample] = {
+            'cond': cond,
+            'cpm': np.log2(total / n_cells * 1e4 + 1) if n_cells > 0 else 0,
+        }
     return result
 
+def zscore_pb(pb):
+    if not pb:
+        return
+    vals = [v['cpm'] for v in pb.values()]
+    mu = np.mean(vals)
+    sd = max(np.std(vals), 1e-6)
+    for v in pb.values():
+        v['z'] = (v['cpm'] - mu) / sd
+
+def draw_panel(ax, pb, conditions, marker, ms, alpha, seed):
+    cond_pos = {c: i for i, c in enumerate(conditions)}
+    rng = np.random.default_rng(seed)
+    for vals in pb.values():
+        cond = vals['cond']
+        if cond not in cond_pos:
+            continue
+        x = cond_pos[cond] + rng.uniform(-0.18, 0.18)
+        ax.scatter(x, vals['z'], marker=marker,
+                   c=condition_colors[cond], s=ms, alpha=alpha,
+                   linewidths=0, zorder=10)
+    means = {}
+    for cond in conditions:
+        zvals = [v['z'] for v in pb.values() if v['cond'] == cond]
+        if zvals:
+            m = np.mean(zvals)
+            se = np.std(zvals) / np.sqrt(len(zvals)) \
+                if len(zvals) > 1 else 0
+            means[cond] = m
+            ax.errorbar(cond_pos[cond], m, yerr=se,
+                        fmt='none', color='black', capsize=1.5,
+                        capthick=0.5, linewidth=0.5, zorder=5,
+                        alpha=alpha)
+    if len(means) > 1:
+        xs = [cond_pos[c] for c in conditions if c in means]
+        ys = [means[c] for c in conditions if c in means]
+        ax.plot(xs, ys, '-', color='black', linewidth=0.6,
+                alpha=0.3, zorder=1)
+
+def add_sig_star(ax, gene, cell_type, dataset, cond_pos):
+    is_sig = de_fig.filter(
+        (pl.col('gene') == gene) &
+        (pl.col('cell_type') == cell_type) &
+        (pl.col('dataset') == dataset) &
+        (pl.col('contrast') == 'PREG_vs_CTRL') &
+        (pl.col('FDR') < 0.10)).height > 0
+    if not is_sig or 'CTRL' not in cond_pos or 'PREG' not in cond_pos:
+        return
+    x = (cond_pos['CTRL'] + cond_pos['PREG']) / 2
+    ylim = ax.get_ylim()
+    ax.text(x, ylim[1] - (ylim[1] - ylim[0]) * 0.02, '*',
+            ha='center', va='top', fontsize=9, fontweight='bold',
+            clip_on=False)
+
+def format_ax(ax, linewidth=0.5):
+    for spine in ax.spines.values():
+        spine.set_linewidth(linewidth)
+
+adata_xn_norm = adatas['xenium'].copy()
+sc.pp.normalize_total(adata_xn_norm, target_sum=1e4)
+sc.pp.log1p(adata_xn_norm)
+
+xn_ct_subsets = {}
+for ct in set(ct for _, ct in EXEMPLAR_GENES):
+    mask = adata_xn_norm.obs[cell_type_col] == ct
+    if mask.sum() > 0:
+        xn_ct_subsets[ct] = adata_xn_norm[mask]
+
+all_ffd = adata_xn_norm.obs[['x_ffd', 'y_ffd']].values
+fov_cx = (all_ffd[:, 0].min() + all_ffd[:, 0].max()) / 2
+fov_cy = (all_ffd[:, 1].min() + all_ffd[:, 1].max()) / 2
+fov_half = max(np.ptp(all_ffd[:, 0]), np.ptp(all_ffd[:, 1])) / 2 * 1.05
+
 n_genes = len(EXEMPLAR_GENES)
-n_cols = 2
-n_rows = (n_genes + n_cols - 1) // n_cols
-ps = 1.3
-fig, axes = plt.subplots(n_rows, n_cols,
-                         figsize=(n_cols * ps + 0.5, n_rows * ps + 0.3))
-axes = axes.flatten()
+n_col_genes = 2
+n_rows = (n_genes + n_col_genes - 1) // n_col_genes
+
+fig = plt.figure(figsize=(n_col_genes * 4.0, n_rows * 2.0))
+outer_gs = gridspec.GridSpec(n_rows, n_col_genes, figure=fig,
+                              hspace=0.5, wspace=0.25)
 
 for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
-    ax = axes[idx]
+    row_i = idx // n_col_genes
+    col_i = idx % n_col_genes
+    inner_gs = gridspec.GridSpecFromSubplotSpec(
+        2, 3, subplot_spec=outer_gs[row_i, col_i],
+        hspace=0.05, wspace=0.04,
+        width_ratios=[1.0, 0.9, 0.9])
+    ax_st = fig.add_subplot(inner_gs[0, 0])
+    ax_xn = fig.add_subplot(inner_gs[1, 0], sharex=ax_st)
+    ax_sp_ctrl = fig.add_subplot(inner_gs[:, 1])
+    ax_sp_preg = fig.add_subplot(inner_gs[:, 2])
 
     pb_st = get_pseudobulk_expr(adatas['slidetags'], gene, cell_type)
     pb_xn = get_pseudobulk_expr(adatas['xenium'], gene, cell_type)
-    has_postpart = any(v['cond'] == 'POSTPART' for v in pb_st.values())
-    conditions = ['CTRL', 'PREG', 'POSTPART'] if has_postpart \
-        else ['CTRL', 'PREG']
-    cond_pos = {c: i for i, c in enumerate(conditions)}
 
-    all_cpm = [v['cpm'] for v in pb_st.values()] + \
-              [v['cpm'] for v in pb_xn.values()]
-    if not all_cpm:
-        ax.set_visible(False)
+    if not pb_st and not pb_xn:
+        for a in [ax_st, ax_xn, ax_sp_ctrl, ax_sp_preg]:
+            a.set_visible(False)
         continue
 
-    mu = np.mean(all_cpm)
-    sd = np.std(all_cpm) if np.std(all_cpm) > 0 else 1
-    for pb in [pb_st, pb_xn]:
-        for v in pb.values():
-            v['z'] = (v['cpm'] - mu) / sd
+    has_postpart = any(v['cond'] == 'POSTPART' for v in pb_st.values())
+    st_conditions = ['CTRL', 'PREG', 'POSTPART'] if has_postpart \
+        else ['CTRL', 'PREG']
+    xn_conditions = ['CTRL', 'PREG']
 
-    np.random.seed(idx)
-    for pb, marker, ms, alpha in [
-            (pb_st, 'o', 10, 1.0),
-            (pb_xn, 'D', 7, 0.65)]:
-        for vals in pb.values():
-            cond = vals['cond']
-            if cond not in cond_pos:
-                continue
-            x = cond_pos[cond] + np.random.uniform(-0.18, 0.18)
-            ax.scatter(x, vals['z'], marker=marker,
-                       c=condition_colors[cond], s=ms, alpha=alpha,
-                       linewidths=0, zorder=10)
+    zscore_pb(pb_st)
+    zscore_pb(pb_xn)
 
-        means = {}
-        for cond in conditions:
-            zvals = [v['z'] for v in pb.values() if v['cond'] == cond]
-            if zvals:
-                m = np.mean(zvals)
-                se = np.std(zvals) / np.sqrt(len(zvals)) \
-                    if len(zvals) > 1 else 0
-                means[cond] = m
-                ax.errorbar(cond_pos[cond], m, yerr=se,
-                            fmt='none', color='black', capsize=1.5,
-                            capthick=0.5, linewidth=0.5, zorder=5,
-                            alpha=alpha)
+    draw_panel(ax_st, pb_st, st_conditions, 'o', 12, 1.0, idx)
+    draw_panel(ax_xn, pb_xn, xn_conditions, 'D', 9, 0.65, idx + 1000)
 
-        if len(means) > 1:
-            xs = [cond_pos[c] for c in conditions if c in means]
-            ys = [means[c] for c in conditions if c in means]
-            ls = '-' if alpha == 1.0 else '--'
-            ax.plot(xs, ys, ls, color='black', linewidth=0.6,
-                    alpha=0.35 * alpha, zorder=1)
+    for ax in [ax_st, ax_xn]:
+        yl = ax.get_ylim()
+        pad = (yl[1] - yl[0]) * 0.08
+        ax.set_ylim(yl[0] - pad, yl[1] + pad)
 
-    sig_df = de_exemplar.filter(
-        (pl.col('gene') == gene) &
-        (pl.col('cell_type') == cell_type) &
-        (pl.col('FDR') < 0.10))
+    st_cond_pos = {c: i for i, c in enumerate(st_conditions)}
+    xn_cond_pos = {c: i for i, c in enumerate(xn_conditions)}
+    add_sig_star(ax_st, gene, cell_type, 'slidetags', st_cond_pos)
+    add_sig_star(ax_xn, gene, cell_type, 'xenium', xn_cond_pos)
 
-    all_z = [v['z'] for v in pb_st.values()] + \
-            [v['z'] for v in pb_xn.values()]
-    zmax, zmin = max(all_z), min(all_z)
-    zrange = zmax - zmin if zmax > zmin else 1
-    bar_y = zmax + zrange * 0.15
-    step = zrange * 0.22
-
-    contrast_pairs = {
-        'PREG_vs_CTRL': (0, 1),
-        'POSTPART_vs_PREG': (1, 2),
-        'POSTPART_vs_CTRL': (0, 2),
-    }
-    bar_level = 0
-    seen = set()
-    for row in sig_df.sort(['contrast', 'dataset']).iter_rows(named=True):
-        pair = contrast_pairs.get(row['contrast'])
-        if pair is None or row['contrast'] in seen:
-            continue
-        x1, x2 = pair
-        if x1 not in cond_pos.values() or x2 not in cond_pos.values():
-            continue
-        seen.add(row['contrast'])
-        both = sig_df.filter(pl.col('contrast') == row['contrast'])\
-            ['dataset'].unique().to_list()
-        label = 'S+X' if len(both) == 2 else \
-            ('S' if 'slidetags' in both else 'X')
-        y = bar_y + bar_level * step
-        ax.plot([x1, x1, x2, x2],
-                [y - step * 0.08, y, y, y - step * 0.08],
-                'k-', linewidth=0.5)
-        ax.text((x1 + x2) / 2, y, '*', ha='center', va='bottom',
-                fontsize=7, fontweight='bold')
-        ax.text((x1 + x2) / 2, y - step * 0.12, label,
-                ha='center', va='top', fontsize=4, color='gray')
-        bar_level += 1
-
-    ax.set_ylim(zmin - zrange * 0.12,
-                bar_y + (bar_level + 0.4) * step)
+    n_x = max(len(st_conditions), len(xn_conditions))
+    ax_st.set_xlim(-0.5, n_x - 0.5)
 
     ct_label = re.sub(r'^\d+\s+', '', cell_type)
-    ax.set_title(f'{gene} — {ct_label}', fontsize=6.5, pad=3)
-    ax.set_aspect('equal', adjustable='datalim')
+    parent = fig.add_subplot(outer_gs[row_i, col_i])
+    parent.axis('off')
+    parent.patch.set_alpha(0)
+    parent.set_title(f'{gene}\n{ct_label}', fontsize=6.5, pad=3)
 
-    if idx >= n_genes - n_cols:
-        labels = ['N', 'P', 'PP'] if len(conditions) == 3 else ['N', 'P']
-        ax.set_xticks(list(range(len(conditions))))
-        ax.set_xticklabels(labels, fontsize=6)
+    ax_st.set_xticks(list(range(n_x)))
+    ax_st.set_xticklabels(['N', 'P', 'PP'][:n_x], fontsize=5)
+    ax_st.tick_params(axis='x', length=1.5)
+    ax_xn.set_xticks(list(range(n_x)))
+    ax_xn.set_xticklabels(['N', 'P', 'PP'][:n_x], fontsize=5)
+    ax_xn.tick_params(axis='x', length=1.5)
+
+    for ax in [ax_st, ax_xn]:
+        ax.tick_params(axis='y', labelsize=5.5, length=1.5)
+        format_ax(ax)
+
+    subset = xn_ct_subsets.get(cell_type)
+    if subset is not None and gene in subset.var_names:
+        expr = np.asarray(subset[:, gene].X.toarray()).ravel()
+        coords_x = subset.obs['x_ffd'].values
+        coords_y = subset.obs['y_ffd'].values
+        conds = subset.obs['condition'].values
+
+        nonzero = expr[expr > 0]
+        vmin = np.quantile(nonzero, 0.05) if len(nonzero) > 0 else 0
+        vmax = np.quantile(nonzero, 0.95) if len(nonzero) > 0 else 1
+        if vmax <= vmin:
+            vmax = vmin + 1
+
+        for ax_sp, cond, sp_label in [
+                (ax_sp_ctrl, 'CTRL', 'Nulliparous'),
+                (ax_sp_preg, 'PREG', 'Pregnant')]:
+            c_mask = conds == cond
+            if c_mask.sum() == 0:
+                ax_sp.set_visible(False)
+                continue
+            order = np.argsort(expr[c_mask])
+            ax_sp.scatter(
+                coords_x[c_mask][order], coords_y[c_mask][order],
+                c=expr[c_mask][order], cmap='viridis', s=0.2,
+                vmin=vmin, vmax=vmax, linewidths=0, rasterized=True)
+            ax_sp.set_xlim(fov_cx - fov_half, fov_cx + fov_half)
+            ax_sp.set_ylim(fov_cy - fov_half, fov_cy + fov_half)
+            ax_sp.set_xticks([])
+            ax_sp.set_yticks([])
+            ax_sp.set_facecolor('black')
+            ax_sp.set_xlabel(sp_label, fontsize=5, labelpad=2)
+            format_ax(ax_sp)
     else:
-        ax.set_xticks([])
+        ax_sp_ctrl.set_visible(False)
+        ax_sp_preg.set_visible(False)
 
-    ax.set_ylabel('')
-    ax.tick_params(labelsize=6, length=1.5)
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_linewidth(0.6)
-
-for i in range(n_genes, len(axes)):
-    axes[i].set_visible(False)
-
-fig.text(0.02, 0.5, 'Expression (z-score)',
+fig.text(0.04, 0.5, 'Expression (z-score)',
          va='center', ha='center', rotation='vertical', fontsize=7)
+
+ax_legend = fig.add_subplot(outer_gs[n_rows - 1, n_col_genes - 1])
+ax_legend.axis('off')
 
 legend_elements = [
     Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-           markersize=4, markeredgecolor='black', markeredgewidth=0.3,
-           label='Slide-tags'),
+           markersize=4, markeredgecolor='none', label='Slide-tags'),
     Line2D([0], [0], marker='D', color='w', markerfacecolor='gray',
-           markersize=3.5, markeredgecolor='black', markeredgewidth=0.3,
+           markersize=3.5, markeredgecolor='none',
            label='Xenium', alpha=0.65),
 ]
-fig.legend(handles=legend_elements, loc='upper right',
-           bbox_to_anchor=(0.98, 0.99), fontsize=6, frameon=False)
+ax_legend.legend(handles=legend_elements, loc='upper left',
+                 fontsize=6, frameon=False)
 
-plt.tight_layout(rect=[0.05, 0, 1, 1])
+cbar_ax = ax_legend.inset_axes([0.05, 0.25, 0.35, 0.06])
+sm = ScalarMappable(cmap='viridis', norm=Normalize(vmin=0, vmax=1))
+sm.set_array([])
+cbar = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
+cbar.set_ticks([0, 1])
+cbar.set_ticklabels(['low', 'high'], fontsize=5)
+cbar.ax.set_xlabel('log₁p expression', fontsize=5, labelpad=1)
+cbar.outline.set_linewidth(0.4)
+
 plt.savefig(f'{working_dir}/figures/deg_exemplar_pseudobulk.png',
             dpi=300, bbox_inches='tight')
 plt.savefig(f'{working_dir}/figures/deg_exemplar_pseudobulk.svg',
             bbox_inches='tight')
 plt.close()
+del adata_xn_norm, xn_ct_subsets
 
 #endregion

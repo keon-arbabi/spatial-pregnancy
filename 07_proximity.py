@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import torch
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
@@ -22,7 +23,8 @@ warnings.filterwarnings('ignore')
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
-coords_cols = ('x_raw', 'y_raw')
+stats_coords = ('x_affine', 'y_affine')
+viz_coords = ('x_ffd', 'y_ffd')
 D_MAX_SCALE = 20
 MIN_NONZERO = 5
 FDR_THRESHOLD = 0.10
@@ -33,16 +35,19 @@ datasets = {
         'path': f'{working_dir}/output/slidetags/03_adata_query_slidetags.h5ad',
         'contrasts': [('PREG', 'CTRL'), ('POSTPART', 'PREG'),
                       ('POSTPART', 'CTRL')],
+        'local_proximity': False,
     },
     'merfish': {
         'path': f'{working_dir}/output/merfish/03_adata_query_merfish.h5ad',
         'contrasts': [('PREG', 'CTRL'), ('POSTPART', 'PREG'),
                       ('POSTPART', 'CTRL')],
+        'local_proximity': True,
     },
     'xenium': {
         'path': f'{working_dir}/output/xenium/03_adata_query_xenium.h5ad',
         'contrasts': [('PREG', 'CTRL')],
         'drop_samples': ['CTRL_3'],
+        'local_proximity': True,
     },
 }
 
@@ -56,10 +61,6 @@ dataset_colors = {
     'merfish': '#4361ee',
     'xenium': '#4cc9f0',
 }
-
-#endregion
-
-#region helpers ################################################################
 
 def get_type(ct):
     if 'Glut' in ct:
@@ -116,10 +117,6 @@ def build_contrasts_block(contrasts):
         f"{t}_vs_{c} = 'condition{t} - condition{c}'"
         for t, c in contrasts)
 
-#endregion
-
-#region load data ##############################################################
-
 adatas = {}
 for name, cfg in datasets.items():
     adata = sc.read_h5ad(cfg['path'])
@@ -127,6 +124,25 @@ for name, cfg in datasets.items():
     if drop:
         adata = adata[~adata.obs['sample'].isin(drop)].copy()
         print(f'[{name}] dropped samples: {drop}')
+
+    pre_path = cfg['path'].replace('03_', '01_')
+    pre = sc.read_h5ad(pre_path, backed='r')
+    affine = torch.load(
+        f'{working_dir}/output/{name}/coords_affine.pt',
+        weights_only=False)
+    sample_col = 'sample_rep' if name == 'xenium' else 'sample'
+    x_aff = np.empty(pre.n_obs)
+    y_aff = np.empty(pre.n_obs)
+    for key, coords_arr in affine.items():
+        mask = pre.obs[sample_col] == key
+        pos = np.where(mask)[0]
+        x_aff[pos] = coords_arr[:len(pos), 0]
+        y_aff[pos] = coords_arr[:len(pos), 1]
+    idx = pre.obs.index.get_indexer(adata.obs.index)
+    adata.obs['x_affine'] = x_aff[idx]
+    adata.obs['y_affine'] = y_aff[idx]
+    del pre, affine
+
     adatas[name] = adata
     print(f'[{name}] {adata.shape[0]:,} cells, '
           f'{adata.obs[cell_type_col].nunique()} subclasses, '
@@ -150,18 +166,34 @@ for name, cfg in datasets.items():
     adata = adatas[name]
     counts = pd.crosstab(
         index=adata.obs['sample'], columns=adata.obs[cell_type_col])
+    counts = counts.sort_index()
+
     meta = adata.obs[['sample', 'condition']].drop_duplicates()
     meta['sample'] = meta['sample'].astype(str)
     meta['condition'] = meta['condition'].astype(str)
+    meta = meta.sort_values('sample').reset_index(drop=True)
+    assert list(meta['sample']) == list(counts.index.astype(str))
 
     contrast_block = build_contrasts_block(cfg['contrasts'])
 
-    to_r(counts, 'counts', format='data.frame')
-    to_r(meta, 'meta', format='data.frame')
+    counts_df = counts.reset_index()
+    counts_df['sample'] = counts_df['sample'].astype(str)
+    int_cols = counts_df.select_dtypes(include='int64').columns
+    counts_df[int_cols] = counts_df[int_cols].astype(np.float64)
+    to_r(counts_df, 'counts_df', format='data.frame')
+    to_r(meta, 'meta_df', format='data.frame')
 
     r(f'''
-    rownames(meta) <- meta$sample
-    meta <- meta[rownames(counts), , drop = FALSE]
+    sample_names <- as.character(counts_df$sample)
+    counts_df$sample <- NULL
+    counts <- data.matrix(counts_df)
+    rownames(counts) <- sample_names
+    storage.mode(counts) <- "integer"
+
+    meta <- as.data.frame(meta_df)
+    rownames(meta) <- as.character(meta$sample)
+    meta <- meta[sample_names, , drop = FALSE]
+    meta$condition <- factor(meta$condition)
 
     cobj <- crumblr(counts)
     form <- ~ 0 + condition
@@ -215,9 +247,12 @@ global_props.to_csv(
 
 #region local proximities — spatial stats ######################################
 
+proximity_datasets = {
+    k: v for k, v in datasets.items() if v['local_proximity']}
+
 spatial_stats_all = {}
 recomputed_stats = {}
-for name, cfg in datasets.items():
+for name, cfg in proximity_datasets.items():
     cache_path = f'{working_dir}/output/{name}/spatial_stats.pkl'
     expected_n_b = adatas[name].obs[cell_type_col].nunique()
 
@@ -241,7 +276,7 @@ for name, cfg in datasets.items():
                 groups, total=len(groups),
                 desc=f'[{name}] spatial stats'):
             stats = compute_spatial_stats(
-                sub, coords_cols, D_MAX_SCALE)
+                sub, stats_coords, D_MAX_SCALE)
             if not stats.empty:
                 per_sample.append(stats)
         spatial_stats = pd.concat(per_sample, ignore_index=True)
@@ -262,85 +297,17 @@ gc.collect()
 
 #endregion
 
-#region plot — radius visualization ############################################
+#region local proximities — differential test (crumblr + dream) ################
 
-n_exemplars = 5
-fig, axes = plt.subplots(
-    len(datasets), n_exemplars + 1,
-    figsize=(3.2 * (n_exemplars + 1), 3.2 * len(datasets)),
-    squeeze=False)
-rng = np.random.default_rng(42)
-
-for row, (name, cfg) in enumerate(datasets.items()):
-    adata = adatas[name]
-    sample = sorted(adata.obs['sample'].unique())[0]
-    sub = adata.obs[adata.obs['sample'] == sample]
-    coords = sub[list(coords_cols)].to_numpy(dtype=np.float64)
-    tree = KDTree(coords)
-    d_scale = np.median(tree.query(coords, k=2)[0][:, 1])
-    d_max = D_MAX_SCALE * d_scale
-
-    ax = axes[row, 0]
-    ax.scatter(coords[:, 0], coords[:, 1], s=0.5, c='lightgray',
-               alpha=0.5, linewidth=0, rasterized=True)
-    exemplar_idx = rng.integers(len(coords), size=n_exemplars)
-    exemplars = coords[exemplar_idx]
-    ax.scatter(exemplars[:, 0], exemplars[:, 1], s=20, c='red', zorder=5)
-    for cell in exemplars:
-        ax.add_patch(Circle(cell, d_max, fill=False, color='red',
-                            linewidth=1, linestyle='--'))
-    ax.set_aspect('equal')
-    ax.set_title(f'{name} — {sample}\n'
-                 f'd_scale={d_scale:.2f}, d_max={d_max:.2f} '
-                 f'(scale={D_MAX_SCALE})',
-                 fontsize=9)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    for col, (idx, cell) in enumerate(zip(exemplar_idx, exemplars), start=1):
-        neighbor_idx = tree.query_ball_point(cell, r=d_max)
-        neighbor_idx = [i for i in neighbor_idx if i != idx]
-        zoom = d_max * 2.5
-        ax = axes[row, col]
-        in_zoom = ((np.abs(coords[:, 0] - cell[0]) < zoom * 1.5) &
-                   (np.abs(coords[:, 1] - cell[1]) < zoom * 1.5))
-        ax.scatter(coords[in_zoom, 0], coords[in_zoom, 1],
-                   s=6, c='lightgray', alpha=0.7, linewidth=0,
-                   rasterized=True)
-        if neighbor_idx:
-            ax.scatter(coords[neighbor_idx, 0], coords[neighbor_idx, 1],
-                       s=10, c='steelblue', alpha=0.85, linewidth=0,
-                       rasterized=True)
-        ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
-                   edgecolors='white', linewidths=1)
-        ax.add_patch(Circle(cell, d_max, fill=False, color='red',
-                            linewidth=1.5, linestyle='--'))
-        ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
-        ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
-        ax.set_aspect('equal')
-        ax.set_title(f'{len(neighbor_idx):,} within d_max', fontsize=9)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.4)
-
-plt.tight_layout()
-plt.savefig(
-    f'{working_dir}/figures/proximity_radius.png',
-    dpi=200, bbox_inches='tight')
-plt.savefig(
-    f'{working_dir}/figures/proximity_radius.svg',
-    bbox_inches='tight')
-plt.close()
-
-#endregion
-
-#region local proximities — differential test (crumblr + dream) ###############
+r('''
+suppressPackageStartupMessages(library(BiocParallel))
+bp <- SnowParam(
+    workers = min(8L, parallel::detectCores()),
+    type = 'SOCK', progressbar = FALSE)
+''')
 
 local_tt_frames = []
-for name, cfg in datasets.items():
+for name, cfg in proximity_datasets.items():
     diff_path = f'{working_dir}/output/{name}/spatial_diff.pkl'
     if os.path.exists(diff_path) and not recomputed_stats[name]:
         spatial_diff = pd.read_pickle(diff_path)
@@ -360,63 +327,105 @@ for name, cfg in datasets.items():
         .min()
     )
     valid_pairs = pair_filter[pair_filter >= MIN_NONZERO].index.tolist()
-    print(f'[{name}] testing {len(valid_pairs)} pairs')
+    valid_b_by_a = {}
+    for a, b in valid_pairs:
+        valid_b_by_a.setdefault(a, []).append(b)
+    print(f'[{name}] testing {len(valid_pairs)} pairs '
+          f'across {len(valid_b_by_a)} center types')
 
     contrast_block = build_contrasts_block(cfg['contrasts'])
 
+    groups_by_a = spatial_stats.groupby(
+        'cell_type_a', observed=True, sort=False)
+
     pair_results = []
-    for ct_a, ct_b in tqdm(valid_pairs, desc=f'[{name}] dream per pair'):
-        sub = spatial_stats[
-            (spatial_stats['cell_type_a'] == ct_a) &
-            (spatial_stats['cell_type_b'] == ct_b)]
-        if sub.empty:
+    for ct_a in tqdm(sorted(valid_b_by_a.keys()),
+                     desc=f'[{name}] dream batched per a'):
+        if ct_a not in groups_by_a.groups:
+            continue
+        sub_a = groups_by_a.get_group(ct_a)
+        valid_b = valid_b_by_a[ct_a]
+
+        b_pivot = sub_a.pivot_table(
+            index='cell_id', columns='cell_type_b', values='b_count',
+            fill_value=0, observed=True)
+        b_pivot.columns = b_pivot.columns.astype(str)
+        avail_b = [str(b) for b in valid_b if str(b) in b_pivot.columns]
+        if not avail_b:
+            continue
+        b_pivot = b_pivot[avail_b]
+
+        cell_meta = sub_a.drop_duplicates('cell_id').set_index('cell_id')
+        cell_meta = cell_meta.loc[b_pivot.index]
+        all_count_arr = cell_meta['all_count'].astype(np.float64).values
+
+        b_arr = b_pivot.values.astype(np.float64)
+        all_arr = all_count_arr[:, None]
+        other_arr = all_arr - b_arr
+        clr_matrix = (
+            0.5 * (np.log(b_arr + 0.5) - np.log(other_arr + 0.5))
+        ).T
+
+        n_total = all_arr + 1.0
+        p = (b_arr + 0.5) / n_total
+        raw_w = (4.0 * n_total * p * (1.0 - p)).T
+        for i in range(raw_w.shape[0]):
+            q05 = np.quantile(raw_w[i], 0.05)
+            if q05 > 0:
+                raw_w[i] /= q05
+            raw_w[i] = np.minimum(raw_w[i], 5.0)
+        weights_matrix = raw_w
+
+        meta_pair = pd.DataFrame({
+            'condition': cell_meta['condition'].astype(str).values,
+            'sample_id': cell_meta['sample_id'].astype(str).values,
+        })
+
+        required = {c for pair in cfg['contrasts'] for c in pair}
+        if not required.issubset(meta_pair['condition'].unique()):
             continue
 
-        b_int = sub['b_count'].astype(int).values
-        a_int = sub['all_count'].astype(int).values
-        counts_pair = pd.DataFrame({
-            'b_count': b_int,
-            'other_count': a_int - b_int,
-        })
-        meta_pair = pd.DataFrame({
-            'condition': sub['condition'].astype(str).values,
-            'sample_id': sub['sample_id'].astype(str).values,
-        })
-
         try:
-            to_r(counts_pair, 'counts', format='data.frame')
+            to_r(clr_matrix, 'clr_matrix')
+            to_r(weights_matrix, 'weights_matrix')
+            to_r(list(avail_b), 'feature_names')
             to_r(meta_pair, 'meta', format='data.frame')
             r(f'''
-            cobj <- crumblr(counts, method = 'clr_2class')
+            sample_ids <- paste0('c', seq_len(ncol(clr_matrix)))
+            colnames(clr_matrix) <- sample_ids
+            rownames(clr_matrix) <- feature_names
+            colnames(weights_matrix) <- sample_ids
+            rownames(weights_matrix) <- feature_names
+            rownames(meta) <- sample_ids
+
             form <- ~ 0 + condition + (1 | sample_id)
             L <- makeContrastsDream(form, meta, contrasts = c(
                 {contrast_block}
             ))
-            fit <- dream(cobj, form, meta, L)
+            fit <- dream(clr_matrix, form, meta, L,
+                         weightsMatrix = weights_matrix, BPPARAM = bp)
             fit <- eBayes(fit)
+
             tt_list <- list()
             for (coef in colnames(L)) {{
                 tt <- topTable(fit, coef = coef, number = Inf)
                 tt$contrast <- coef
-                tt$feature <- rownames(tt)
+                tt$cell_type_b <- rownames(tt)
                 tt_list[[coef]] <- tt
             }}
-            tt_pair <- do.call(rbind, tt_list)
-            tt_pair <- tt_pair[tt_pair$feature == 'b_count', ]
-            rownames(tt_pair) <- NULL
+            tt_a <- do.call(rbind, tt_list)
+            rownames(tt_a) <- NULL
             ''')
-            tt = to_py('tt_pair', format='pandas')
-            if tt is not None and len(tt) > 0:
-                tt['cell_type_a'] = ct_a
-                tt['cell_type_b'] = ct_b
-                pair_results.append(tt)
+            df = to_py('tt_a', format='pandas')
+            if df is not None and len(df) > 0:
+                df['cell_type_a'] = ct_a
+                pair_results.append(df)
         except Exception as e:
-            print(f'[{name}] {ct_a} x {ct_b}: {type(e).__name__}: {e}')
+            print(f'[{name}] {ct_a}: {type(e).__name__}: {e}')
 
     if not pair_results:
         continue
     spatial_diff = pd.concat(pair_results, ignore_index=True)
-    spatial_diff = spatial_diff.drop(columns='feature', errors='ignore')
 
     fdr_frames = []
     for contrast, group in spatial_diff.groupby('contrast'):
@@ -541,6 +550,78 @@ plt.close()
 
 #endregion
 
+#region plot — radius visualization ############################################
+
+n_exemplars = 5
+fig, axes = plt.subplots(
+    len(proximity_datasets), n_exemplars + 1,
+    figsize=(3.2 * (n_exemplars + 1), 3.2 * len(proximity_datasets)),
+    squeeze=False)
+rng = np.random.default_rng(42)
+
+for row, (name, cfg) in enumerate(proximity_datasets.items()):
+    adata = adatas[name]
+    sample = sorted(adata.obs['sample'].unique())[0]
+    sub = adata.obs[adata.obs['sample'] == sample]
+    coords = sub[list(stats_coords)].to_numpy(dtype=np.float64)
+    tree = KDTree(coords)
+    d_scale = np.median(tree.query(coords, k=2)[0][:, 1])
+    d_max = D_MAX_SCALE * d_scale
+
+    ax = axes[row, 0]
+    ax.scatter(coords[:, 0], coords[:, 1], s=0.5, c='lightgray',
+               alpha=0.5, linewidth=0, rasterized=True)
+    exemplar_idx = rng.integers(len(coords), size=n_exemplars)
+    exemplars = coords[exemplar_idx]
+    ax.scatter(exemplars[:, 0], exemplars[:, 1], s=20, c='red', zorder=5)
+    for cell in exemplars:
+        ax.add_patch(Circle(cell, d_max, fill=False, color='red',
+                            linewidth=1, linestyle='--'))
+    ax.set_aspect('equal')
+    ax.set_title(f'{name} — {sample}\n'
+                 f'd_scale={d_scale:.4f}, d_max={d_max:.4f} '
+                 f'(scale={D_MAX_SCALE})',
+                 fontsize=9)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    for col, (idx, cell) in enumerate(zip(exemplar_idx, exemplars), start=1):
+        neighbor_idx = tree.query_ball_point(cell, r=d_max)
+        neighbor_idx = [i for i in neighbor_idx if i != idx]
+        zoom = d_max * 2.5
+        ax = axes[row, col]
+        in_zoom = ((np.abs(coords[:, 0] - cell[0]) < zoom * 1.5) &
+                   (np.abs(coords[:, 1] - cell[1]) < zoom * 1.5))
+        ax.scatter(coords[in_zoom, 0], coords[in_zoom, 1],
+                   s=6, c='lightgray', alpha=0.7, linewidth=0,
+                   rasterized=True)
+        if neighbor_idx:
+            ax.scatter(coords[neighbor_idx, 0], coords[neighbor_idx, 1],
+                       s=10, c='steelblue', alpha=0.85, linewidth=0,
+                       rasterized=True)
+        ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
+                   edgecolors='white', linewidths=1)
+        ax.add_patch(Circle(cell, d_max, fill=False, color='red',
+                            linewidth=1.5, linestyle='--'))
+        ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
+        ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
+        ax.set_aspect('equal')
+        ax.set_title(f'{len(neighbor_idx):,} within d_max', fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.4)
+
+plt.tight_layout()
+plt.savefig(
+    f'{working_dir}/figures/proximity_radius.png',
+    dpi=200, bbox_inches='tight')
+plt.close()
+
+#endregion
+
 #region plot — local proximities heatmap ######################################
 
 contrast_titles = {
@@ -574,7 +655,7 @@ vmax = max(vmax, 0.1)
 vmin = -vmax
 
 contrasts_all = ['PREG_vs_CTRL', 'POSTPART_vs_PREG', 'POSTPART_vs_CTRL']
-ds_list = list(datasets.keys())
+ds_list = list(proximity_datasets.keys())
 
 panel_h = max(0.16 * len(display_a), 4)
 panel_w = max(0.30 * len(display_b), 1.6)
