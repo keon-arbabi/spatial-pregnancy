@@ -7,13 +7,13 @@ import warnings
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import torch
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 from scipy.sparse import coo_array
 from scipy.spatial import KDTree
+from scipy.spatial.distance import pdist
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
 os.environ['R_HOME'] = os.path.expanduser('~/miniforge3/lib/R')
@@ -25,7 +25,6 @@ working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
 stats_coords = ('x_affine', 'y_affine')
 viz_coords = ('x_ffd', 'y_ffd')
-D_MAX_SCALE = 20
 MIN_NONZERO = 5
 FDR_THRESHOLD = 0.10
 NOMINAL_THRESHOLD = 0.05
@@ -42,12 +41,14 @@ datasets = {
         'contrasts': [('PREG', 'CTRL'), ('POSTPART', 'PREG'),
                       ('POSTPART', 'CTRL')],
         'local_proximity': True,
+        'd_max_scale': 20,
     },
     'xenium': {
         'path': f'{working_dir}/output/xenium/03_adata_query_xenium.h5ad',
         'contrasts': [('PREG', 'CTRL')],
         'drop_samples': ['CTRL_3'],
         'local_proximity': True,
+        'd_max_scale': 20,
     },
 }
 
@@ -124,25 +125,6 @@ for name, cfg in datasets.items():
     if drop:
         adata = adata[~adata.obs['sample'].isin(drop)].copy()
         print(f'[{name}] dropped samples: {drop}')
-
-    pre_path = cfg['path'].replace('03_', '01_')
-    pre = sc.read_h5ad(pre_path, backed='r')
-    affine = torch.load(
-        f'{working_dir}/output/{name}/coords_affine.pt',
-        weights_only=False)
-    sample_col = 'sample_rep' if name == 'xenium' else 'sample'
-    x_aff = np.empty(pre.n_obs)
-    y_aff = np.empty(pre.n_obs)
-    for key, coords_arr in affine.items():
-        mask = pre.obs[sample_col] == key
-        pos = np.where(mask)[0]
-        x_aff[pos] = coords_arr[:len(pos), 0]
-        y_aff[pos] = coords_arr[:len(pos), 1]
-    idx = pre.obs.index.get_indexer(adata.obs.index)
-    adata.obs['x_affine'] = x_aff[idx]
-    adata.obs['y_affine'] = y_aff[idx]
-    del pre, affine
-
     adatas[name] = adata
     print(f'[{name}] {adata.shape[0]:,} cells, '
           f'{adata.obs[cell_type_col].nunique()} subclasses, '
@@ -276,7 +258,7 @@ for name, cfg in proximity_datasets.items():
                 groups, total=len(groups),
                 desc=f'[{name}] spatial stats'):
             stats = compute_spatial_stats(
-                sub, stats_coords, D_MAX_SCALE)
+                sub, stats_coords, cfg['d_max_scale'])
             if not stats.empty:
                 per_sample.append(stats)
         spatial_stats = pd.concat(per_sample, ignore_index=True)
@@ -454,91 +436,82 @@ plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 300
 
-selected_full_b = sorted({
-    ct for ct in global_tt['cell_type'].unique()
-    if any(ct.endswith(s) for s in selected_b_suffixes)
-})
+type_order = ['Glut', 'Gaba', 'NN']
+all_cts = sorted(
+    global_tt['cell_type'].unique(),
+    key=lambda c: (type_order.index(get_type(c)), c))
+ct_labels = list(all_cts)
 
-condition_order = ['CTRL', 'PREG', 'POSTPART']
+contrasts_all = ['PREG_vs_CTRL', 'POSTPART_vs_PREG', 'POSTPART_vs_CTRL']
+contrast_titles = {
+    'PREG_vs_CTRL': 'Pregnant vs\nNulliparous',
+    'POSTPART_vs_PREG': 'Postpartum vs\nPregnant',
+    'POSTPART_vs_CTRL': 'Postpartum vs\nNulliparous',
+}
+ds_list = list(datasets.keys())
+n_ct = len(all_cts)
 
-n_cts = len(selected_full_b)
-n_cols = 3
-n_rows = int(np.ceil(n_cts / n_cols))
+CELL_SIZE = 0.12
+fig_w = CELL_SIZE * len(contrasts_all) * len(ds_list) + 2.5
+fig_h = CELL_SIZE * n_ct + 1.2
+
 fig, axes = plt.subplots(
-    n_rows, n_cols, figsize=(n_cols * 2.4, n_rows * 1.9))
-axes = axes.flatten()
+    1, len(contrasts_all),
+    figsize=(fig_w, fig_h), squeeze=False,
+    gridspec_kw={'wspace': 0.02})
 
-for idx, ct in enumerate(selected_full_b):
-    ax = axes[idx]
-    for ds_name in datasets:
-        sub = global_props[
-            (global_props['cell_type'] == ct) &
-            (global_props['dataset'] == ds_name)]
-        if sub.empty:
-            continue
-        agg = sub.groupby('condition')['normalized_prop'].agg(['mean', 'sem'])
-        ordered = [c for c in condition_order if c in agg.index]
-        if not ordered:
-            continue
-        means = agg.loc[ordered, 'mean'].values.astype(float)
-        sems = agg.loc[ordered, 'sem'].fillna(0).values.astype(float)
-        if len(means) > 1 and means.std() > 0:
-            mu, sd = means.mean(), means.std()
-            means = (means - mu) / sd
-            sems = sems / sd
-        xs = [condition_order.index(c) for c in ordered]
-        ax.errorbar(
-            xs, means, yerr=sems, fmt='o-',
-            color=dataset_colors[ds_name],
-            label=ds_name, capsize=2.5, markersize=4,
-            linewidth=1.2, elinewidth=0.8, alpha=0.85)
+vmax = float(global_tt['logFC'].abs().quantile(0.95))
+vmax = max(vmax, 0.5)
 
-        sig_rows = global_tt[
-            (global_tt['cell_type'] == ct) &
-            (global_tt['dataset'] == ds_name)]
-        for j in range(len(ordered) - 1):
-            c1, c2 = ordered[j], ordered[j + 1]
-            row = sig_rows[sig_rows['contrast'] == f'{c2}_vs_{c1}']
-            if row.empty:
-                continue
-            p = float(row['P.Value'].iloc[0])
-            adj = float(row['adj.P.Val'].iloc[0])
-            mark = '*' if adj < FDR_THRESHOLD else \
-                ('•' if p < NOMINAL_THRESHOLD else '')
-            if mark:
-                y = max(means[j], means[j + 1]) + \
-                    max(sems[j], sems[j + 1]) + 0.18
-                ax.text((xs[j] + xs[j + 1]) / 2, y, mark,
-                        ha='center', va='bottom', fontsize=9,
-                        color=dataset_colors[ds_name], fontweight='bold')
+for ci, contrast in enumerate(contrasts_all):
+    ax = axes[0, ci]
+    sub = global_tt[global_tt['contrast'] == contrast]
+    ds_in_contrast = [d for d in ds_list
+                      if not sub[sub['dataset'] == d].empty]
 
-    ct_label = re.sub(r'^\d+\s+', '', ct)
-    ax.set_title(ct_label, fontsize=8)
-    ax.set_xticks(range(len(condition_order)))
-    ax.set_xlim(-0.5, len(condition_order) - 0.5)
-    if idx >= n_cts - n_cols:
-        ax.set_xticklabels(['N', 'P', 'PP'], fontsize=7)
+    mat = pd.DataFrame(np.nan,
+                       index=all_cts, columns=ds_in_contrast)
+    sigs = pd.DataFrame('',
+                        index=all_cts, columns=ds_in_contrast)
+    for _, row in sub.iterrows():
+        ct, ds = row['cell_type'], row['dataset']
+        if ct in mat.index and ds in mat.columns:
+            mat.loc[ct, ds] = row['logFC']
+            if row['adj.P.Val'] < FDR_THRESHOLD:
+                sigs.loc[ct, ds] = '*'
+            elif row['P.Value'] < NOMINAL_THRESHOLD:
+                sigs.loc[ct, ds] = '•'
+
+    im = ax.pcolormesh(
+        mat.values, cmap='PRGn', vmin=-vmax, vmax=vmax,
+        edgecolors='lightgray', linewidth=0.3)
+    for i in range(n_ct):
+        for j in range(len(ds_in_contrast)):
+            if sigs.iat[i, j]:
+                ax.text(j + 0.5, i + 0.5, sigs.iat[i, j],
+                        ha='center', va='center',
+                        color='white', fontsize=5, fontweight='bold')
+
+    ax.set_xlim(0, len(ds_in_contrast))
+    ax.set_ylim(n_ct, 0)
+    ax.set_aspect('equal')
+    ax.set_xticks(np.arange(len(ds_in_contrast)) + 0.5)
+    ax.set_xticklabels(ds_in_contrast, fontsize=7,
+                       rotation=90, ha='center')
+    ax.set_yticks(np.arange(n_ct) + 0.5)
+    if ci == 0:
+        ax.set_yticklabels(ct_labels, fontsize=4)
     else:
-        ax.set_xticklabels([])
-    ax.tick_params(labelsize=7, length=1.5)
+        ax.set_yticklabels([])
+    ax.tick_params(length=0, pad=2)
     for spine in ax.spines.values():
-        spine.set_linewidth(0.6)
+        spine.set_linewidth(0.4)
 
-for i in range(n_cts, len(axes)):
-    axes[i].set_visible(False)
+cbar = fig.colorbar(im, ax=axes, shrink=0.12, pad=0.015,
+                    aspect=12, label='logFC')
+cbar.ax.tick_params(labelsize=5)
+cbar.set_label('logFC', fontsize=7)
 
-fig.text(0.02, 0.5, 'Normalized Proportion (z)', va='center',
-         ha='center', rotation='vertical', fontsize=8)
-
-legend_elements = [
-    Line2D([0], [0], color=dataset_colors[d], marker='o', markersize=4,
-           linewidth=1.2, label=d) for d in datasets
-]
-fig.legend(handles=legend_elements, loc='upper right',
-           bbox_to_anchor=(0.99, 0.99), fontsize=7,
-           frameon=False, ncol=3)
-
-plt.tight_layout(rect=[0.04, 0, 1, 0.96])
 os.makedirs(f'{working_dir}/figures', exist_ok=True)
 plt.savefig(
     f'{working_dir}/figures/proximity_global_props.png',
@@ -555,7 +528,7 @@ plt.close()
 n_exemplars = 5
 fig, axes = plt.subplots(
     len(proximity_datasets), n_exemplars + 1,
-    figsize=(3.2 * (n_exemplars + 1), 3.2 * len(proximity_datasets)),
+    figsize=(3 * (n_exemplars + 1), 2.8 * len(proximity_datasets)),
     squeeze=False)
 rng = np.random.default_rng(42)
 
@@ -566,7 +539,7 @@ for row, (name, cfg) in enumerate(proximity_datasets.items()):
     coords = sub[list(stats_coords)].to_numpy(dtype=np.float64)
     tree = KDTree(coords)
     d_scale = np.median(tree.query(coords, k=2)[0][:, 1])
-    d_max = D_MAX_SCALE * d_scale
+    d_max = cfg['d_max_scale'] * d_scale
 
     ax = axes[row, 0]
     ax.scatter(coords[:, 0], coords[:, 1], s=0.5, c='lightgray',
@@ -580,7 +553,7 @@ for row, (name, cfg) in enumerate(proximity_datasets.items()):
     ax.set_aspect('equal')
     ax.set_title(f'{name} — {sample}\n'
                  f'd_scale={d_scale:.4f}, d_max={d_max:.4f} '
-                 f'(scale={D_MAX_SCALE})',
+                 f'(scale={cfg["d_max_scale"]})',
                  fontsize=9)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -625,9 +598,9 @@ plt.close()
 #region plot — local proximities heatmap ######################################
 
 contrast_titles = {
-    'PREG_vs_CTRL': 'Pregnant vs\nNulliparous',
-    'POSTPART_vs_PREG': 'Postpartum vs\nPregnant',
-    'POSTPART_vs_CTRL': 'Postpartum vs\nNulliparous',
+    'PREG_vs_CTRL': 'Pregnant vs Nulliparous',
+    'POSTPART_vs_PREG': 'Postpartum vs Pregnant',
+    'POSTPART_vs_CTRL': 'Postpartum vs Nulliparous',
 }
 
 DISPLAY_CAP = 30
@@ -650,6 +623,9 @@ if len(display_b) > DISPLAY_CAP:
 display_b = sorted(display_b,
                    key=lambda c: (type_order.index(get_type(c)), c))
 
+a_labels = list(display_a)
+b_labels = list(display_b)
+
 vmax = float(local_tt['logFC'].abs().quantile(0.98))
 vmax = max(vmax, 0.1)
 vmin = -vmax
@@ -657,19 +633,22 @@ vmin = -vmax
 contrasts_all = ['PREG_vs_CTRL', 'POSTPART_vs_PREG', 'POSTPART_vs_CTRL']
 ds_list = list(proximity_datasets.keys())
 
-panel_h = max(0.16 * len(display_a), 4)
-panel_w = max(0.30 * len(display_b), 1.6)
-fig = plt.figure(
-    figsize=(panel_w * len(contrasts_all) + 2,
-             panel_h * len(ds_list) + 1))
-outer = gridspec.GridSpec(
-    len(ds_list), len(contrasts_all), figure=fig,
-    hspace=0.15, wspace=0.06)
+CELL_SIZE = 0.22
+n_a, n_b = len(display_a), len(display_b)
+panel_w = CELL_SIZE * n_b
+panel_h = CELL_SIZE * n_a
+fig_w = panel_w * len(contrasts_all) + 3.5
+fig_h = panel_h * len(ds_list) + 2.0
+
+fig, axes = plt.subplots(
+    len(ds_list), len(contrasts_all),
+    figsize=(fig_w, fig_h), squeeze=False,
+    gridspec_kw={'hspace': 0.35, 'wspace': 0.08})
 
 last_im = None
 for di, ds_name in enumerate(ds_list):
     for ci, contrast in enumerate(contrasts_all):
-        ax = fig.add_subplot(outer[di, ci])
+        ax = axes[di, ci]
         sub = local_tt[
             (local_tt['dataset'] == ds_name) &
             (local_tt['contrast'] == contrast)]
@@ -691,39 +670,42 @@ for di, ds_name in enumerate(ds_list):
 
         im = ax.pcolormesh(
             mat.values, cmap='PRGn', vmin=vmin, vmax=vmax,
-            edgecolors='lightgray', linewidth=0.2)
+            edgecolors='lightgray', linewidth=0.3)
         last_im = im
-        for i in range(len(display_a)):
-            for j in range(len(display_b)):
+        for i in range(n_a):
+            for j in range(n_b):
                 if sigs.iat[i, j]:
                     ax.text(j + 0.5, i + 0.5, sigs.iat[i, j],
                             ha='center', va='center',
-                            color='white', fontsize=6, fontweight='bold')
+                            color='white', fontsize=5, fontweight='bold')
 
-        ax.set_xlim(0, len(display_b))
-        ax.set_ylim(len(display_a), 0)
-        ax.set_xticks(np.arange(len(display_b)) + 0.5)
-        ax.set_yticks(np.arange(len(display_a)) + 0.5)
-        ax.set_xticklabels(
-            [re.sub(r'^\d+\s+', '', b) for b in display_b],
-            rotation=45, ha='right', fontsize=5.5)
+        ax.set_xlim(0, n_b)
+        ax.set_ylim(n_a, 0)
+        ax.set_aspect('equal')
+        ax.set_xticks(np.arange(n_b) + 0.5)
+        ax.set_yticks(np.arange(n_a) + 0.5)
+        ax.set_xticklabels(b_labels, rotation=90, ha='center', fontsize=5)
         if ci == 0:
-            ax.set_yticklabels(
-                [re.sub(r'^\d+\s+', '', a) for a in display_a],
-                fontsize=5.5)
-            ax.set_ylabel(ds_name, fontsize=10, labelpad=18)
+            ax.set_yticklabels(a_labels, fontsize=5)
         else:
             ax.set_yticklabels([])
-        ax.tick_params(length=0)
+        ax.tick_params(length=0, pad=2)
+
         if di == 0:
-            ax.set_title(contrast_titles[contrast], fontsize=9, pad=6)
+            ax.set_title(contrast_titles[contrast], fontsize=8, pad=4)
+        if ci == 0:
+            ax.annotate(ds_name, xy=(0, 0.5),
+                        xycoords='axes fraction', xytext=(-5, 0),
+                        textcoords='offset points', rotation=90,
+                        ha='right', va='center', fontsize=9,
+                        fontweight='bold')
         for spine in ax.spines.values():
             spine.set_linewidth(0.4)
 
 if last_im is not None:
-    cbar_ax = fig.add_axes([0.92, 0.4, 0.012, 0.2])
-    cbar = fig.colorbar(last_im, cax=cbar_ax, label='logFC')
-    cbar.ax.tick_params(labelsize=7)
+    cbar = fig.colorbar(last_im, ax=axes, shrink=0.3, pad=0.02,
+                        aspect=20, label='logFC')
+    cbar.ax.tick_params(labelsize=6)
 
 plt.savefig(
     f'{working_dir}/figures/proximity_local_heatmap.png',

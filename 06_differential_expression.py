@@ -442,24 +442,24 @@ plt.close()
 
 #endregion
 
-#region DEG exemplar violins ###################################################
+#region de exemplars ###########################################################
 
 EXEMPLAR_GENES = [
-    ('Grm1', '058 PAL-STR Gaba-Chol'),
+    ('Grm1',    '058 PAL-STR Gaba-Chol'),
     ('Slc17a8', '058 PAL-STR Gaba-Chol'),
-    ('Gpr88', '009 L2/3 IT PIR-ENTl Glut'),
-    ('Dusp7', '006 L4/5 IT CTX Glut'),
-    ('Kdr', '333 Endo NN'),
-    ('Igfbp3', '333 Endo NN'),
-    ('Idi1', '319 Astro-TE NN'),
-    ('Gjb6', '319 Astro-TE NN'),
-    ('Grm8', '085 SI-MPO-LPO Lhx8 Gaba'),
-    ('Calcr', '085 SI-MPO-LPO Lhx8 Gaba'),
-    ('Gal', '086 MPO-ADP Lhx8 Gaba'),
-    ('Brs3', '106 PVpo-VMPO-MPN Hmx2 Gaba'),
-    ('Rxfp1', '124 MPN-MPO-PVpo Hmx2 Glut'),
+    ('Trpc5',   '009 L2/3 IT PIR-ENTl Glut'),
+    ('Dusp7',   '006 L4/5 IT CTX Glut'),
+    ('Nefl',    '064 STR-PAL Chst9 Gaba'),
+    ('Kdr',     '333 Endo NN'),
+    ('Igfbp3',  '333 Endo NN'),
+    ('Idi1',    '319 Astro-TE NN'),
+    ('Gjb6',    '319 Astro-TE NN'),
+    ('Grm8',    '085 SI-MPO-LPO Lhx8 Gaba'),
+    ('Calcr',   '085 SI-MPO-LPO Lhx8 Gaba'),
+    ('Sod2',    '085 SI-MPO-LPO Lhx8 Gaba'),
+    ('Cntnap4', '118 ADP-MPO Trp73 Glut'),
+    ('Grb10',   '118 ADP-MPO Trp73 Glut'),
 ]
-
 condition_colors = {
     'CTRL': '#7209b7',
     'PREG': '#b5179e',
@@ -502,7 +502,8 @@ def draw_panel(ax, pb, conditions, marker, ms, alpha, seed):
         if cond not in cond_pos:
             continue
         x = cond_pos[cond] + rng.uniform(-0.18, 0.18)
-        ax.scatter(x, vals['z'], marker=marker,
+        y = vals['z'] + rng.uniform(-0.05, 0.05)
+        ax.scatter(x, y, marker=marker,
                    c=condition_colors[cond], s=ms, alpha=alpha,
                    linewidths=0, zorder=10)
     means = {}
@@ -563,7 +564,7 @@ n_rows = (n_genes + n_col_genes - 1) // n_col_genes
 
 fig = plt.figure(figsize=(n_col_genes * 4.0, n_rows * 2.0))
 outer_gs = gridspec.GridSpec(n_rows, n_col_genes, figure=fig,
-                              hspace=0.5, wspace=0.25)
+                              hspace=0.35, wspace=0.2)
 
 for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
     row_i = idx // n_col_genes
@@ -571,7 +572,7 @@ for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
     inner_gs = gridspec.GridSpecFromSubplotSpec(
         2, 3, subplot_spec=outer_gs[row_i, col_i],
         hspace=0.05, wspace=0.04,
-        width_ratios=[1.0, 0.9, 0.9])
+        width_ratios=[0.7, 1.0, 1.0])
     ax_st = fig.add_subplot(inner_gs[0, 0])
     ax_xn = fig.add_subplot(inner_gs[1, 0], sharex=ax_st)
     ax_sp_ctrl = fig.add_subplot(inner_gs[:, 1])
@@ -593,7 +594,7 @@ for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
     zscore_pb(pb_st)
     zscore_pb(pb_xn)
 
-    draw_panel(ax_st, pb_st, st_conditions, 'o', 12, 1.0, idx)
+    draw_panel(ax_st, pb_st, st_conditions, 'o', 12, 0.90, idx)
     draw_panel(ax_xn, pb_xn, xn_conditions, 'D', 9, 0.65, idx + 1000)
 
     for ax in [ax_st, ax_xn]:
@@ -615,9 +616,8 @@ for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
     parent.patch.set_alpha(0)
     parent.set_title(f'{gene}\n{ct_label}', fontsize=6.5, pad=3)
 
-    ax_st.set_xticks(list(range(n_x)))
-    ax_st.set_xticklabels(['N', 'P', 'PP'][:n_x], fontsize=5)
-    ax_st.tick_params(axis='x', length=1.5)
+    plt.setp(ax_st.get_xticklabels(), visible=False)
+    ax_st.tick_params(axis='x', length=0)
     ax_xn.set_xticks(list(range(n_x)))
     ax_xn.set_xticklabels(['N', 'P', 'PP'][:n_x], fontsize=5)
     ax_xn.tick_params(axis='x', length=1.5)
@@ -665,9 +665,6 @@ for idx, (gene, cell_type) in enumerate(EXEMPLAR_GENES):
 fig.text(0.04, 0.5, 'Expression (z-score)',
          va='center', ha='center', rotation='vertical', fontsize=7)
 
-ax_legend = fig.add_subplot(outer_gs[n_rows - 1, n_col_genes - 1])
-ax_legend.axis('off')
-
 legend_elements = [
     Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
            markersize=4, markeredgecolor='none', label='Slide-tags'),
@@ -675,10 +672,12 @@ legend_elements = [
            markersize=3.5, markeredgecolor='none',
            label='Xenium', alpha=0.65),
 ]
-ax_legend.legend(handles=legend_elements, loc='upper left',
-                 fontsize=6, frameon=False)
+last_row_y = 1 / n_rows * 0.15
+fig.legend(handles=legend_elements, loc='lower center',
+           bbox_to_anchor=(0.4, last_row_y), fontsize=6, frameon=False,
+           ncol=2)
 
-cbar_ax = ax_legend.inset_axes([0.05, 0.25, 0.35, 0.06])
+cbar_ax = fig.add_axes([0.55, last_row_y + 0.003, 0.06, 0.006])
 sm = ScalarMappable(cmap='viridis', norm=Normalize(vmin=0, vmax=1))
 sm.set_array([])
 cbar = fig.colorbar(sm, cax=cbar_ax, orientation='horizontal')
@@ -693,5 +692,369 @@ plt.savefig(f'{working_dir}/figures/deg_exemplar_pseudobulk.svg',
             bbox_inches='tight')
 plt.close()
 del adata_xn_norm, xn_ct_subsets
+
+#endregion
+#region pathway enrichment (fgsea) #############################################
+
+de_for_gsea = pl.read_csv(f'{working_dir}/output/de_results.csv')\
+    .filter(pl.col('dataset').is_in(['slidetags', 'xenium']))
+to_r(de_for_gsea, 'de_results_r')
+to_r(working_dir, 'working_dir')
+
+r('''
+suppressPackageStartupMessages({
+    library(fgsea)
+    library(msigdbr)
+    library(dplyr)
+    library(tibble)
+})
+
+cache_file <- paste0(working_dir, "/input/m_df_themed.rds")
+if (!file.exists(cache_file)) {
+    m_df <- msigdbr(
+        species = "Mus musculus", category = "C5", subcategory = "GO:BP")
+    theme_keywords <- list(
+        'Neuronal' = c(
+            'NEURO', 'SYNAP', 'AXON', 'DENDRITE', 'GLUTAMATE', 'GABA',
+            'CHOLINERGIC', 'DOPAMINERGIC', 'SEROTONERGIC',
+            'ACTION_POTENTIAL', 'REGULATION_NEUROTRANSMITTER_LEVELS',
+            'REGULATION_SYNAPTIC_PLASTICITY'
+        ),
+        'Metabolic' = c(
+            'METABOLIC', 'LIPID', 'CHOLESTEROL', 'GLUCOSE_METABOLIC',
+            'ATP_METABOLIC', 'CELLULAR_RESPIRATION', 'ELECTRON_TRANSPORT',
+            'OXIDATIVE_PHOSPHORYLATION'
+        ),
+        'Vascular' = c(
+            'VASCULAR', 'VASCULATURE', 'ANGIOGENESIS', 'ENDOTHELIAL',
+            'BLOOD_BRAIN_BARRIER', 'BLOOD_VESSEL',
+            'ENDOTHELIAL_CELL_MIGRATION'
+        ),
+        'Immune' = c(
+            'IMMUNE', 'INFLAMMATORY', 'CYTOKINE', 'INTERFERON',
+            'INNATE_IMMUNE', 'MICROGLIAL'
+        ),
+        'Hormonal' = c(
+            'HORMONE', 'STEROID', 'ESTROGEN', 'PROGESTERONE',
+            'GLUCOCORTICOID', 'MINERALOCORTICOID',
+            'CELLULAR_RESPONSE_HORMONE_STIMULUS'
+        ),
+        'Growth_Factors' = c(
+            'GROWTH_FACTOR', 'NEUROTROPHIC', 'BDNF', 'NGF', 'IGF',
+            'FIBROBLAST_GROWTH', 'CELLULAR_RESPONSE_GROWTH_FACTOR'
+        ),
+        'Plasticity' = c(
+            'NEUROGENESIS', 'DENDRITIC_SPINE', 'AXON_GUIDANCE',
+            'SYNAPSE_ORGANIZATION', 'NEURON_PROJECTION_DEVELOPMENT'
+        ),
+        'Structural' = c(
+            'ADHESION', 'EXTRACELLULAR_MATRIX', 'CELL_JUNCTION',
+            'CELL_ADHESION'
+        ),
+        'Protein_Dynamics' = c(
+            'TRANSLATION', 'RIBOSOMAL', 'PROTEASOME', 'UBIQUITIN',
+            'AUTOPHAGY', 'PROTEIN_FOLDING', 'CHAPERONE'
+        ),
+        'Ion_Transport' = c(
+            'CALCIUM', 'POTASSIUM', 'ION_TRANSPORT',
+            'MEMBRANE_POTENTIAL', 'ION_HOMEOSTASIS'
+        )
+    )
+
+    all_keywords <- unlist(theme_keywords)
+    regex_pattern <- paste(all_keywords, collapse = "|")
+
+    get_theme <- function(gs_name, themes) {
+        for (theme_name in names(themes)) {
+            if (any(sapply(themes[[theme_name]], grepl, gs_name,
+                          ignore.case=TRUE))) {
+                return(theme_name)
+            }
+        }
+        return(NA_character_)
+    }
+
+    m_df_themed <- m_df %>%
+        filter(grepl(regex_pattern, gs_name, ignore.case = TRUE)) %>%
+        rowwise() %>%
+        mutate(theme = get_theme(gs_name, theme_keywords)) %>%
+        ungroup() %>%
+        filter(!is.na(theme))
+
+    saveRDS(m_df_themed, cache_file)
+} else {
+    m_df_themed <- readRDS(cache_file)
+}
+
+filtered_pathways <- m_df_themed %>%
+    split(x = .$gene_symbol, f = .$gs_name)
+
+pathway_theme_lookup <- m_df_themed %>%
+    select(gs_name, theme) %>%
+    distinct() %>%
+    rename(pathway = gs_name)
+
+fgsea_results <- de_results_r %>%
+    group_by(cell_type, contrast, dataset) %>%
+    group_map(~ {
+        ranks <- .x %>%
+            mutate(rank = -log10(PValue) * sign(logFC)) %>%
+            arrange(desc(rank)) %>%
+            select(gene, rank) %>%
+            tibble::deframe()
+
+        res <- fgsea(pathways = filtered_pathways, stats = ranks,
+                    minSize = 15)
+
+        if (nrow(res) > 0) {
+            res %>%
+                as_tibble() %>%
+                mutate(cell_type = .y$cell_type,
+                       contrast = .y$contrast,
+                       dataset = .y$dataset) %>%
+                left_join(pathway_theme_lookup, by = "pathway")
+        } else {
+            tibble()
+        }
+    }) %>%
+    bind_rows()
+''')
+
+pathway_results = to_py('fgsea_results')
+
+os.makedirs(f'{working_dir}/output', exist_ok=True)
+pathway_results.write_parquet(
+    f'{working_dir}/output/pathway_results_gsea.parquet')
+
+available_genes = de_for_gsea \
+    .filter(pl.col('FDR') < 0.10) \
+    .group_by(['cell_type', 'contrast', 'dataset']) \
+    .agg(pl.col('gene').unique().alias('available_genes'))
+
+pathway_results_sig = pathway_results \
+    .filter(pl.col('padj') < 0.10) \
+    .join(available_genes, on=['cell_type', 'contrast', 'dataset'],
+          how='left') \
+    .with_columns(
+        pl.struct(['leadingEdge', 'available_genes']).map_elements(
+            lambda x: [g for g in x['leadingEdge']
+                       if x['available_genes'] is not None
+                       and g in x['available_genes']]
+                       if x['available_genes'] is not None else [],
+            return_dtype=pl.List(pl.Utf8)
+        ).alias('leadingEdge_filtered')) \
+    .with_columns(
+        pl.col('leadingEdge_filtered').list.join(', ')
+        .alias('leadingEdge_genes'))\
+    .drop(['leadingEdge', 'leadingEdge_filtered', 'available_genes'])
+
+pathway_results_sig.write_csv(
+    f'{working_dir}/output/pathway_results_gsea_sig.csv')
+
+n_sig = pathway_results_sig.height
+n_ct = pathway_results_sig['cell_type'].n_unique()
+n_pw = pathway_results_sig['pathway'].n_unique()
+for ds in pathway_results_sig['dataset'].unique().to_list():
+    ds_sub = pathway_results_sig.filter(pl.col('dataset') == ds)
+    for c in ds_sub['contrast'].unique().sort().to_list():
+        c_sub = ds_sub.filter(pl.col('contrast') == c)
+        print(f'[{ds}] {c}: {c_sub.height} sig pathways '
+              f'across {c_sub["cell_type"].n_unique()} cell types')
+
+#endregion
+#region pathway heatmaps #######################################################
+
+pw_all = pl.read_parquet(f'{working_dir}/output/pathway_results_gsea.parquet')
+
+HEATMAP_BLOCKS = [
+    {
+        'name': 'Glutamatergic',
+        'cell_types': [
+            '006 L4/5 IT CTX Glut', '007 L2/3 IT CTX Glut',
+            '009 L2/3 IT PIR-ENTl Glut', '022 L5 ET CTX Glut',
+            '030 L6 CT CTX Glut', '032 L5 NP CTX Glut',
+        ],
+        'pathways': [
+            'GOBP_SYNAPTIC_SIGNALING',
+            'GOBP_REGULATION_OF_TRANS_SYNAPTIC_SIGNALING',
+            'GOBP_CELLULAR_RESPIRATION',
+            'GOBP_ELECTRON_TRANSPORT_CHAIN',
+            'GOBP_OXIDATIVE_PHOSPHORYLATION',
+            'GOBP_CHAPERONE_MEDIATED_PROTEIN_FOLDING',
+        ],
+        'labels': [
+            'Synaptic Signaling',
+            'Regulation of Trans-Synaptic Signaling',
+            'Cellular Respiration',
+            'Electron Transport Chain',
+            'Oxidative Phosphorylation',
+            'Chaperone Mediated Protein Folding',
+        ],
+    },
+    {
+        'name': 'GABAergic',
+        'cell_types': [
+            '054 STR Prox1 Lhx6 Gaba', '058 PAL-STR Gaba-Chol',
+            '060 OT D3 Folh1 Gaba', '061 STR D1 Gaba',
+            '062 STR D2 Gaba', '063 STR D1 Sema5a Gaba',
+        ],
+        'pathways': [
+            'GOBP_CELLULAR_RESPIRATION',
+            'GOBP_ELECTRON_TRANSPORT_CHAIN',
+            'GOBP_REGULATION_OF_SYNAPTIC_PLASTICITY',
+            'GOBP_REGULATION_OF_TRANS_SYNAPTIC_SIGNALING',
+            'GOBP_POTASSIUM_ION_TRANSPORT',
+            'GOBP_MITOCHONDRIAL_TRANSLATION',
+        ],
+        'labels': [
+            'Cellular Respiration',
+            'Electron Transport Chain',
+            'Regulation of Synaptic Plasticity',
+            'Regulation of Trans-Synaptic Signaling',
+            'Potassium Ion Transport',
+            'Mitochondrial Translation',
+        ],
+    },
+    {
+        'name': 'Non-Neuronal',
+        'cell_types': [
+            '319 Astro-TE NN', '326 OPC NN', '327 Oligo NN',
+            '330 VLMC NN', '333 Endo NN', '334 Microglia NN',
+        ],
+        'pathways': [
+            'GOBP_SYNAPTIC_VESICLE_EXOCYTOSIS',
+            'GOBP_SYNAPTIC_SIGNALING',
+            'GOBP_REGULATION_OF_NEURONAL_SYNAPTIC_PLASTICITY',
+            'GOBP_ATP_SYNTHESIS_COUPLED_ELECTRON_TRANSPORT',
+            'GOBP_RESPONSE_TO_HORMONE',
+            'GOBP_VASCULATURE_DEVELOPMENT',
+            'GOBP_CELL_ADHESION',
+            'GOBP_RESPONSE_TO_GROWTH_FACTOR',
+            'GOBP_ENDOTHELIAL_CELL_MIGRATION',
+        ],
+        'labels': [
+            'Synaptic Vesicle Exocytosis',
+            'Synaptic Signaling',
+            'Regulation of Neuronal Synaptic Plasticity',
+            'ATP Synthesis Electron Transport',
+            'Response to Hormone',
+            'Vasculature Development',
+            'Cell Adhesion',
+            'Response to Growth Factor',
+            'Endothelial Cell Migration',
+        ],
+    },
+]
+
+from matplotlib.colors import LinearSegmentedColormap
+
+seismic = plt.cm.get_cmap('seismic')
+n_colors = 256
+colors = seismic(np.linspace(0, 1, n_colors))
+white_range = 0.50
+center = n_colors // 2
+spread = int(n_colors * white_range)
+for i in range(center - spread, center + spread):
+    weight = 1 - abs(i - center) / spread
+    colors[i] = (1 - weight) * colors[i] + weight * np.array([1, 1, 1, 1])
+custom_seismic = LinearSegmentedColormap.from_list('custom_seismic', colors)
+
+CONTRASTS = [
+    ('PREG_vs_CTRL', 'slidetags', 'Pregnant vs\nNulliparous\n(Slide-tags)'),
+    ('POSTPART_vs_PREG', 'slidetags', 'Postpartum vs\nPregnant\n(Slide-tags)'),
+    ('PREG_vs_CTRL', 'xenium', 'Pregnant vs\nNulliparous\n(Xenium)'),
+]
+
+height_ratios = [len(b['pathways']) for b in HEATMAP_BLOCKS]
+n_cols = len(CONTRASTS)
+cell_h = 0.5
+cell_w = 0.35
+max_cts = max(len(b['cell_types']) for b in HEATMAP_BLOCKS)
+fig_w = max_cts * cell_w * n_cols + 3
+fig_h = sum(height_ratios) * cell_h + 3
+
+fig = plt.figure(figsize=(fig_w, fig_h))
+gs = fig.add_gridspec(
+    len(HEATMAP_BLOCKS), n_cols, hspace=0.5, wspace=0.08,
+    height_ratios=height_ratios,
+    left=0.05, right=0.82, top=0.94, bottom=0.12)
+
+vmin_global = np.inf
+vmax_global = -np.inf
+all_ims = []
+
+for row_idx, block in enumerate(HEATMAP_BLOCKS):
+    cell_types = block['cell_types']
+    pathways = block['pathways']
+    labels = block['labels']
+
+    for col_idx, (contrast, dataset, title) in enumerate(CONTRASTS):
+        ax = fig.add_subplot(gs[row_idx, col_idx])
+
+        es_mat = np.full((len(pathways), len(cell_types)), np.nan)
+        sig_mat = np.full((len(pathways), len(cell_types)), False)
+
+        df = pw_all.filter(
+            pl.col('cell_type').is_in(cell_types) &
+            pl.col('pathway').is_in(pathways) &
+            pl.col('contrast').eq(contrast) &
+            pl.col('dataset').eq(dataset))
+
+        for i, pathway in enumerate(pathways):
+            for j, ct in enumerate(cell_types):
+                hit = df.filter(
+                    (pl.col('pathway') == pathway) &
+                    (pl.col('cell_type') == ct))
+                if hit.height > 0:
+                    row = hit.row(0, named=True)
+                    es_mat[i, j] = row['NES']
+                    sig_mat[i, j] = row['padj'] is not None and row['padj'] < 0.10
+
+        v = np.nanmax(np.abs(es_mat[~np.isnan(es_mat)])) \
+            if np.any(~np.isnan(es_mat)) else 1
+        vmin_global = min(vmin_global, -v)
+        vmax_global = max(vmax_global, v)
+
+        im = ax.imshow(es_mat, cmap=custom_seismic, aspect='auto')
+        all_ims.append(im)
+
+        for i in range(es_mat.shape[0]):
+            for j in range(es_mat.shape[1]):
+                if sig_mat[i, j]:
+                    ax.text(j, i, '*', ha='center', va='center',
+                            fontsize=12, color='white', weight='bold')
+
+        ct_labels = [re.sub(r'^\d+\s+', '', ct) for ct in cell_types]
+        ax.set_xticks(range(len(cell_types)))
+        ax.set_xticklabels(ct_labels, rotation=45, ha='right', fontsize=7)
+
+        if col_idx == n_cols - 1:
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.tick_params(axis='y', labelright=True, labelleft=False,
+                           right=True, left=False)
+        else:
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels([])
+            ax.tick_params(axis='y', left=False)
+
+        if row_idx == 0:
+            ax.set_title(title, fontsize=8, pad=8)
+
+vlim = max(abs(vmin_global), abs(vmax_global))
+for im in all_ims:
+    im.set_clim(-vlim, vlim)
+
+cax = fig.add_axes([0.25, 0.04, 0.35, 0.015])
+cbar = fig.colorbar(all_ims[-1], cax=cax, orientation='horizontal')
+cbar.set_label('Normalized Enrichment Score', fontsize=9)
+cbar.ax.tick_params(labelsize=7)
+
+os.makedirs(f'{working_dir}/figures', exist_ok=True)
+plt.savefig(f'{working_dir}/figures/pathway_heatmaps.png',
+            dpi=300, bbox_inches='tight')
+plt.savefig(f'{working_dir}/figures/pathway_heatmaps.svg',
+            bbox_inches='tight')
+plt.close()
 
 #endregion

@@ -430,7 +430,10 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
     adata = sc.read_h5ad(f'{output_dir}/01_adata_query_{name}.h5ad')
     print(f'[{name}] query: {adata.shape[0]:,} cells')
     # load aligned query coords
-    coords_ffd = torch.load(f'{output_dir}/coords_ffd.pt', weights_only=False)
+    coords_ffd = torch.load(
+        f'{output_dir}/coords_ffd.pt', weights_only=False)
+    coords_affine = torch.load(
+        f'{output_dir}/coords_affine.pt', weights_only=False)
 
     # load bridge (Phase A) and derive ref coords from it directly.
     adata_ref, scrna_indices, _ = prepare_reference(k_harmony=k_harmony)
@@ -466,6 +469,11 @@ def run_project(name, k2=5, k_harmony=20, k_extend=20, levels=None):
         idx = adata.obs[mask].index
         adata.obs.loc[idx, 'x_ffd'] = coords_ffd[s][:, 0]
         adata.obs.loc[idx, 'y_ffd'] = coords_ffd[s][:, 1]
+    for s in sorted(coords_affine.keys()):
+        mask = adata.obs[sample_col] == s
+        idx = adata.obs[mask].index
+        adata.obs.loc[idx, 'x_affine'] = coords_affine[s][:, 0]
+        adata.obs.loc[idx, 'y_affine'] = coords_affine[s][:, 1]
 
     query_coords = adata.obs[['x_ffd', 'y_ffd']].values
 

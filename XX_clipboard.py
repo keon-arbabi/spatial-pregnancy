@@ -1,91 +1,196 @@
+import polars as pl
 import numpy as np
-import scanpy as sc
 
 working_dir = '/home/karbabi/spatial-pregnancy'
+pw = pl.read_csv(f'{working_dir}/output/pathway_results_gsea_sig.csv')
+pw_full = pl.read_parquet(f'{working_dir}/output/pathway_results_gsea.parquet')
 
-datasets = {
-    'slidetags': f'{working_dir}/output/slidetags/03_adata_query_slidetags.h5ad',
-    'merfish':   f'{working_dir}/output/merfish/03_adata_query_merfish.h5ad',
-    'xenium':    f'{working_dir}/output/xenium/03_adata_query_xenium.h5ad',
+def get_type(ct):
+    if 'Glut' in ct:
+        return 'Glut'
+    elif any(x in ct for x in ['Gaba', 'IMN', 'Chol']):
+        return 'Gaba'
+    return 'NN'
+
+preg = pw_full.filter(pl.col('contrast') == 'PREG_vs_CTRL')
+preg_sig = pw.filter(pl.col('contrast') == 'PREG_vs_CTRL')
+
+print('=' * 100)
+print('PATHWAY DEEP ANALYSIS')
+print('=' * 100)
+
+print('\n=== 1. Slide-tags: top pathways per cell class ===\n')
+
+st = preg_sig.filter(pl.col('dataset') == 'slidetags')
+st = st.with_columns(
+    pl.col('cell_type').map_elements(get_type, return_dtype=pl.Utf8)
+    .alias('class'))
+
+for cls in ['Glut', 'Gaba', 'NN']:
+    sub = st.filter(pl.col('class') == cls)
+    freq = sub.group_by('pathway').agg([
+        pl.len().alias('n_ct'),
+        pl.col('NES').mean().alias('mean_NES'),
+        pl.col('theme').first().alias('theme'),
+    ]).sort('n_ct', descending=True)
+    print(f'  --- {cls} ({sub["cell_type"].n_unique()} cell types) ---')
+    for row in freq.head(8).iter_rows(named=True):
+        d = '↑' if row['mean_NES'] > 0 else '↓'
+        print(f'    {row["pathway"][:50]:50s} {row["n_ct"]:>2d} ct '
+              f'{d} NES={row["mean_NES"]:+.2f} [{row["theme"]}]')
+    print()
+
+print('=== 2. Select pathways for heatmap ===\n')
+
+PATHWAY_SELECTION = {
+    'Neuronal': [
+        'GOBP_SYNAPTIC_SIGNALING',
+        'GOBP_REGULATION_OF_SYNAPTIC_PLASTICITY',
+        'GOBP_REGULATION_OF_TRANS_SYNAPTIC_SIGNALING',
+        'GOBP_GLUTAMATE_RECEPTOR_SIGNALING_PATHWAY',
+        'GOBP_NEUROTRANSMITTER_TRANSPORT',
+        'GOBP_LONG_TERM_SYNAPTIC_POTENTIATION',
+    ],
+    'Metabolic': [
+        'GOBP_OXIDATIVE_PHOSPHORYLATION',
+        'GOBP_ELECTRON_TRANSPORT_CHAIN',
+        'GOBP_CELLULAR_RESPIRATION',
+        'GOBP_ATP_SYNTHESIS_COUPLED_ELECTRON_TRANSPORT',
+    ],
+    'Vascular': [
+        'GOBP_VASCULATURE_DEVELOPMENT',
+        'GOBP_BLOOD_VESSEL_MORPHOGENESIS',
+        'GOBP_ENDOTHELIAL_CELL_MIGRATION',
+        'GOBP_REGULATION_OF_ENDOTHELIAL_CELL_MIGRATION',
+    ],
+    'Structural': [
+        'GOBP_CELL_ADHESION',
+        'GOBP_CELL_SUBSTRATE_ADHESION',
+    ],
+    'Immune': [
+        'GOBP_CYTOKINE_PRODUCTION',
+        'GOBP_POSITIVE_REGULATION_OF_INFLAMMATORY_RESPONSE',
+    ],
+    'Hormonal': [
+        'GOBP_CELLULAR_RESPONSE_TO_HORMONE_STIMULUS',
+        'GOBP_NEUROPEPTIDE_SIGNALING_PATHWAY',
+    ],
+    'Growth_Factors': [
+        'GOBP_CELLULAR_RESPONSE_TO_GROWTH_FACTOR_STIMULUS',
+    ],
 }
 
-for ds_name, path in datasets.items():
-    print('=' * 110)
-    print(f'{ds_name.upper()}')
-    print('=' * 110)
+all_selected = []
+for theme, pws in PATHWAY_SELECTION.items():
+    for p in pws:
+        all_selected.append(p)
 
-    adata = sc.read_h5ad(path)
-    samples = sorted(adata.obs['sample'].unique())
-    subclasses = sorted(adata.obs['subclass'].unique())
+print(f'Selected {len(all_selected)} pathways across {len(PATHWAY_SELECTION)} themes')
 
-    print(f'\n{"sample":14s} {"n_cells":>8s} {"med_cts":>8s} {"mean_cts":>9s} '
-          f'{"q10":>6s} {"q25":>6s} {"q75":>6s} {"q90":>6s}')
-    for s in samples:
-        mask = adata.obs['sample'] == s
-        cts = np.asarray(adata[mask].X.sum(axis=1)).ravel()
-        print(f'{s:14s} {mask.sum():>8d} '
-              f'{np.median(cts):>8.0f} {np.mean(cts):>9.0f} '
-              f'{np.quantile(cts, 0.10):>6.0f} '
-              f'{np.quantile(cts, 0.25):>6.0f} '
-              f'{np.quantile(cts, 0.75):>6.0f} '
-              f'{np.quantile(cts, 0.90):>6.0f}')
+print('\n=== 3. NES matrix for selected pathways × cell types ===\n')
 
-    print(f'\n--- Per-sample "extreme" fraction across subclasses (n>=30) ---\n')
-    print(f'{"sample":14s} {"n_sub":>6s} {"low":>6s} {"high":>6s} {"extreme":>8s}')
+glut_cts = sorted(set(
+    st.filter(pl.col('class') == 'Glut')['cell_type'].unique().to_list()))
+gaba_cts = sorted(set(
+    st.filter(pl.col('class') == 'Gaba')['cell_type'].unique().to_list()))
+nn_cts = sorted(set(
+    st.filter(pl.col('class') == 'NN')['cell_type'].unique().to_list()))
 
-    summary = {}
-    for target in samples:
-        low_count, high_count, total = 0, 0, 0
-        for sub in subclasses:
-            row = {}
-            for s in samples:
-                mask = (adata.obs['subclass'] == sub) & \
-                       (adata.obs['sample'] == s)
-                if mask.sum() < 30:
-                    row[s] = np.nan
-                    continue
-                cts = np.asarray(adata[mask].X.sum(axis=1)).ravel()
-                row[s] = np.median(cts)
-            if np.isnan(row.get(target, np.nan)):
-                continue
-            others = [v for k, v in row.items()
-                      if k != target and not np.isnan(v)]
-            if len(others) < 2:
-                continue
-            med_oth = np.median(others)
-            if med_oth == 0:
-                continue
-            ratio = row[target] / med_oth
-            total += 1
-            if ratio < 0.7:
-                low_count += 1
-            elif ratio > 1.3:
-                high_count += 1
-        extreme = low_count + high_count
-        summary[target] = {'n': total, 'low': low_count,
-                           'high': high_count, 'extreme': extreme}
-        ext_pct = extreme / total * 100 if total > 0 else 0
-        low_pct = low_count / total * 100 if total > 0 else 0
-        high_pct = high_count / total * 100 if total > 0 else 0
-        print(f'{target:14s} {total:>6d} '
-              f'{low_count:>3d}({low_pct:>2.0f}%) '
-              f'{high_count:>3d}({high_pct:>2.0f}%) '
-              f'{extreme:>3d}({ext_pct:>2.0f}%)')
+for cls_name, cts in [('Glut', glut_cts), ('Gaba', gaba_cts), ('NN', nn_cts)]:
+    print(f'\n  --- {cls_name}: {len(cts)} cell types ---')
+    for pw_name in all_selected[:5]:
+        row_data = []
+        for ct in cts:
+            hit = preg.filter(
+                (pl.col('dataset') == 'slidetags') &
+                (pl.col('pathway') == pw_name) &
+                (pl.col('cell_type') == ct))
+            if hit.height > 0:
+                nes = hit['NES'][0]
+                padj = hit['padj'][0]
+                sig = '*' if padj < 0.10 else ''
+                row_data.append(f'{nes:+.1f}{sig}')
+            else:
+                row_data.append('  --')
+        short = pw_name.replace('GOBP_', '')[:35]
+        print(f'    {short:35s} {" ".join(f"{x:>6s}" for x in row_data[:6])}')
 
-    max_extreme = max(v['extreme'] / v['n'] * 100 if v['n'] > 0 else 0
-                       for v in summary.values())
-    med_extreme = np.median([v['extreme'] / v['n'] * 100 if v['n'] > 0 else 0
-                              for v in summary.values()])
-    print(f'\n  Max extreme %: {max_extreme:.0f}%')
-    print(f'  Median extreme %: {med_extreme:.0f}%')
-    worst = max(summary.items(),
-                key=lambda x: x[1]['extreme'] / max(x[1]['n'], 1))
-    w_low = worst[1]['low']
-    w_high = worst[1]['high']
-    w_bidir = min(w_low, w_high) / max(w_low, w_high, 1)
-    print(f'  Worst sample: {worst[0]} '
-          f'(low={w_low}, high={w_high}, '
-          f'bidirectionality={w_bidir:.2f})')
+print('\n=== 4. Cross-platform pathway concordance detail ===\n')
 
-    print()
-    del adata
+for pw_name in all_selected:
+    st_hits = preg_sig.filter(
+        (pl.col('dataset') == 'slidetags') &
+        (pl.col('pathway') == pw_name))
+    xn_hits = preg_sig.filter(
+        (pl.col('dataset') == 'xenium') &
+        (pl.col('pathway') == pw_name))
+    if st_hits.height == 0 and xn_hits.height == 0:
+        continue
+    st_cts = set(st_hits['cell_type'].to_list())
+    xn_cts = set(xn_hits['cell_type'].to_list())
+    shared_cts = st_cts & xn_cts
+    short = pw_name.replace('GOBP_', '')[:45]
+
+    st_dir = '↓' if st_hits.height > 0 and st_hits['NES'].mean() < 0 else '↑'
+    xn_dir = '↓' if xn_hits.height > 0 and xn_hits['NES'].mean() < 0 else '↑'
+
+    concordant = st_dir == xn_dir if st_hits.height > 0 and xn_hits.height > 0 \
+        else None
+    conc_str = 'CONCORDANT' if concordant == True else \
+               'DISCORDANT' if concordant == False else 'ONE-PLATFORM'
+
+    print(f'  {short:45s} ST:{st_hits.height:>2d}ct{st_dir} '
+          f'XN:{xn_hits.height:>2d}ct{xn_dir} '
+          f'shared:{len(shared_cts)} [{conc_str}]')
+
+print('\n=== 5. Postpartum reversal check ===\n')
+
+for pw_name in ['GOBP_OXIDATIVE_PHOSPHORYLATION',
+                 'GOBP_SYNAPTIC_SIGNALING',
+                 'GOBP_VASCULATURE_DEVELOPMENT',
+                 'GOBP_CELL_ADHESION',
+                 'GOBP_CELLULAR_RESPIRATION',
+                 'GOBP_ENDOTHELIAL_CELL_MIGRATION']:
+    preg_nes = preg_sig.filter(
+        (pl.col('dataset') == 'slidetags') &
+        (pl.col('pathway') == pw_name))
+    pp = pw.filter(
+        (pl.col('dataset') == 'slidetags') &
+        (pl.col('contrast') == 'POSTPART_vs_PREG') &
+        (pl.col('pathway') == pw_name))
+    short = pw_name.replace('GOBP_', '')[:40]
+    preg_mean = preg_nes['NES'].mean() if preg_nes.height > 0 else 0
+    pp_mean = pp['NES'].mean() if pp.height > 0 else 0
+    reversed = (preg_mean * pp_mean < 0) if pp.height > 0 else None
+    rev_str = 'REVERSED' if reversed else \
+              'PERSISTENT' if reversed == False else 'NO PP DATA'
+    print(f'  {short:40s} PREG={preg_mean:+.2f}({preg_nes.height}ct) '
+          f'PP={pp_mean:+.2f}({pp.height}ct) [{rev_str}]')
+
+print('\n=== 6. Figure panel design ===\n')
+
+print('Proposed layout (3 heatmap blocks, 2 contrast columns each):')
+print()
+print('Block 1: Glutamatergic neurons')
+glut_show = [ct for ct in glut_cts
+             if st.filter(pl.col('cell_type') == ct).height >= 3]
+print(f'  Cell types with >=3 sig pathways: {len(glut_show)}')
+for ct in glut_show[:8]:
+    n = st.filter(pl.col('cell_type') == ct).height
+    print(f'    {ct}: {n} pathways')
+
+print('\nBlock 2: GABAergic neurons')
+gaba_show = [ct for ct in gaba_cts
+             if st.filter(pl.col('cell_type') == ct).height >= 3]
+print(f'  Cell types with >=3 sig pathways: {len(gaba_show)}')
+for ct in gaba_show[:8]:
+    n = st.filter(pl.col('cell_type') == ct).height
+    print(f'    {ct}: {n} pathways')
+
+print('\nBlock 3: Non-neuronal')
+nn_show = [ct for ct in nn_cts
+           if st.filter(pl.col('cell_type') == ct).height >= 3]
+print(f'  Cell types with >=3 sig pathways: {len(nn_show)}')
+for ct in nn_show:
+    n = st.filter(pl.col('cell_type') == ct).height
+    print(f'    {ct}: {n} pathways')
