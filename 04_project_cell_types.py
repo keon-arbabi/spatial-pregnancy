@@ -899,66 +899,66 @@ if __name__ == '__main__':
         print(f'Unknown dataset: {t}. Choose from {list(datasets.keys())} or all')
         sys.exit(1)
 
-# # adaptive radius visualization (zoomed views per dataset)
-# from matplotlib.patches import Circle
-# ref = sc.read_h5ad(f'{working_dir}/input/adata_ref_zeng_bridge.h5ad')
-# ref_sections = sorted(s for s in ref.obs['sample'].unique()
-#                       if s.startswith('C57BL6J-638850'))
-# ref_obs_sub = ref.obs[ref.obs['sample'].isin(ref_sections)]
-# ref_coords_full = ref_obs_sub[['x_raw', 'y_raw']].values
-# ref_tree = cKDTree(ref_coords_full)
-# n_samples = 5
-# fig, axes = plt.subplots(len(datasets), n_samples + 1,
-#                          figsize=(4 * (n_samples + 1), 4 * len(datasets)),
-#                          squeeze=False)
-# rng = np.random.default_rng(42)
-# for row, (name, cfg) in enumerate(datasets.items()):
-#     coords_ffd = torch.load(f'{working_dir}/output/{name}/coords_ffd.pt',
-#                              weights_only=False)
-#     query_coords = np.vstack(
-#         [coords_ffd[s] for s in sorted(coords_ffd.keys())])
-#     edge = avg_nn_dist(query_coords)
-#     radius = (cfg['ave_dist_fold'] * edge +
-#               cfg['alignment_shift_adjustment'])
-#     ax = axes[row, 0]
-#     ax.scatter(ref_coords_full[:, 0], ref_coords_full[:, 1],
-#                s=0.05, c='lightgray', alpha=0.3, rasterized=True)
-#     sample_idx = rng.integers(len(query_coords), size=n_samples)
-#     sample_cells = query_coords[sample_idx]
-#     ax.scatter(sample_cells[:, 0], sample_cells[:, 1], s=20, c='red', zorder=5)
-#     for cell in sample_cells:
-#         ax.add_patch(Circle(cell, radius, fill=False, color='red',
-#                             linewidth=1, linestyle='--'))
-#     ax.set_aspect('equal')
-#     ax.set_title(f'{name} overview\n'
-#                  f'edge={edge:.5f} (fold={cfg["ave_dist_fold"]}, '
-#                  f'shift={cfg["alignment_shift_adjustment"]})\n'
-#                  f'r={radius:.4f}', fontsize=10)
-#     ax.axis('off')
-#     for col, cell in enumerate(sample_cells, start=1):
-#         cands = ref_tree.query_ball_point(cell, r=radius)
-#         zoom = max(radius * 3, 0.05)
-#         ax = axes[row, col]
-#         in_zoom = ((np.abs(ref_coords_full[:, 0] - cell[0]) < zoom * 1.5) &
-#                    (np.abs(ref_coords_full[:, 1] - cell[1]) < zoom * 1.5))
-#         ax.scatter(ref_coords_full[in_zoom, 0], ref_coords_full[in_zoom, 1],
-#                    s=4, c='lightgray', alpha=0.6, rasterized=True)
-#         if len(cands) > 0:
-#             ax.scatter(ref_coords_full[cands, 0], ref_coords_full[cands, 1],
-#                        s=8, c='steelblue', alpha=0.8, rasterized=True)
-#         ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
-#                    edgecolors='white', linewidths=1)
-#         ax.add_patch(Circle(cell, radius, fill=False, color='red',
-#                             linewidth=2, linestyle='--'))
-#         ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
-#         ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
-#         ax.set_aspect('equal')
-#         ax.set_title(f'{len(cands):,} candidates', fontsize=10)
-#         ax.set_xticks([])
-#         ax.set_yticks([])
-# plt.tight_layout()
-# fig.savefig(f'{working_dir}/figures/radius_tuning.png', dpi=200)
-# plt.close()
+    # adaptive radius visualization (zoomed views per dataset)
+    from matplotlib.patches import Circle
+    ref = sc.read_h5ad(f'{working_dir}/input/adata_ref_zeng_bridge.h5ad')
+    ref_sections = sorted(s for s in ref.obs['sample'].unique()
+                        if s.startswith('C57BL6J-638850'))
+    ref_obs_sub = ref.obs[ref.obs['sample'].isin(ref_sections)]
+    ref_coords_full = ref_obs_sub[['x_raw', 'y_raw']].values
+    ref_tree = cKDTree(ref_coords_full)
+    n_samples = 5
+    fig, axes = plt.subplots(len(datasets), n_samples + 1,
+                            figsize=(4 * (n_samples + 1), 4 * len(datasets)),
+                            squeeze=False)
+    rng = np.random.default_rng(42)
+    for row, (name, cfg) in enumerate(datasets.items()):
+        coords_ffd = torch.load(f'{working_dir}/output/{name}/coords_ffd.pt',
+                                weights_only=False)
+        query_coords = np.vstack(
+            [coords_ffd[s] for s in sorted(coords_ffd.keys())])
+        edge = avg_nn_dist(query_coords)
+        radius = (cfg['ave_dist_fold'] * edge +
+                cfg['alignment_shift_adjustment'])
+        ax = axes[row, 0]
+        ax.scatter(ref_coords_full[:, 0], ref_coords_full[:, 1],
+                s=0.05, c='lightgray', alpha=0.3, rasterized=True)
+        sample_idx = rng.integers(len(query_coords), size=n_samples)
+        sample_cells = query_coords[sample_idx]
+        ax.scatter(sample_cells[:, 0], sample_cells[:, 1], s=20, c='red', zorder=5)
+        for cell in sample_cells:
+            ax.add_patch(Circle(cell, radius, fill=False, color='red',
+                                linewidth=1, linestyle='--'))
+        ax.set_aspect('equal')
+        ax.set_title(f'{name} overview\n'
+                    f'edge={edge:.5f} (fold={cfg["ave_dist_fold"]}, '
+                    f'shift={cfg["alignment_shift_adjustment"]})\n'
+                    f'r={radius:.4f}', fontsize=10)
+        ax.axis('off')
+        for col, cell in enumerate(sample_cells, start=1):
+            cands = ref_tree.query_ball_point(cell, r=radius)
+            zoom = max(radius * 3, 0.05)
+            ax = axes[row, col]
+            in_zoom = ((np.abs(ref_coords_full[:, 0] - cell[0]) < zoom * 1.5) &
+                    (np.abs(ref_coords_full[:, 1] - cell[1]) < zoom * 1.5))
+            ax.scatter(ref_coords_full[in_zoom, 0], ref_coords_full[in_zoom, 1],
+                    s=4, c='lightgray', alpha=0.6, rasterized=True)
+            if len(cands) > 0:
+                ax.scatter(ref_coords_full[cands, 0], ref_coords_full[cands, 1],
+                        s=8, c='steelblue', alpha=0.8, rasterized=True)
+            ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
+                    edgecolors='white', linewidths=1)
+            ax.add_patch(Circle(cell, radius, fill=False, color='red',
+                                linewidth=2, linestyle='--'))
+            ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
+            ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
+            ax.set_aspect('equal')
+            ax.set_title(f'{len(cands):,} candidates', fontsize=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
+    plt.tight_layout()
+    fig.savefig(f'{working_dir}/figures/radius_tuning.png', dpi=200)
+    plt.close()
 
 #endregion
 
