@@ -452,8 +452,9 @@ const soloKey = lvl => (lvl === 'subclass' ? 'sub' : 'class');
 const HF_DATASET = 'Keon-A/spatial-pregnancy-viewer';
 const HF_BASE = `https://huggingface.co/datasets/${HF_DATASET}/resolve/main`;
 
+const CACHE_BUST = 'v=' + Date.now();
 function dataUrl(path) {
-    return 'viewer_data/' + path;
+    return 'viewer_data/' + path + '?' + CACHE_BUST;
 }
 function geneUrl(dataset, gene) {
     const base = isLocal() ? 'viewer_data' : HF_BASE;
@@ -862,7 +863,13 @@ async function selectDataset(name) {
 
     // load all binaries in parallel
     setStatus(`loading ${state.panels.length} slices…`);
-    await Promise.all(state.panels.map(p => loadSlice(p.entry)));
+    try {
+        await Promise.all(state.panels.map(p => loadSlice(p.entry)));
+    } catch (e) {
+        setStatus(`error loading slice: ${e.message}`);
+        console.error('loadSlice failed:', e);
+        return;
+    }
     setStatus(`${state.panels.length} slices loaded · ` +
         `${(state.panels.reduce((a,p)=>a+p.entry.n_cells,0)).toLocaleString()} cells`);
 
