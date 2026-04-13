@@ -436,6 +436,8 @@ plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 300
 
+global_tt = pd.read_csv(f'{working_dir}/output/proximity_global_props.csv')
+
 type_order = ['Glut', 'Gaba', 'NN']
 all_cts = sorted(
     global_tt['cell_type'].unique(),
@@ -597,115 +599,191 @@ plt.close()
 
 #region plot — local proximities heatmap ######################################
 
-contrast_titles = {
-    'PREG_vs_CTRL': 'Pregnant vs Nulliparous',
-    'POSTPART_vs_PREG': 'Postpartum vs Pregnant',
-    'POSTPART_vs_CTRL': 'Postpartum vs Nulliparous',
-}
+#region plot — local proximities heatmap ######################################
 
-DISPLAY_CAP = 30
+local_tt = pd.read_csv(f'{working_dir}/output/proximity_local_diff.csv')
+
+DISPLAY_CAP = 20
 type_order = ['Glut', 'Gaba', 'NN']
 sig_mask = local_tt['P.Value'] < NOMINAL_THRESHOLD
+exclude_cts = {'060 OT D3 Folh1 Gaba'}
 
-display_a = set(local_tt.loc[sig_mask, 'cell_type_a'].unique())
-if len(display_a) > DISPLAY_CAP:
-    counts_a = local_tt.loc[sig_mask].groupby('cell_type_a')\
-        .size().sort_values(ascending=False)
-    display_a = set(counts_a.head(DISPLAY_CAP).index)
-display_a = sorted(display_a,
-                   key=lambda c: (type_order.index(get_type(c)), c))
+def _select_display(col):
+    counts = local_tt.loc[sig_mask, col].value_counts()
+    counts = counts[~counts.index.isin(exclude_cts)]
+    top = counts.head(DISPLAY_CAP).index.tolist()
+    return sorted(top,
+                  key=lambda c: (type_order.index(get_type(c)), c))
 
-display_b = set(local_tt.loc[sig_mask, 'cell_type_b'].unique())
-if len(display_b) > DISPLAY_CAP:
-    counts_b = local_tt.loc[sig_mask].groupby('cell_type_b')\
-        .size().sort_values(ascending=False)
-    display_b = set(counts_b.head(DISPLAY_CAP).index)
-display_b = sorted(display_b,
-                   key=lambda c: (type_order.index(get_type(c)), c))
+display_a = _select_display('cell_type_a')
+display_b = _select_display('cell_type_b')
 
-a_labels = list(display_a)
-b_labels = list(display_b)
+def _insert_gaps(items):
+    gapped, labels, prev = [], [], None
+    for item in items:
+        t = get_type(item)
+        if prev is not None and t != prev:
+            gapped.append(None)
+            labels.append('')
+        gapped.append(item)
+        labels.append(item)
+        prev = t
+    return gapped, labels
+
+a_gapped, a_labels = _insert_gaps(display_a)
+b_gapped, b_labels = _insert_gaps(display_b)
 
 vmax = float(local_tt['logFC'].abs().quantile(0.98))
 vmax = max(vmax, 0.1)
 vmin = -vmax
 
-contrasts_all = ['PREG_vs_CTRL', 'POSTPART_vs_PREG', 'POSTPART_vs_CTRL']
-ds_list = list(proximity_datasets.keys())
+global_tt = pd.read_csv(f'{working_dir}/output/proximity_global_props.csv')
 
-CELL_SIZE = 0.22
-n_a, n_b = len(display_a), len(display_b)
-panel_w = CELL_SIZE * n_b
-panel_h = CELL_SIZE * n_a
-fig_w = panel_w * len(contrasts_all) + 3.5
-fig_h = panel_h * len(ds_list) + 2.0
+panels = [
+    ('xenium', 'PREG_vs_CTRL', 'Xenium Pregnant vs Nulliparous'),
+    ('merfish', 'PREG_vs_CTRL', 'MERFISH Pregnant vs Nulliparous'),
+    ('merfish', 'POSTPART_vs_PREG', 'MERFISH Postpartum vs Pregnant'),
+]
+
+CELL_SIZE = 0.11
+GAP_WIDTH = 1
+n_a_g, n_b_g = len(a_gapped), len(b_gapped)
+n_cols_with_glob = 1 + GAP_WIDTH + n_b_g
+
+row_gaps = [i for i, x in enumerate(a_gapped) if x is None]
+col_gaps_local = [j for j, x in enumerate(b_gapped) if x is None]
+
+row_segs = []
+start = 0
+for rg in row_gaps:
+    row_segs.append((start, rg))
+    start = rg + 1
+row_segs.append((start, n_a_g))
+
+col_segs_local = []
+start = 0
+for cg in col_gaps_local:
+    col_segs_local.append((start, cg))
+    start = cg + 1
+col_segs_local.append((start, n_b_g))
+
+def _draw_block_borders(ax, row_segs, col_segs, lw=0.8):
+    for r0, r1 in row_segs:
+        for c0, c1 in col_segs:
+            ax.add_patch(plt.Rectangle(
+                (c0, r0), c1 - c0, r1 - r0, fill=False,
+                edgecolor='black', linewidth=lw, zorder=5))
+
+ai_map = {ct: i for i, ct in enumerate(a_gapped) if ct is not None}
+bi_map = {ct: j for j, ct in enumerate(b_gapped) if ct is not None}
+glob_col = 0
+local_offset = 1 + GAP_WIDTH
+
+panel_w = CELL_SIZE * n_cols_with_glob
+panel_h = CELL_SIZE * n_a_g
+fig_w = panel_w * len(panels) + 3.0
+fig_h = panel_h + 1.5
 
 fig, axes = plt.subplots(
-    len(ds_list), len(contrasts_all),
-    figsize=(fig_w, fig_h), squeeze=False,
-    gridspec_kw={'hspace': 0.35, 'wspace': 0.08})
+    1, len(panels), figsize=(fig_w, fig_h), squeeze=False,
+    gridspec_kw={'wspace': 0.25})
 
 last_im = None
-for di, ds_name in enumerate(ds_list):
-    for ci, contrast in enumerate(contrasts_all):
-        ax = axes[di, ci]
-        sub = local_tt[
-            (local_tt['dataset'] == ds_name) &
-            (local_tt['contrast'] == contrast)]
-        if sub.empty:
-            ax.axis('off')
-            continue
+for pi, (ds_name, contrast, title) in enumerate(panels):
+    ax = axes[0, pi]
 
-        mat = pd.DataFrame(np.nan, index=display_a, columns=display_b)
-        sigs = pd.DataFrame('', index=display_a, columns=display_b)
-        for _, row in sub.iterrows():
-            a, b = row['cell_type_a'], row['cell_type_b']
-            if a not in mat.index or b not in mat.columns:
-                continue
-            mat.loc[a, b] = row['logFC']
+    full_mat = np.full((n_a_g, n_cols_with_glob), np.nan)
+    full_sigs = np.full((n_a_g, n_cols_with_glob), '', dtype=object)
+
+    glob_sub = global_tt[(global_tt['dataset'] == ds_name) &
+                         (global_tt['contrast'] == contrast)]
+    for _, row in glob_sub.iterrows():
+        ct = row['cell_type']
+        if ct in ai_map:
+            full_mat[ai_map[ct], glob_col] = row['logFC']
             if row['adj.P.Val'] < FDR_THRESHOLD:
-                sigs.loc[a, b] = '*'
+                full_sigs[ai_map[ct], glob_col] = '*'
             elif row['P.Value'] < NOMINAL_THRESHOLD:
-                sigs.loc[a, b] = '•'
+                full_sigs[ai_map[ct], glob_col] = '•'
 
-        im = ax.pcolormesh(
-            mat.values, cmap='PRGn', vmin=vmin, vmax=vmax,
-            edgecolors='lightgray', linewidth=0.3)
-        last_im = im
-        for i in range(n_a):
-            for j in range(n_b):
-                if sigs.iat[i, j]:
-                    ax.text(j + 0.5, i + 0.5, sigs.iat[i, j],
-                            ha='center', va='center',
-                            color='white', fontsize=5, fontweight='bold')
+    local_sub = local_tt[
+        (local_tt['dataset'] == ds_name) &
+        (local_tt['contrast'] == contrast)]
+    if not local_sub.empty:
+        mat_raw = pd.DataFrame(np.nan, index=display_a, columns=display_b)
+        sigs_raw = pd.DataFrame('', index=display_a, columns=display_b)
+        for _, row in local_sub.iterrows():
+            a, b = row['cell_type_a'], row['cell_type_b']
+            if a not in mat_raw.index or b not in mat_raw.columns:
+                continue
+            mat_raw.loc[a, b] = row['logFC']
+            if row['adj.P.Val'] < FDR_THRESHOLD:
+                sigs_raw.loc[a, b] = '*'
+            elif row['P.Value'] < NOMINAL_THRESHOLD:
+                sigs_raw.loc[a, b] = '•'
+        for ct_a in display_a:
+            for ct_b in display_b:
+                full_mat[ai_map[ct_a], local_offset + bi_map[ct_b]] = \
+                    mat_raw.loc[ct_a, ct_b]
+                full_sigs[ai_map[ct_a], local_offset + bi_map[ct_b]] = \
+                    sigs_raw.loc[ct_a, ct_b]
 
-        ax.set_xlim(0, n_b)
-        ax.set_ylim(n_a, 0)
-        ax.set_aspect('equal')
-        ax.set_xticks(np.arange(n_b) + 0.5)
-        ax.set_yticks(np.arange(n_a) + 0.5)
-        ax.set_xticklabels(b_labels, rotation=90, ha='center', fontsize=5)
-        if ci == 0:
-            ax.set_yticklabels(a_labels, fontsize=5)
-        else:
-            ax.set_yticklabels([])
-        ax.tick_params(length=0, pad=2)
+    im = ax.pcolormesh(full_mat, cmap='PRGn', vmin=vmin, vmax=vmax)
+    last_im = im
 
-        if di == 0:
-            ax.set_title(contrast_titles[contrast], fontsize=8, pad=4)
-        if ci == 0:
-            ax.annotate(ds_name, xy=(0, 0.5),
-                        xycoords='axes fraction', xytext=(-5, 0),
-                        textcoords='offset points', rotation=90,
-                        ha='right', va='center', fontsize=9,
-                        fontweight='bold')
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.4)
+    for i in range(n_a_g):
+        if a_gapped[i] is None:
+            continue
+        if not np.isnan(full_mat[i, glob_col]):
+            ax.add_patch(plt.Rectangle(
+                (glob_col, i), 1, 1, fill=False,
+                edgecolor='black', linewidth=0.15))
+        if full_sigs[i, glob_col]:
+            ax.text(glob_col + 0.5, i + 0.5, full_sigs[i, glob_col],
+                    ha='center', va='center',
+                    color='white', fontsize=3.5, fontweight='bold')
+        for j in range(n_b_g):
+            if b_gapped[j] is None:
+                continue
+            jj = local_offset + j
+            ax.add_patch(plt.Rectangle(
+                (jj, i), 1, 1, fill=False,
+                edgecolor='black', linewidth=0.15))
+            if full_sigs[i, jj]:
+                ax.text(jj + 0.5, i + 0.5, full_sigs[i, jj],
+                        ha='center', va='center',
+                        color='white', fontsize=3.5, fontweight='bold')
+
+    _draw_block_borders(ax, row_segs, [(glob_col, glob_col + 1)])
+    shifted_col_segs = [(local_offset + c0, local_offset + c1)
+                        for c0, c1 in col_segs_local]
+    _draw_block_borders(ax, row_segs, shifted_col_segs)
+
+    ax.set_xlim(0, n_cols_with_glob)
+    ax.set_ylim(n_a_g, 0)
+    ax.set_aspect('equal')
+
+    x_ticks = [glob_col + 0.5] + [local_offset + j + 0.5
+                                    for j in range(n_b_g)]
+    x_labels = ['Global\nproportions'] + b_labels
+    ax.set_xticks(x_ticks)
+    ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=3.5)
+    ax.set_yticks(np.arange(n_a_g) + 0.5)
+    if pi == 0:
+        ax.set_yticklabels(a_labels, fontsize=3.5)
+        ax.set_ylabel('Center cell type', fontsize=6, labelpad=3)
+    else:
+        ax.set_yticklabels([])
+    ax.tick_params(length=0, pad=1)
+    ax.set_title(title, fontsize=6, pad=6)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
 if last_im is not None:
-    cbar = fig.colorbar(last_im, ax=axes, shrink=0.3, pad=0.02,
-                        aspect=20, label='logFC')
-    cbar.ax.tick_params(labelsize=6)
+    cbar = fig.colorbar(last_im, ax=axes, shrink=0.25,
+                        pad=0.015, aspect=12, label='logFC')
+    cbar.ax.tick_params(labelsize=5)
+    cbar.set_label('logFC', fontsize=6)
 
 plt.savefig(
     f'{working_dir}/figures/proximity_local_heatmap.png',

@@ -34,8 +34,6 @@ datasets = {
     },
 }
 
-traits_selected = ['MDD', 'Neuroticism', 'ADHD', 'Autism', 'PTSD']
-
 gsmap_input = f'{working_dir}/input/gsmap'
 gwas_dir = f'{gsmap_input}/GWAS'
 gwas_formatted_dir = f'{gsmap_input}/GWAS_formatted'
@@ -235,7 +233,6 @@ for name in datasets:
             if n_done >= len(all_traits):
                 print(f'[{name}] {cond} quick_mode done ({n_done} traits)')
                 continue
-
         subprocess.run(
             f"gsmap quick_mode "
             f"--workdir '{output}' "
@@ -274,7 +271,7 @@ for name, cfg in datasets.items():
 
     cell_types = set(adatas[name].obs[cell_type_col].unique())
 
-    ct = cauchy_table(output, conditions, cell_types, traits_selected)
+    ct = cauchy_table(output, conditions, cell_types)
     if not ct.empty:
         ct.to_csv(f'{out_dir}/gsmap_cauchy_table.csv', index=False)
         print(f'[{name}] cauchy table: {ct.shape[0]} rows')

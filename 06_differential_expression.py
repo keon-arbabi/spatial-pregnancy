@@ -23,7 +23,9 @@ warnings.filterwarnings('ignore')
 from single_cell import SingleCell
 
 working_dir = '/home/karbabi/spatial-pregnancy'
-cell_type_col = 'subclass'
+cell_type_col = 'class'
+de_suffix = f'_{cell_type_col}' if cell_type_col != 'subclass' else ''
+
 REF_PCT_THRESHOLD = 5
 
 datasets = {
@@ -227,10 +229,10 @@ de_results = de_results.with_columns(
 )
 
 os.makedirs(f'{working_dir}/output', exist_ok=True)
-de_results.write_csv(f'{working_dir}/output/de_results.csv')
+de_results.write_csv(f'{working_dir}/output/de_results{de_suffix}.csv')
 de_results\
     .filter(pl.col('FDR') < 0.10)\
-    .write_csv(f'{working_dir}/output/de_results_sig.csv')
+    .write_csv(f'{working_dir}/output/de_results_sig{de_suffix}.csv')
 
 for name in datasets:
     df = de_results.filter(pl.col('dataset') == name)
@@ -257,7 +259,7 @@ seismic_cmap = plt.get_cmap('seismic')
 UP_COLOR = seismic_cmap(0.9)
 DN_COLOR = seismic_cmap(0.1)
 
-de_fig = pl.read_csv(f'{working_dir}/output/de_results.csv')
+de_fig = pl.read_csv(f'{working_dir}/output/de_results{de_suffix}.csv')
 
 def get_type(ct):
     if 'Glut' in ct:
@@ -696,7 +698,7 @@ del adata_xn_norm, xn_ct_subsets
 #endregion
 #region pathway enrichment (fgsea) #############################################
 
-de_for_gsea = pl.read_csv(f'{working_dir}/output/de_results.csv')\
+de_for_gsea = pl.read_csv(f'{working_dir}/output/de_results{de_suffix}.csv')\
     .filter(pl.col('dataset').is_in(['slidetags', 'xenium']))
 to_r(de_for_gsea, 'de_results_r')
 to_r(working_dir, 'working_dir')
@@ -824,7 +826,7 @@ pathway_results = to_py('fgsea_results')
 
 os.makedirs(f'{working_dir}/output', exist_ok=True)
 pathway_results.write_parquet(
-    f'{working_dir}/output/pathway_results_gsea.parquet')
+    f'{working_dir}/output/pathway_results_gsea{de_suffix}.parquet')
 
 available_genes = de_for_gsea \
     .filter(pl.col('FDR') < 0.10) \
@@ -849,7 +851,7 @@ pathway_results_sig = pathway_results \
     .drop(['leadingEdge', 'leadingEdge_filtered', 'available_genes'])
 
 pathway_results_sig.write_csv(
-    f'{working_dir}/output/pathway_results_gsea_sig.csv')
+    f'{working_dir}/output/pathway_results_gsea_sig{de_suffix}.csv')
 
 n_sig = pathway_results_sig.height
 n_ct = pathway_results_sig['cell_type'].n_unique()
@@ -864,7 +866,7 @@ for ds in pathway_results_sig['dataset'].unique().to_list():
 #endregion
 #region pathway heatmaps #######################################################
 
-pw_all = pl.read_parquet(f'{working_dir}/output/pathway_results_gsea.parquet')
+pw_all = pl.read_parquet(f'{working_dir}/output/pathway_results_gsea{de_suffix}.parquet')
 
 HEATMAP_BLOCKS = [
     {

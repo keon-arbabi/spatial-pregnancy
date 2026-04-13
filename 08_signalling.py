@@ -1,6 +1,7 @@
 #region imports and setup ######################################################
 
 import os
+import sys
 import pickle as pkl
 import warnings
 import numpy as np
@@ -11,7 +12,7 @@ from matplotlib.patches import Circle
 from scipy.spatial.distance import pdist
 os.environ['R_HOME'] = os.path.expanduser('~/miniforge3/lib/R')
 from ryp import r, to_r, to_py
-
+sys.path.insert(0, os.path.expanduser('~'))
 from single_cell import SingleCell
 
 warnings.filterwarnings('ignore')
@@ -195,43 +196,41 @@ for name, cfg in datasets.items():
         sobj_2 <- subset(sobj, subset = condition == cond_treat)
         sobj_1[[cell_type_col]] <- droplevels(sobj_1[[cell_type_col]])
         sobj_2[[cell_type_col]] <- droplevels(sobj_2[[cell_type_col]])
+        rm(sobj); gc()
 
         sf <- data.frame(ratio = conversion_factor,
                          tol = spot_size / 2)
-
-        cobj_1 <- createCellChat(
-            object = sobj_1, group.by = cell_type_col, assay = "RNA",
-            datatype = "spatial",
-            coordinates = spatial_locs[colnames(sobj_1), ],
-            spatial.factors = sf)
-        cobj_2 <- createCellChat(
-            object = sobj_2, group.by = cell_type_col, assay = "RNA",
-            datatype = "spatial",
-            coordinates = spatial_locs[colnames(sobj_2), ],
-            spatial.factors = sf)
-
-        cobj_1@DB <- CellChatDB_ext
-        cobj_2@DB <- CellChatDB_ext
-
-        cobj_1 <- subsetData(cobj_1)
-        cobj_2 <- subsetData(cobj_2)
-
-        cobj_1 <- identifyOverExpressedGenes(cobj_1)
-        cobj_1 <- identifyOverExpressedInteractions(cobj_1)
-        cobj_2 <- identifyOverExpressedGenes(cobj_2)
-        cobj_2 <- identifyOverExpressedInteractions(cobj_2)
-
-        cobj_1 <- computeCommunProb(
-            cobj_1, type = "truncatedMean", trim = 0.1,
-            distance.use = TRUE, interaction.range = interaction_range,
-            scale.distance = scale_distance, contact.range = contact_range)
-        cobj_2 <- computeCommunProb(
-            cobj_2, type = "truncatedMean", trim = 0.1,
-            distance.use = TRUE, interaction.range = interaction_range,
-            scale.distance = scale_distance, contact.range = contact_range)
-
-        saveRDS(list(cobj_1, cobj_2), file = rds_path)
+        cc_params <- list(type = "truncatedMean", trim = 0.1,
+                          distance.use = TRUE,
+                          interaction.range = interaction_range,
+                          scale.distance = scale_distance,
+                          contact.range = contact_range)
         ''')
+
+        for cond_label, sobj_name in [('ctrl', 'sobj_1'),
+                                       ('treat', 'sobj_2')]:
+            to_r(cond_label, 'cond_label')
+            to_r(sobj_name, 'sobj_name')
+            r(f'''
+            cobj <- createCellChat(
+                object = get(sobj_name), group.by = cell_type_col,
+                assay = "RNA", datatype = "spatial",
+                coordinates = spatial_locs[colnames(get(sobj_name)), ],
+                spatial.factors = sf)
+            cobj@DB <- CellChatDB_ext
+            cobj <- subsetData(cobj)
+            cobj <- identifyOverExpressedGenes(cobj)
+            cobj <- identifyOverExpressedInteractions(cobj)
+            cobj <- do.call(computeCommunProb, c(list(object = cobj),
+                            cc_params))
+            cat(sprintf("  [%s] prob sum: %.6f, nonzero: %d\\n",
+                cond_label, sum(cobj@net$prob, na.rm=TRUE),
+                sum(cobj@net$prob > 0, na.rm=TRUE)))
+            assign(paste0("cobj_", cond_label), cobj)
+            rm(cobj); gc()
+            ''')
+
+        r('saveRDS(list(cobj_ctrl, cobj_treat), file = rds_path)')
         print(f'[{name}] {contrast}: saved {rds_path}')
 
 #endregion
@@ -309,8 +308,10 @@ for name, cfg in datasets.items():
 
         cobj_1 <- filterCommunication(cobj_1, min.cells = 10)
         cobj_2 <- filterCommunication(cobj_2, min.cells = 10)
-        cobj_1 <- computeCommunProbPathway(cobj_1)
-        cobj_2 <- computeCommunProbPathway(cobj_2)
+        cobj_1 <- tryCatch(computeCommunProbPathway(cobj_1),
+                           error = function(e) cobj_1)
+        cobj_2 <- tryCatch(computeCommunProbPathway(cobj_2),
+                           error = function(e) cobj_2)
 
         prob1 <- cobj_1@netP$prob
         prob2 <- cobj_2@netP$prob
@@ -320,37 +321,61 @@ for name, cfg in datasets.items():
         all_ct <- sort(unique(c(
             levels(cobj_1@idents), levels(cobj_2@idents))))
 
-        pad_pw <- function(prob, pw, ct) {
-            m <- matrix(0, length(ct), length(ct),
-                        dimnames = list(ct, ct))
-            if (pw %in% dimnames(prob)[[3]]) {
-                p <- prob[, , pw]
-                m[rownames(p), colnames(p)] <- p
-            }
-            m
-        }
+        cat(sprintf("[R DIAG] prob1 null: %s, prob2 null: %s\n",
+            is.null(prob1), is.null(prob2)))
+        if (!is.null(prob1)) cat(sprintf(
+            "[R DIAG] prob1 dim: %s, pathways: %d\n",
+            paste(dim(prob1), collapse="x"), length(pw1)))
+        if (!is.null(prob2)) cat(sprintf(
+            "[R DIAG] prob2 dim: %s, pathways: %d\n",
+            paste(dim(prob2), collapse="x"), length(pw2)))
+        cat(sprintf("[R DIAG] all_pw: %d, all_ct: %d\n",
+            length(all_pw), length(all_ct)))
 
-        pw_diffs <- list()
-        for (pw in all_pw) {
-            m1 <- if (!is.null(prob1)) pad_pw(prob1, pw, all_ct)
-                  else matrix(0, length(all_ct), length(all_ct),
-                              dimnames = list(all_ct, all_ct))
-            m2 <- if (!is.null(prob2)) pad_pw(prob2, pw, all_ct)
-                  else matrix(0, length(all_ct), length(all_ct),
-                              dimnames = list(all_ct, all_ct))
-            d <- reshape2::melt(m2 - m1, value.name = "prob_diff")
-            colnames(d)[1:2] <- c("sender", "receiver")
-            d$pathway <- pw
-            pw_diffs[[pw]] <- d
+        pw_df <- data.frame(sender = character(),
+                            receiver = character(),
+                            prob_diff = numeric(),
+                            pathway = character(),
+                            contrast = character(),
+                            stringsAsFactors = FALSE)
+
+        if (length(all_pw) > 0 && length(all_ct) > 0) {
+            pad_pw <- function(prob, pw, ct) {
+                m <- matrix(0, length(ct), length(ct),
+                            dimnames = list(ct, ct))
+                if (!is.null(prob) && pw %in% dimnames(prob)[[3]]) {
+                    p <- prob[, , pw]
+                    if (is.matrix(p)) {
+                        m[rownames(p), colnames(p)] <- p
+                    } else {
+                        m[names(p)[1], names(p)[2]] <- p
+                    }
+                }
+                m
+            }
+
+            pw_diffs <- list()
+            for (pw in all_pw) {
+                m1 <- pad_pw(prob1, pw, all_ct)
+                m2 <- pad_pw(prob2, pw, all_ct)
+                d <- reshape2::melt(m2 - m1, value.name = "prob_diff")
+                colnames(d)[1:2] <- c("sender", "receiver")
+                d$pathway <- pw
+                d$contrast <- paste0(cond_treat, "_vs_", cond_ctrl)
+                pw_diffs[[pw]] <- d
+            }
+            pw_df <- do.call(rbind, pw_diffs)
+            cat(sprintf("[R DIAG] pw_df: %d rows\n", nrow(pw_df)))
         }
-        pw_df <- do.call(rbind, pw_diffs)
-        pw_df$contrast <- paste0(cond_treat, "_vs_", cond_ctrl)
         ''')
         df = to_py('pw_df', format='pandas')
-        df['dataset'] = name
-        pathway_diff_frames.append(df)
-        n_pw = df['pathway'].nunique()
-        print(f'[{name}] {contrast}: {n_pw} pathways')
+        if df is not None and len(df) > 0:
+            df['dataset'] = name
+            pathway_diff_frames.append(df)
+            n_pw = df['pathway'].nunique()
+            print(f'[{name}] {contrast}: {n_pw} pathways')
+        else:
+            print(f'[{name}] {contrast}: no pathways detected')
 
 pathway_diff = pd.concat(pathway_diff_frames, ignore_index=True)
 pathway_diff.to_csv(
