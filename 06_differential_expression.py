@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 from single_cell import SingleCell
 
 working_dir = '/home/karbabi/spatial-pregnancy'
-cell_type_col = 'class'
+cell_type_col = 'subclass'
 de_suffix = f'_{cell_type_col}' if cell_type_col != 'subclass' else ''
 
 REF_PCT_THRESHOLD = 5

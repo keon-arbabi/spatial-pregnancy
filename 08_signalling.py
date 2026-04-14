@@ -22,8 +22,8 @@ cell_type_col = 'subclass'
 cellphonedb_path = f'{working_dir}/input/cellphonedb'
 ortholog_cache = f'{cellphonedb_path}/gprofiler_orthologs.pkl'
 
-SCALE_DISTANCE = 100
-CONTACT_RANGE = 30
+SCALE_DISTANCE = 0.2
+CONTACT_RANGE = 10
 SPOT_SIZE = 15
 
 datasets = {
@@ -67,14 +67,16 @@ for name, cfg in datasets.items():
 #region build extended cellchat database ######################################
 
 r('''
+options(future.globals.maxSize = Inf)
 suppressPackageStartupMessages({
-    library(CellChat)
+    library(SpatialCellChat)
     library(NeuronChat)
     library(dplyr)
     library(purrr)
     library(Seurat)
     library(tidyverse)
 })
+
 ''')
 
 with open(ortholog_cache, 'rb') as f:
@@ -118,8 +120,16 @@ neuron_chat_formatted <- purrr::map_dfr(
 
 required_cols <- colnames(base_interaction)
 for (col in required_cols) {
-    if (!col %in% names(cpdb_formatted)) cpdb_formatted[[col]] <- ''
-    if (!col %in% names(neuron_chat_formatted)) neuron_chat_formatted[[col]] <- ''
+    cls <- class(base_interaction[[col]])
+    if (!col %in% names(cpdb_formatted))
+        cpdb_formatted[[col]] <- as(NA, cls)
+    else
+        cpdb_formatted[[col]] <- as(cpdb_formatted[[col]], cls)
+    if (!col %in% names(neuron_chat_formatted))
+        neuron_chat_formatted[[col]] <- as(NA, cls)
+    else
+        neuron_chat_formatted[[col]] <- as(
+            neuron_chat_formatted[[col]], cls)
 }
 
 final_interactions <- bind_rows(
@@ -171,22 +181,32 @@ for name, cfg in datasets.items():
         adata_sub = adata_sub[
             adata_sub.obs['condition'].isin([treat, ctrl])].copy()
         adata_sub.obs = adata_sub.obs[
-            ['sample', 'condition', cell_type_col,
-             'x_raw', 'y_raw', 'x_affine', 'y_affine']]
+            ['sample', 'condition', cell_type_col, 'x_affine', 'y_affine']]
         adata_sub.uns, adata_sub.obsm, adata_sub.obsp = {}, {}, {}
 
         SingleCell(adata_sub).to_seurat('sobj', v3=True)
+        r('''
+        .gad_orig <- getFromNamespace("GetAssayData.Seurat", "SeuratObject")
+        assignInNamespace("GetAssayData.Seurat", function(object,
+                assay = NULL, slot = NULL, layer = NULL, ...) {
+            if (!is.null(slot) && is.null(layer)) {
+                layer <- slot
+                slot <- NULL
+            }
+            .gad_orig(object = object, assay = assay, layer = layer, ...)
+        }, ns = "SeuratObject")
+        ''')
         spatial_locs = adata_sub.obs[['x_affine', 'y_affine']]
         to_r(spatial_locs, 'spatial_locs', format='data.frame')
-        to_r(ctrl, 'cond_ctrl')
-        to_r(treat, 'cond_treat')
         to_r(cell_type_col, 'cell_type_col')
         to_r(conversion_factor, 'conversion_factor')
-        to_r(rds_path, 'rds_path')
         to_r(cfg['interaction_range'], 'interaction_range')
         to_r(SCALE_DISTANCE, 'scale_distance')
         to_r(CONTACT_RANGE, 'contact_range')
         to_r(SPOT_SIZE, 'spot_size')
+        to_r(rds_path, 'rds_path')
+        to_r(ctrl, 'cond_ctrl')
+        to_r(treat, 'cond_treat')
 
         r('''
         sobj$samples <- sobj$sample
@@ -200,37 +220,47 @@ for name, cfg in datasets.items():
 
         sf <- data.frame(ratio = conversion_factor,
                          tol = spot_size / 2)
-        cc_params <- list(type = "truncatedMean", trim = 0.1,
-                          distance.use = TRUE,
-                          interaction.range = interaction_range,
-                          scale.distance = scale_distance,
-                          contact.range = contact_range)
-        ''')
 
-        for cond_label, sobj_name in [('ctrl', 'sobj_1'),
-                                       ('treat', 'sobj_2')]:
-            to_r(cond_label, 'cond_label')
-            to_r(sobj_name, 'sobj_name')
-            r(f'''
-            cobj <- createCellChat(
-                object = get(sobj_name), group.by = cell_type_col,
+        run_cellchat <- function(sobj_sub, label) {
+            cobj <- createSpatialCellChat(
+                object = sobj_sub, group.by = cell_type_col,
                 assay = "RNA", datatype = "spatial",
-                coordinates = spatial_locs[colnames(get(sobj_name)), ],
+                coordinates = spatial_locs[colnames(sobj_sub), ],
                 spatial.factors = sf)
             cobj@DB <- CellChatDB_ext
             cobj <- subsetData(cobj)
-            cobj <- identifyOverExpressedGenes(cobj)
-            cobj <- identifyOverExpressedInteractions(cobj)
-            cobj <- do.call(computeCommunProb, c(list(object = cobj),
-                            cc_params))
-            cat(sprintf("  [%s] prob sum: %.6f, nonzero: %d\\n",
-                cond_label, sum(cobj@net$prob, na.rm=TRUE),
-                sum(cobj@net$prob > 0, na.rm=TRUE)))
-            assign(paste0("cobj_", cond_label), cobj)
-            rm(cobj); gc()
-            ''')
+            cobj <- preProcessing(cobj)
+            cobj <- identifyOverExpressedGenes(
+                cobj, selection.method = "meringue", do.grid = FALSE)
+            cobj <- identifyOverExpressedInteractions(
+                cobj, variable.both = FALSE)
 
-        r('saveRDS(list(cobj_ctrl, cobj_treat), file = rds_path)')
+            cat(sprintf("  [%s] pre-computeCommunProb: data.signaling dim %s, LRsig %d pairs\\n",
+                label, paste(dim(cobj@data.signaling), collapse="x"),
+                nrow(cobj@LR$LRsig)))
+
+            cobj <- computeCommunProb(
+                cobj, type = "truncatedMean", trim = 0.1,
+                distance.use = TRUE,
+                interaction.range = interaction_range,
+                scale.distance = scale_distance,
+                contact.dependent = TRUE,
+                contact.range = contact_range)
+            cobj <- filterProbability(cobj)
+
+            cat(sprintf("  [%s] prob sum: %.6f, nonzero: %d\\n",
+                label, sum(cobj@net$prob, na.rm=TRUE),
+                sum(cobj@net$prob > 0, na.rm=TRUE)))
+            return(cobj)
+        }
+
+        cobj_1 <- run_cellchat(sobj_1, cond_ctrl)
+        rm(sobj_1); gc()
+        cobj_2 <- run_cellchat(sobj_2, cond_treat)
+        rm(sobj_2); gc()
+
+        saveRDS(list(cobj_1, cobj_2), file = rds_path)
+        ''')
         print(f'[{name}] {contrast}: saved {rds_path}')
 
 #endregion
@@ -257,7 +287,7 @@ for name, cfg in datasets.items():
         cobj_1 <- aggregateNet(cobj_1)
         cobj_2 <- aggregateNet(cobj_2)
 
-        cc <- mergeCellChat(list(cobj_1, cobj_2),
+        cc <- mergeSpatialCellChat(list(cobj_1, cobj_2),
                             add.names = c(cond_ctrl, cond_treat))
 
         g1_w <- cc@net[[cond_ctrl]]$weight
@@ -389,6 +419,10 @@ plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 300
 
+from scipy.spatial import KDTree
+from matplotlib.colors import Normalize
+from matplotlib import cm
+
 n_exemplars = 5
 fig, axes = plt.subplots(
     len(datasets), n_exemplars + 1,
@@ -402,13 +436,12 @@ for row, (name, cfg) in enumerate(datasets.items()):
     sub = adata.obs[adata.obs['sample'] == sample]
     coords_raw = sub[['x_raw', 'y_raw']].to_numpy(dtype=np.float64)
     coords_aff = sub[['x_affine', 'y_affine']].to_numpy(dtype=np.float64)
-
-    sample_idx = rng.choice(min(1000, len(coords_raw)), size=min(1000, len(coords_raw)),
-                            replace=False)
+    sample_idx = rng.choice(min(1000, len(coords_raw)),
+                            size=min(1000, len(coords_raw)), replace=False)
     cf = float(np.median(pdist(coords_raw[sample_idx])) /
                np.median(pdist(coords_aff[sample_idx])))
     r_affine = cfg['interaction_range'] / cf
-
+    r_contact = CONTACT_RANGE / cf
     ax = axes[row, 0]
     ax.scatter(coords_aff[:, 0], coords_aff[:, 1], s=0.5, c='lightgray',
                alpha=0.5, linewidth=0, rasterized=True)
@@ -417,19 +450,21 @@ for row, (name, cfg) in enumerate(datasets.items()):
     ax.scatter(exemplars[:, 0], exemplars[:, 1], s=20, c='red', zorder=5)
     for cell in exemplars:
         ax.add_patch(Circle(cell, r_affine, fill=False, color='red',
-                            linewidth=1, linestyle='--'))
+                            linewidth=0.8, linestyle='--'))
+        ax.add_patch(Circle(cell, r_contact, fill=False, color='orange',
+                            linewidth=0.8, linestyle='-'))
     ax.set_aspect('equal')
     ax.set_title(f'{name} — {sample}\n'
-                 f'range={cfg["interaction_range"]}μm '
-                 f'(affine r={r_affine:.4f})',
-                 fontsize=9)
+                 f'interaction={cfg["interaction_range"]}μm, '
+                 f'contact={CONTACT_RANGE}μm\n'
+                 f'scale.distance={SCALE_DISTANCE}',
+                 fontsize=7)
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-
-    from scipy.spatial import KDTree
     tree = KDTree(coords_aff)
+    cmap = cm.Blues
     for col, (idx, cell) in enumerate(zip(exemplar_idx, exemplars), start=1):
         neighbor_idx = tree.query_ball_point(cell, r=r_affine)
         neighbor_idx = [i for i in neighbor_idx if i != idx]
@@ -441,14 +476,19 @@ for row, (name, cfg) in enumerate(datasets.items()):
                    s=6, c='lightgray', alpha=0.7, linewidth=0,
                    rasterized=True)
         if neighbor_idx:
-            ax.scatter(coords_aff[neighbor_idx, 0],
-                       coords_aff[neighbor_idx, 1],
-                       s=10, c='steelblue', alpha=0.85, linewidth=0,
-                       rasterized=True)
+            nb_coords = coords_aff[neighbor_idx]
+            dists_aff = np.sqrt(((nb_coords - cell) ** 2).sum(axis=1))
+            dists_um = dists_aff * cf
+            weights = np.exp(-SCALE_DISTANCE * dists_um)
+            colors = cmap(Normalize(0, 1)(weights))
+            ax.scatter(nb_coords[:, 0], nb_coords[:, 1],
+                       s=10, c=colors, linewidth=0, rasterized=True)
         ax.scatter(cell[0], cell[1], s=80, c='red', zorder=5,
                    edgecolors='white', linewidths=1)
         ax.add_patch(Circle(cell, r_affine, fill=False, color='red',
-                            linewidth=1.5, linestyle='--'))
+                            linewidth=1.2, linestyle='--'))
+        ax.add_patch(Circle(cell, r_contact, fill=False, color='orange',
+                            linewidth=1.2, linestyle='-'))
         ax.set_xlim(cell[0] - zoom, cell[0] + zoom)
         ax.set_ylim(cell[1] - zoom, cell[1] + zoom)
         ax.set_aspect('equal')

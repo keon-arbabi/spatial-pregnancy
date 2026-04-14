@@ -1,13 +1,27 @@
 #region imports and setup #######################################################
 
+import os
+import sys
+os.environ.setdefault(
+    'CUPY_CACHE_DIR', '/tmp/cupy_cache')
+os.environ.setdefault(
+    'CUDA_PATH', os.path.join(os.path.dirname(os.__file__),
+    'site-packages', 'nvidia', 'cuda_runtime'))
+import torch
+import scvi
 import numpy as np
 import scanpy as sc
+import scipy.sparse as sp
+os.environ['R_HOME'] = '/home/karbabi/miniforge3/lib/R'
+from ryp import r, to_r, to_py
+sys.path.insert(0, os.path.expanduser('~'))
+from single_cell import SingleCell
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 datasets = {
-    'merfish': 'sample',
     'slidetags': 'sample',
     'xenium': 'sample_rep',
+    'merfish': 'sample',
 }
 thr = dict(
     subclass_confidence=0.6,
@@ -18,16 +32,123 @@ thr = dict(
 min_cells_per_sample = 10
 
 #endregion
-#region filter ##################################################################
+#region decontamination ########################################################
+
+def print_correction(adata, name):
+    cf = adata.obs['correction_fraction']
+    print(f'[{name}] correction: mean={cf.mean():.1%}, '
+          f'median={cf.median():.1%}')
+    for cls in sorted(adata.obs['class'].unique()):
+        c = cf[adata.obs['class'] == cls]
+        print(f'  {cls}: {c.mean():.1%} ({c.shape[0]:,} cells)')
+
+# SoupX for slidetags
+
+def run_soupx(adata, sample_col, name):
+    r('''
+    suppressPackageStartupMessages(library(SoupX))
+    suppressPackageStartupMessages(library(Matrix))
+    ''')
+    samples = adata.obs[sample_col].unique()
+    corrected_chunks = []
+    for sample in samples:
+        mask = adata.obs[sample_col] == sample
+        a_sub = adata[mask].copy()
+        SingleCell(a_sub).skip_qc().to_sce('sce')
+        to_r(str(sample), 'sample_name')
+        r('''
+        toc = counts(sce)
+        clusters = factor(colData(sce)$subclass)
+        # no raw/unfiltered matrix: estimate soup profile from filtered cells
+        sc = SoupChannel(toc, toc, calcSoupProfile=FALSE)
+        soupProf = data.frame(
+            row.names=rownames(toc),
+            est=rowSums(toc) / sum(toc),
+            counts=rowSums(toc))
+        sc = setSoupProfile(sc, soupProf)
+        sc = setClusters(sc, clusters)
+        sc = autoEstCont(sc, doPlot=FALSE)
+        cat(sprintf("[%s] SoupX rho=%.3f\\n", sample_name, sc$fit$rhoEst))
+        adj = adjustCounts(sc, roundToInt=TRUE)
+        ''')
+        adj = to_py('adj').T
+        if sp.issparse(adj):
+            adj = adj.tocsr()
+        corrected_chunks.append(adj)
+        r('rm(sce, toc, sc, soupProf, clusters, adj); gc()')
+
+    corrected = sp.vstack(corrected_chunks, format='csr').astype(np.float32)
+    assert (corrected.data >= 0).all() and \
+        np.allclose(corrected.data, corrected.data.astype(int))
+    orig_total = np.array(adata.X.sum(axis=1)).ravel()
+    corr_total = np.array(corrected.sum(axis=1)).ravel()
+    adata.obs['correction_fraction'] = np.where(
+        orig_total > 0, 1 - corr_total / orig_total, 0).astype(np.float32)
+    adata.X = corrected
+    assert sp.issparse(adata.X) and adata.X.dtype == np.float32
+    print_correction(adata, name)
+    return adata
+
+# RESOLVI for xenium and merfish
+
+def run_resolvi(adata, sample_col, name):
+    torch.set_float32_matmul_precision('medium')
+    adata.obsm['X_spatial'] = adata.obs[['x_affine', 'y_affine']].values.astype(
+        np.float32)
+    scvi.external.RESOLVI.setup_anndata(
+        adata,
+        layer='counts',
+        batch_key=sample_col,
+        labels_key='subclass',
+        prepare_data=True,
+        prepare_data_kwargs={'n_neighbors': 20, 'spatial_rep': 'X_spatial'})
+    model_dir = f'{working_dir}/output/{name}/resolvi_model'
+    if os.path.exists(model_dir):
+        print(f'[{name}] loading cached RESOLVI model')
+        model = scvi.external.RESOLVI.load(model_dir, adata=adata)
+    else:
+        model = scvi.external.RESOLVI(
+            adata, n_latent=10, n_hidden=32, mixture_k=100,
+            semisupervised=True)
+        model.train(max_epochs=100, lr=1e-3)
+        model.save(model_dir, overwrite=True)
+    corrected = model.get_normalized_expression(
+        library_size=None, n_samples=30, batch_size=512,
+        return_numpy=True)
+    np.round(corrected, out=corrected)
+    corrected = sp.csr_array(corrected.astype(np.float32))
+    corrected.eliminate_zeros()
+    assert (corrected.data >= 0).all() and \
+        np.allclose(corrected.data, corrected.data.astype(int))
+    orig_total = np.array(adata.X.sum(axis=1)).ravel()
+    corr_total = np.array(corrected.sum(axis=1)).ravel()
+    adata.obs['correction_fraction'] = np.where(
+        orig_total > 0, 1 - corr_total / orig_total, 0).astype(np.float32)
+    adata.X = corrected
+    assert sp.issparse(adata.X) and adata.X.dtype == np.float32
+    print_correction(adata, name)
+    del adata.obsm['X_spatial'], adata.obsm['index_neighbor'], \
+        adata.obsm['distance_neighbor']
+    return adata
+
+#endregion
+#region process ################################################################
 
 for name, sample_col in datasets.items():
     in_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
     out_path = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
     adata = sc.read_h5ad(in_path)
     n_total = len(adata)
-    obs = adata.obs
     print(f'\n[{name}] {n_total:,} cells')
 
+    # decontaminate before filtering
+    if name == 'slidetags':
+        adata = run_soupx(adata, sample_col, name)
+    else:
+        adata = run_resolvi(adata, sample_col, name)
+
+    # cell type confidence filtering
+    obs = adata.obs
     masks = {
         'subclass_confidence':
             obs['subclass_confidence'] >= thr['subclass_confidence'],
@@ -64,29 +185,4 @@ for name, sample_col in datasets.items():
     adata.write(out_path)
     print(f'[{name}] saved {out_path}')
 
-'''
-[merfish] 990,647 cells
-  drop subclass_confidence: 199,817 (20.2%)
-  drop subclass_margin: 149,008 (15.0%)
-  drop min_cos_dist: 57,259 (5.8%)
-  drop n_spatial_candidates: 8 (0.0%)
-  total dropped: 241,794 (24.4%)
-  keep: 748,853 (75.6%)
-
-[slidetags] 87,491 cells
-  drop subclass_confidence: 9,754 (11.1%)
-  drop subclass_margin: 7,626 (8.7%)
-  drop min_cos_dist: 8,237 (9.4%)
-  drop n_spatial_candidates: 299 (0.3%)
-  total dropped: 16,062 (18.4%)
-  keep: 71,429 (81.6%)
-
-[xenium] 867,704 cells
-  drop subclass_confidence: 90,909 (10.5%)
-  drop subclass_margin: 72,974 (8.4%)
-  drop min_cos_dist: 27,073 (3.1%)
-  drop n_spatial_candidates: 123 (0.0%)
-  total dropped: 109,740 (12.6%)
-  keep: 757,964 (87.4%)
-'''
 #endregion

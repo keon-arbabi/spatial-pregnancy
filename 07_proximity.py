@@ -603,7 +603,7 @@ plt.close()
 
 local_tt = pd.read_csv(f'{working_dir}/output/proximity_local_diff.csv')
 
-DISPLAY_CAP = 20
+DISPLAY_CAP = 30
 type_order = ['Glut', 'Gaba', 'NN']
 sig_mask = local_tt['P.Value'] < NOMINAL_THRESHOLD
 exclude_cts = {'060 OT D3 Folh1 Gaba'}

@@ -131,25 +131,6 @@ def trait_associations(output_dir, conditions, contrasts, cell_types, traits):
             result.loc[valid, 'p_adj'] = p_adj
     return result
 
-def gwas_de_overlap(de_path, gwas_hits_path, logfc_threshold=0.5):
-    de = pl.read_csv(de_path)
-    hits = pl.read_csv(gwas_hits_path)
-    homolog = pl.read_csv(homolog_file, separator='\t', has_header=True)
-    hits_mouse = hits.join(
-        homolog.select(['HUMAN_GENE_SYM', 'MOUSE_GENE_SYM']),
-        left_on='Gene Name', right_on='HUMAN_GENE_SYM', how='left')
-    gwas_de = (de
-        .filter(pl.col('logFC').abs().gt(logfc_threshold))
-        .join(
-            hits_mouse.select([
-                'Gene Name', 'MOUSE_GENE_SYM', 'Z Statistic', 'P-value']),
-            left_on='gene', right_on='MOUSE_GENE_SYM', how='inner')
-        .sort('FDR'))
-    gwas_genes = (hits_mouse
-        .filter(pl.col('MOUSE_GENE_SYM').is_not_null())
-        ['MOUSE_GENE_SYM'].unique().to_list())
-    return gwas_de, hits_mouse, gwas_genes
-
 #endregion
 
 #region prep data ##############################################################
