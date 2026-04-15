@@ -22,7 +22,7 @@ cell_type_col = 'subclass'
 cellphonedb_path = f'{working_dir}/input/cellphonedb'
 ortholog_cache = f'{cellphonedb_path}/gprofiler_orthologs.pkl'
 
-SCALE_DISTANCE = 0.2
+SCALE_DISTANCE = None  # computed per dataset as conversion_factor / interaction_range
 CONTACT_RANGE = 10
 SPOT_SIZE = 15
 
@@ -156,35 +156,39 @@ print(f'Extended CellChat DB: {n_interactions} interactions')
 
 #endregion
 
-#region compute cellchat per dataset x contrast ################################
+#region compute cellchat per dataset x condition ###############################
 
 for name, cfg in datasets.items():
     adata = adatas[name]
-
     rng = np.random.default_rng(0)
-    sample_idx = rng.choice(adata.n_obs, size=min(1000, adata.n_obs),
-                            replace=False)
+    sample_idx = rng.choice(
+        adata.n_obs, size=min(1000, adata.n_obs), replace=False)
     raw = adata.obs.iloc[sample_idx][['x_raw', 'y_raw']].values
     aff = adata.obs.iloc[sample_idx][['x_affine', 'y_affine']].values
     conversion_factor = float(np.median(pdist(raw)) / np.median(pdist(aff)))
-    print(f'[{name}] conversion factor: {conversion_factor:.2f}')
+    scale_distance = conversion_factor / cfg['interaction_range']
+    print(f'[{name}] conversion factor: {conversion_factor:.2f}, '
+          f'scale.distance: {scale_distance:.4f}')
 
-    for treat, ctrl in cfg['contrasts']:
-        contrast = f'{treat}_vs_{ctrl}'
-        rds_path = (f'{working_dir}/output/{name}/'
-                    f'cellchat_{contrast}_{cell_type_col}.rds')
-        if os.path.exists(rds_path):
-            print(f'[{name}] {contrast}: cached {rds_path}')
+    cond_rds = {}
+    conditions = sorted({
+        c for pair in cfg['contrasts'] for c in pair})
+    for cond in conditions:
+        cond_path = (
+            f'{working_dir}/output/{name}/'
+            f'cellchat_cond_{cond}_{cell_type_col}.rds')
+        cond_rds[cond] = cond_path
+        if os.path.exists(cond_path):
+            print(f'[{name}] {cond}: cached {cond_path}')
             continue
 
-        adata_sub = adata.copy()
-        adata_sub = adata_sub[
-            adata_sub.obs['condition'].isin([treat, ctrl])].copy()
-        adata_sub.obs = adata_sub.obs[
+        adata_cond = adata[adata.obs['condition'] == cond].copy()
+        adata_cond.obs = adata_cond.obs[
             ['sample', 'condition', cell_type_col, 'x_affine', 'y_affine']]
-        adata_sub.uns, adata_sub.obsm, adata_sub.obsp = {}, {}, {}
+        adata_cond.uns, adata_cond.obsm, adata_cond.obsp = {}, {}, {}
 
-        SingleCell(adata_sub).to_seurat('sobj', v3=True)
+        SingleCell(adata_cond).to_seurat('sobj', v3=True)
+        # shim to avoid layer issues with seurat
         r('''
         .gad_orig <- getFromNamespace("GetAssayData.Seurat", "SeuratObject")
         assignInNamespace("GetAssayData.Seurat", function(object,
@@ -196,72 +200,74 @@ for name, cfg in datasets.items():
             .gad_orig(object = object, assay = assay, layer = layer, ...)
         }, ns = "SeuratObject")
         ''')
-        spatial_locs = adata_sub.obs[['x_affine', 'y_affine']]
+        spatial_locs = adata_cond.obs[['x_affine', 'y_affine']]
         to_r(spatial_locs, 'spatial_locs', format='data.frame')
         to_r(cell_type_col, 'cell_type_col')
         to_r(conversion_factor, 'conversion_factor')
         to_r(cfg['interaction_range'], 'interaction_range')
-        to_r(SCALE_DISTANCE, 'scale_distance')
+        to_r(scale_distance, 'scale_distance')
         to_r(CONTACT_RANGE, 'contact_range')
         to_r(SPOT_SIZE, 'spot_size')
-        to_r(rds_path, 'rds_path')
-        to_r(ctrl, 'cond_ctrl')
-        to_r(treat, 'cond_treat')
+        to_r(cond_path, 'cond_path')
+        to_r(cond, 'cond_label')
 
         r('''
         sobj$samples <- sobj$sample
         sobj <- NormalizeData(sobj)
-
-        sobj_1 <- subset(sobj, subset = condition == cond_ctrl)
-        sobj_2 <- subset(sobj, subset = condition == cond_treat)
-        sobj_1[[cell_type_col]] <- droplevels(sobj_1[[cell_type_col]])
-        sobj_2[[cell_type_col]] <- droplevels(sobj_2[[cell_type_col]])
-        rm(sobj); gc()
+        sobj[[cell_type_col]] <- droplevels(sobj[[cell_type_col]])
 
         sf <- data.frame(ratio = conversion_factor,
                          tol = spot_size / 2)
 
-        run_cellchat <- function(sobj_sub, label) {
-            cobj <- createSpatialCellChat(
-                object = sobj_sub, group.by = cell_type_col,
-                assay = "RNA", datatype = "spatial",
-                coordinates = spatial_locs[colnames(sobj_sub), ],
-                spatial.factors = sf)
-            cobj@DB <- CellChatDB_ext
-            cobj <- subsetData(cobj)
-            cobj <- preProcessing(cobj)
-            cobj <- identifyOverExpressedGenes(
-                cobj, selection.method = "meringue", do.grid = FALSE)
-            cobj <- identifyOverExpressedInteractions(
-                cobj, variable.both = FALSE)
+        cobj <- createSpatialCellChat(
+            object = sobj, group.by = cell_type_col,
+            assay = "RNA", datatype = "spatial",
+            coordinates = spatial_locs[colnames(sobj), ],
+            spatial.factors = sf)
+        cobj@DB <- CellChatDB_ext
+        cobj <- subsetData(cobj)
+        cobj <- preProcessing(cobj)
+        cobj <- identifyOverExpressedGenes(
+            cobj, selection.method = "meringue", do.grid = FALSE)
+        cobj <- identifyOverExpressedInteractions(
+            cobj, variable.both = FALSE)
 
-            cat(sprintf("  [%s] pre-computeCommunProb: data.signaling dim %s, LRsig %d pairs\\n",
-                label, paste(dim(cobj@data.signaling), collapse="x"),
-                nrow(cobj@LR$LRsig)))
+        cat(sprintf("  [%s] pre-computeCommunProb: data.signaling dim %s, LRsig %d pairs\\n",
+            cond_label, paste(dim(cobj@data.signaling), collapse="x"),
+            nrow(cobj@LR$LRsig)))
 
-            cobj <- computeCommunProb(
-                cobj, type = "truncatedMean", trim = 0.1,
-                distance.use = TRUE,
-                interaction.range = interaction_range,
-                scale.distance = scale_distance,
-                contact.dependent = TRUE,
-                contact.range = contact_range)
-            cobj <- filterProbability(cobj)
+        cobj <- computeCommunProb(
+            cobj, distance.use = TRUE,
+            interaction.range = interaction_range,
+            scale.distance = scale_distance,
+            contact.dependent = TRUE,
+            contact.range = contact_range)
+        cobj <- filterProbability(cobj)
 
-            cat(sprintf("  [%s] prob sum: %.6f, nonzero: %d\\n",
-                label, sum(cobj@net$prob, na.rm=TRUE),
-                sum(cobj@net$prob > 0, na.rm=TRUE)))
-            return(cobj)
-        }
+        cat(sprintf("  [%s] prob sum: %.6f, nonzero: %d\\n",
+            cond_label, sum(cobj@net$prob, na.rm=TRUE),
+            sum(cobj@net$prob > 0, na.rm=TRUE)))
 
-        cobj_1 <- run_cellchat(sobj_1, cond_ctrl)
-        rm(sobj_1); gc()
-        cobj_2 <- run_cellchat(sobj_2, cond_treat)
-        rm(sobj_2); gc()
-
-        saveRDS(list(cobj_1, cobj_2), file = rds_path)
+        saveRDS(cobj, file = cond_path)
+        rm(cobj, sobj); gc()
         ''')
-        print(f'[{name}] {contrast}: saved {rds_path}')
+        print(f'[{name}] {cond}: saved {cond_path}')
+
+    for treat, ctrl in cfg['contrasts']:
+        contrast = f'{treat}_vs_{ctrl}'
+        rds_path = (f'{working_dir}/output/{name}/'
+                    f'cellchat_{contrast}_{cell_type_col}.rds')
+        if os.path.exists(rds_path):
+            print(f'[{name}] {contrast}: cached')
+            continue
+        to_r(cond_rds[ctrl], 'ctrl_path')
+        to_r(cond_rds[treat], 'treat_path')
+        to_r(rds_path, 'rds_path')
+        r('''
+        saveRDS(list(readRDS(ctrl_path), readRDS(treat_path)),
+                file = rds_path)
+        ''')
+        print(f'[{name}] {contrast}: combined {rds_path}')
 
 #endregion
 
@@ -442,6 +448,7 @@ for row, (name, cfg) in enumerate(datasets.items()):
                np.median(pdist(coords_aff[sample_idx])))
     r_affine = cfg['interaction_range'] / cf
     r_contact = CONTACT_RANGE / cf
+    sd = cf / cfg['interaction_range']
     ax = axes[row, 0]
     ax.scatter(coords_aff[:, 0], coords_aff[:, 1], s=0.5, c='lightgray',
                alpha=0.5, linewidth=0, rasterized=True)
@@ -457,7 +464,7 @@ for row, (name, cfg) in enumerate(datasets.items()):
     ax.set_title(f'{name} — {sample}\n'
                  f'interaction={cfg["interaction_range"]}μm, '
                  f'contact={CONTACT_RANGE}μm\n'
-                 f'scale.distance={SCALE_DISTANCE}',
+                 f'scale.distance={sd:.4f}',
                  fontsize=7)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -479,7 +486,7 @@ for row, (name, cfg) in enumerate(datasets.items()):
             nb_coords = coords_aff[neighbor_idx]
             dists_aff = np.sqrt(((nb_coords - cell) ** 2).sum(axis=1))
             dists_um = dists_aff * cf
-            weights = np.exp(-SCALE_DISTANCE * dists_um)
+            weights = np.exp(-sd * dists_um)
             colors = cmap(Normalize(0, 1)(weights))
             ax.scatter(nb_coords[:, 0], nb_coords[:, 1],
                        s=10, c=colors, linewidth=0, rasterized=True)
@@ -502,8 +509,116 @@ plt.tight_layout()
 os.makedirs(f'{working_dir}/figures', exist_ok=True)
 plt.savefig(f'{working_dir}/figures/cellchat_interaction_range.png',
             dpi=200, bbox_inches='tight')
-plt.savefig(f'{working_dir}/figures/cellchat_interaction_range.svg',
-            bbox_inches='tight')
 plt.close()
 
 #endregion
+
+'''
+[slidetags] correction: mean=12.3%, median=9.8%
+  01 IT-ET Glut: 12.3% (20,495 cells)
+  02 NP-CT-L6b Glut: 12.6% (5,079 cells)
+  03 OB-CR Glut: 15.9% (25 cells)
+  04 DG-IMN Glut: 8.2% (20 cells)
+  05 OB-IMN GABA: 12.2% (543 cells)
+  06 CTX-CGE GABA: 12.7% (2,153 cells)
+  07 CTX-MGE GABA: 12.5% (2,768 cells)
+  08 CNU-MGE GABA: 12.8% (2,920 cells)
+  09 CNU-LGE GABA: 12.6% (16,725 cells)
+  10 LSX GABA: 13.5% (1,798 cells)
+  11 CNU-HYa GABA: 13.2% (5,345 cells)
+  12 HY GABA: 12.6% (887 cells)
+  13 CNU-HYa Glut: 13.4% (2,395 cells)
+  14 HY Glut: 12.1% (586 cells)
+  15 HY Gnrh1 Glut: 18.5% (3 cells)
+  18 TH Glut: 14.9% (17 cells)
+  19 MB Glut: 14.6% (116 cells)
+  20 MB GABA: 15.7% (30 cells)
+  23 P Glut: 15.5% (4 cells)
+  24 MY Glut: 13.6% (10 cells)
+  30 Astro-Epen: 11.9% (7,684 cells)
+  31 OPC-Oligo: 11.4% (9,769 cells)
+  33 Vascular: 11.0% (6,020 cells)
+  34 Immune: 11.8% (2,099 cells)
+[slidetags] X: [[3. 1. 1. 0. 0. 0.]
+ [1. 0. 0. 0. 0. 0.]
+ [2. 0. 0. 0. 0. 0.]]
+  drop subclass_confidence: 9,886 (11.3%)
+  drop subclass_margin: 7,726 (8.8%)
+  drop min_cos_dist: 8,379 (9.6%)
+  drop n_spatial_candidates: 283 (0.3%)
+  drop rare (<10/sample): 1,248 (1.4%)
+  total dropped: 16,911 (19.3%)
+  keep: 70,580 (80.7%)
+
+[xenium] correction: mean=32.6%, median=28.6%
+  01 IT-ET Glut: 24.7% (138,417 cells)
+  02 NP-CT-L6b Glut: 25.4% (40,379 cells)
+  03 OB-CR Glut: 46.2% (45 cells)
+  04 DG-IMN Glut: 36.0% (945 cells)
+  05 OB-IMN GABA: 27.9% (6,392 cells)
+  06 CTX-CGE GABA: 35.9% (9,984 cells)
+  07 CTX-MGE GABA: 24.6% (17,540 cells)
+  08 CNU-MGE GABA: 24.8% (14,117 cells)
+  09 CNU-LGE GABA: 28.7% (165,437 cells)
+  10 LSX GABA: 27.6% (16,546 cells)
+  11 CNU-HYa GABA: 26.1% (34,777 cells)
+  12 HY GABA: 23.6% (9,788 cells)
+  13 CNU-HYa Glut: 26.6% (18,053 cells)
+  14 HY Glut: 25.2% (6,951 cells)
+  15 HY Gnrh1 Glut: 36.6% (16 cells)
+  18 TH Glut: 20.8% (128 cells)
+  19 MB Glut: 25.8% (912 cells)
+  20 MB GABA: 24.0% (56 cells)
+  23 P Glut: 34.5% (6 cells)
+  24 MY Glut: 26.8% (111 cells)
+  30 Astro-Epen: 39.3% (113,937 cells)
+  31 OPC-Oligo: 33.5% (117,895 cells)
+  33 Vascular: 45.9% (122,222 cells)
+  34 Immune: 41.9% (33,050 cells)
+[xenium] X: [[0. 0. 0. 0. 0. 1.]
+ [0. 0. 0. 0. 0. 0.]
+ [0. 0. 0. 0. 0. 1.]]
+  drop subclass_confidence: 76,340 (8.8%)
+  drop subclass_margin: 61,714 (7.1%)
+  drop min_cos_dist: 6,805 (0.8%)
+  drop n_spatial_candidates: 67 (0.0%)
+  drop rare (<10/sample): 681 (0.1%)
+  total dropped: 82,294 (9.5%)
+  keep: 785,410 (90.5%)
+
+[merfish] correction: mean=13.9%, median=12.7%
+  01 IT-ET Glut: 12.8% (165,994 cells)
+  02 NP-CT-L6b Glut: 11.8% (43,622 cells)
+  03 OB-CR Glut: 15.0% (123 cells)
+  04 DG-IMN Glut: 13.5% (273 cells)
+  05 OB-IMN GABA: 13.5% (2,520 cells)
+  06 CTX-CGE GABA: 13.0% (27,729 cells)
+  07 CTX-MGE GABA: 13.6% (19,974 cells)
+  08 CNU-MGE GABA: 14.0% (30,668 cells)
+  09 CNU-LGE GABA: 11.2% (186,565 cells)
+  10 LSX GABA: 14.6% (12,188 cells)
+  11 CNU-HYa GABA: 13.9% (22,580 cells)
+  12 HY GABA: 17.6% (6,697 cells)
+  13 CNU-HYa Glut: 16.0% (13,680 cells)
+  14 HY Glut: 17.9% (2,817 cells)
+  15 HY Gnrh1 Glut: 24.0% (45 cells)
+  18 TH Glut: 19.5% (28 cells)
+  19 MB Glut: 17.3% (93 cells)
+  20 MB GABA: 16.2% (79 cells)
+  23 P Glut: 10.0% (1 cells)
+  24 MY Glut: 16.9% (80 cells)
+  30 Astro-Epen: 14.9% (187,116 cells)
+  31 OPC-Oligo: 13.0% (136,385 cells)
+  33 Vascular: 18.6% (78,460 cells)
+  34 Immune: 18.7% (52,930 cells)
+[merfish] X: [[14.  0.  0.  0.  1.  1.]
+ [ 0.  0.  0.  0.  0.  3.]
+ [ 0.  0.  0.  0.  0.  4.]]
+  drop subclass_confidence: 139,926 (14.1%)
+  drop subclass_margin: 105,999 (10.7%)
+  drop min_cos_dist: 41,805 (4.2%)
+  drop n_spatial_candidates: 7 (0.0%)
+  drop rare (<10/sample): 703 (0.1%)
+  total dropped: 166,848 (16.8%)
+  keep: 823,799 (83.2%)
+'''

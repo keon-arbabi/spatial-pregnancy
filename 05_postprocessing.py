@@ -112,12 +112,22 @@ def run_resolvi(adata, sample_col, name):
             semisupervised=True)
         model.train(max_epochs=100, lr=1e-3)
         model.save(model_dir, overwrite=True)
-    corrected = model.get_normalized_expression(
-        library_size=None, n_samples=30, batch_size=512,
-        return_numpy=True)
-    np.round(corrected, out=corrected)
-    corrected = sp.csr_array(corrected.astype(np.float32))
-    corrected.eliminate_zeros()
+    # extract in chunks to avoid OOM on dense intermediate
+    chunk_size = 50_000
+    n_cells = adata.n_obs
+    corrected_chunks = []
+    for start in range(0, n_cells, chunk_size):
+        end = min(start + chunk_size, n_cells)
+        idx = np.arange(start, end)
+        chunk = model.get_normalized_expression(
+            indices=idx, library_size=None, n_samples=30,
+            batch_size=512, return_numpy=True)
+        np.round(chunk, out=chunk)
+        chunk = sp.csr_array(chunk.astype(np.float32))
+        chunk.eliminate_zeros()
+        corrected_chunks.append(chunk)
+        print(f'  [{name}] extracted {end:,}/{n_cells:,} cells')
+    corrected = sp.vstack(corrected_chunks, format='csr')
     assert (corrected.data >= 0).all() and \
         np.allclose(corrected.data, corrected.data.astype(int))
     orig_total = np.array(adata.X.sum(axis=1)).ravel()
@@ -136,16 +146,17 @@ def run_resolvi(adata, sample_col, name):
 
 for name, sample_col in datasets.items():
     in_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
-    out_path = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
+    out_path = f'{working_dir}/output/{name}/03_adata_query_{name}_dirty.h5ad'
     adata = sc.read_h5ad(in_path)
     n_total = len(adata)
     print(f'\n[{name}] {n_total:,} cells')
 
-    # decontaminate before filtering
-    if name == 'slidetags':
-        adata = run_soupx(adata, sample_col, name)
-    else:
-        adata = run_resolvi(adata, sample_col, name)
+    # # decontaminate before filtering
+    # if name == 'slidetags':
+    #     adata = run_soupx(adata, sample_col, name)
+    # else:
+    #     adata = run_resolvi(adata, sample_col, name)
+    # print(f'[{name}] X: {adata.X[:3, :6].toarray()}')
 
     # cell type confidence filtering
     obs = adata.obs
