@@ -26,7 +26,7 @@ working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
 de_suffix = f'_{cell_type_col}' if cell_type_col != 'subclass' else ''
 
-REF_PCT_THRESHOLD = 5
+REF_PCT_THRESHOLD = 0
 
 datasets = {
     'slidetags': {
@@ -229,7 +229,8 @@ de_results = de_results.with_columns(
 )
 
 os.makedirs(f'{working_dir}/output', exist_ok=True)
-de_results.write_csv(f'{working_dir}/output/de_results{de_suffix}.csv')
+de_results\
+    .write_csv(f'{working_dir}/output/de_results{de_suffix}.csv')
 de_results\
     .filter(pl.col('FDR') < 0.10)\
     .write_csv(f'{working_dir}/output/de_results_sig{de_suffix}.csv')
@@ -245,6 +246,11 @@ for name in datasets:
               f'{n_genes:,} genes tested, {n_sig} DEGs')
 
 #endregion
+
+
+
+
+
 
 #region de barplot #############################################################
 
