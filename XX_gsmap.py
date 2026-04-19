@@ -209,7 +209,7 @@ for f in sorted(os.listdir(gwas_dir)):
             f'{gwas_formatted_dir}/{basename}.sumstats.gz'):
         continue
     subprocess.run(
-        f"gsmap format_sumstats "
+        f"python -m gsMap format_sumstats "
         f"--sumstats '{gwas_dir}/{f}' "
         f"--out '{gwas_formatted_dir}/{basename}'",
         shell=True, check=True)
@@ -232,54 +232,100 @@ print(f'{len(all_traits)} GWAS traits')
 
 #region run gsmap ##############################################################
 
+def submit_slurm(cmd, *, job_name, log_file, depends=None, hours=24):
+    from tempfile import NamedTemporaryFile
+    cluster = os.environ.get('CLUSTER', '')
+    sbatch = '.sbatch' if cluster.startswith('trillium') else 'sbatch'
+    partition = 'compute' if cluster.startswith('trillium') else None
+    lines = ['#!/bin/bash']
+    if partition is not None:
+        lines.append(f'#SBATCH -p {partition}')
+    lines.append('#SBATCH --account=rrg-shreejoy')
+    if not cluster.startswith('trillium'):
+        lines.append('#SBATCH -c 1')
+    lines += [
+        '#SBATCH -N 1',
+        '#SBATCH -n 1',
+        f'#SBATCH -t {hours}:00:00',
+        f'#SBATCH -J {job_name}',
+        f'#SBATCH -o {log_file}',
+    ]
+    dep_ids = [d for d in ([depends] if isinstance(depends, str)
+                           else (depends or [])) if d]
+    if dep_ids:
+        lines.append(f'#SBATCH --dependency=afterok:{":".join(dep_ids)}')
+    lines += [
+        'export OMP_PLACES=cores',
+        'export OMP_PROC_BIND=spread',
+        f'set -euo pipefail; {cmd}',
+    ]
+    scratch = os.environ.get('SCRATCH', '.')
+    with NamedTemporaryFile('w', dir=scratch, suffix='.sh',
+                            delete=False) as fh:
+        fh.write('\n'.join(lines) + '\n')
+        script_path = fh.name
+    try:
+        out = subprocess.check_output(
+            f'{sbatch} --parsable {script_path}',
+            shell=True, text=True).strip()
+    finally:
+        os.unlink(script_path)
+    return out.split(';')[0]
+
+log_dir = f'{working_dir}/output/gsmap_logs'
+os.makedirs(log_dir, exist_ok=True)
+ds_abbr = {'slidetags': 'sl', 'xenium': 'xe'}
+cond_abbr = {'CTRL': 'C', 'PREG': 'P', 'POSTPART': 'PP'}
+
 for name in datasets:
     conditions = sorted(adatas[name].obs['condition'].unique())
     output = f'{working_dir}/output/{name}/gsmap'
     os.makedirs(output, exist_ok=True)
 
     for cond in conditions:
-        cauchy_dir = f'{output}/{cond}/cauchy_combination'
-        if os.path.isdir(cauchy_dir):
-            n_done = len(list(
-                Path(cauchy_dir).glob('*.Cauchy.csv.gz')))
-            if n_done >= len(all_traits):
-                print(f'[{name}] {cond} quick_mode done '
-                      f'({n_done} traits)')
-                continue
-        result = subprocess.run(
-            f"gsmap quick_mode "
-            f"--workdir '{output}' "
-            f"--homolog_file '{homolog_file}' "
-            f"--sample_name '{cond}' "
-            f"--gsMap_resource_dir '{resource_dir}' "
-            f"--hdf5_path '{gsmap_input}/{name}/ST/{cond}.h5ad' "
-            f"--annotation '{cell_type_col}' "
-            f"--data_layer 'counts' "
-            f"--sumstats_config_file '{gwas_config_path}' "
-            f"--max_processes {max(1, os.cpu_count() - 1)}",
-            shell=True)
-        cauchy_ok = os.path.isdir(
-            f'{output}/{cond}/cauchy_combination')
-        if result.returncode != 0 and not cauchy_ok:
-            raise RuntimeError(
-                f'[{name}] {cond} quick_mode failed')
-        if result.returncode != 0:
-            print(f'[{name}] {cond} quick_mode: report failed '
-                  f'(results OK)')
-        else:
-            print(f'[{name}] {cond} quick_mode done')
+        hdf5 = f'{gsmap_input}/{name}/ST/{cond}.h5ad'
+        ldsc_done = (
+            Path(output) / cond / 'generate_ldscore' /
+            f'{cond}_generate_ldscore.done').exists()
+        pending = [
+            t for t in all_traits
+            if not os.path.exists(
+                f'{output}/{cond}/cauchy_combination/'
+                f'{cond}_{t}.Cauchy.csv.gz')]
+        if not pending:
+            print(f'[{name}] {cond}: all {len(all_traits)} traits done')
+            continue
 
-for name in datasets:
-    conditions = sorted(adatas[name].obs['condition'].unique())
-    output = f'{working_dir}/output/{name}/gsmap'
-    for cond in conditions:
-        d = f'{output}/{cond}/cauchy_combination'
-        files = list(Path(d).glob('*.Cauchy.csv.gz')) \
-            if os.path.isdir(d) else []
-        if files:
-            n = pl.read_csv(files[0])['annotation'].n_unique()
-            print(f'[{name}] {cond}: {n} annotations, '
-                  f'{len(files)} traits')
+        def submit(trait, depends=None):
+            cmd = (
+                f"python -m gsMap quick_mode "
+                f"--workdir '{output}' "
+                f"--homolog_file '{homolog_file}' "
+                f"--sample_name '{cond}' "
+                f"--gsMap_resource_dir '{resource_dir}' "
+                f"--hdf5_path '{hdf5}' "
+                f"--annotation '{cell_type_col}' "
+                f"--data_layer 'X' "
+                f"--trait_name '{trait}' "
+                f"--sumstats_file '{gwas_formatted_dir}/{trait}.sumstats.gz' "
+                f"--max_processes $(nproc)")
+            tag = (f'{ds_abbr.get(name, name[:2])}_'
+                   f'{cond_abbr.get(cond, cond)}_{trait}')
+            return submit_slurm(
+                cmd, job_name=tag,
+                log_file=f'{log_dir}/{name}_{cond}_{trait}.log',
+                depends=depends)
+
+        anchor_jid = None
+        if not ldsc_done:
+            anchor_trait = pending.pop(0)
+            anchor_jid = submit(anchor_trait)
+            print(f'[{name}] {cond} {anchor_trait} (prep+ldsc) '
+                  f'-> job {anchor_jid}')
+        for trait in pending:
+            jid = submit(trait, depends=anchor_jid)
+            dep = f' (waits on {anchor_jid})' if anchor_jid else ''
+            print(f'[{name}] {cond} {trait} -> job {jid}{dep}')
 
 #endregion
 

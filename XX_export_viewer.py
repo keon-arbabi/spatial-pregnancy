@@ -14,12 +14,14 @@
 #   bytes [       4n ..  8n)   y_ffd            float32
 #   bytes [       8n .. 12n)   x_affine         float32   (= ffd for ref)
 #   bytes [      12n .. 16n)   y_affine         float32   (= ffd for ref)
-#   bytes [      16n .. 18n)   subclass_id      uint16    index into palette
-#   bytes [      18n .. 19n)   class_id         uint8     index into palette
-#   bytes [      19n .. 20n)   subclass_conf    uint8     round(255*v) (1.0 for ref)
-#   bytes [      20n .. 21n)   subclass_margin  uint8     round(255*v) (1.0 for ref)
-#   bytes [      21n .. 22n)   min_cos_dist     uint8     round(255*v) (0.0 for ref)
-# Total size = 22 * n bytes.
+#   bytes [      16n .. 20n)   total_counts     float32   per-cell raw library size
+#   bytes [      20n .. 24n)   avg_pdist        float32   avg distance to ref neighbors
+#   bytes [      24n .. 26n)   subclass_id      uint16    index into palette
+#   bytes [      26n .. 27n)   class_id         uint8     index into palette
+#   bytes [      27n .. 28n)   subclass_conf    uint8     round(255*v) (1.0 for ref)
+#   bytes [      28n .. 29n)   subclass_margin  uint8     round(255*v) (1.0 for ref)
+#   bytes [      29n .. 30n)   min_cos_dist     uint8     round(255*v) (0.0 for ref)
+# Total size = 30 * n bytes.
 
 import os
 import json
@@ -52,6 +54,14 @@ sample_col_map = {
     'xenium':    'sample_rep',
     'merfish':   'sample',
     'slidetags': 'sample',
+}
+
+# per-dataset samples to drop (matched against obs['sample'])
+# keep in sync with drop_samples in 06_sumrank.py
+drop_samples_map = {
+    'xenium': ['CTRL_3'],
+    'merfish': [],
+    'slidetags': [],
 }
 
 #endregion
@@ -146,11 +156,11 @@ def gather_affine_coords(name, sample_key_arr, x_ffd, y_ffd):
     return x_aff, y_aff
 
 
-def pack_sample(x_ffd, y_ffd, x_aff, y_aff,
+def pack_sample(x_ffd, y_ffd, x_aff, y_aff, total_counts, avg_pdist,
                 class_ids, subclass_ids, conf, margin, cos):
-    """Pack one sample into a 22*n byte buffer with the layout above."""
+    """Pack one sample into a 30*n byte buffer with the layout above."""
     n = len(x_ffd)
-    buf = bytearray(22 * n)
+    buf = bytearray(30 * n)
     view = memoryview(buf)
     np.frombuffer(view[0  * n:4  * n], dtype=np.float32)[:] = \
         x_ffd.astype(np.float32, copy=False)
@@ -160,15 +170,19 @@ def pack_sample(x_ffd, y_ffd, x_aff, y_aff,
         x_aff.astype(np.float32, copy=False)
     np.frombuffer(view[12 * n:16 * n], dtype=np.float32)[:] = \
         y_aff.astype(np.float32, copy=False)
-    np.frombuffer(view[16 * n:18 * n], dtype=np.uint16)[:] = \
+    np.frombuffer(view[16 * n:20 * n], dtype=np.float32)[:] = \
+        total_counts.astype(np.float32, copy=False)
+    np.frombuffer(view[20 * n:24 * n], dtype=np.float32)[:] = \
+        avg_pdist.astype(np.float32, copy=False)
+    np.frombuffer(view[24 * n:26 * n], dtype=np.uint16)[:] = \
         subclass_ids.astype(np.uint16, copy=False)
-    np.frombuffer(view[18 * n:19 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[26 * n:27 * n], dtype=np.uint8)[:] = \
         class_ids.astype(np.uint8, copy=False)
-    np.frombuffer(view[19 * n:20 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[27 * n:28 * n], dtype=np.uint8)[:] = \
         conf.astype(np.uint8, copy=False)
-    np.frombuffer(view[20 * n:21 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[28 * n:29 * n], dtype=np.uint8)[:] = \
         margin.astype(np.uint8, copy=False)
-    np.frombuffer(view[21 * n:22 * n], dtype=np.uint8)[:] = \
+    np.frombuffer(view[29 * n:30 * n], dtype=np.uint8)[:] = \
         cos.astype(np.uint8, copy=False)
     return buf
 
@@ -252,7 +266,7 @@ assert len(class_palette) < 2**8, 'too many classes for u8'
 #region manifest skeleton ######################################################
 
 manifest = {
-    'version': 3,
+    'version': 5,
     'class_palette': class_palette,
     'subclass_palette': subclass_palette,
     'reference': None,
@@ -263,6 +277,8 @@ manifest = {
             {'name': 'y_ffd',    'dtype': 'float32', 'count': 'n'},
             {'name': 'x_affine', 'dtype': 'float32', 'count': 'n'},
             {'name': 'y_affine', 'dtype': 'float32', 'count': 'n'},
+            {'name': 'total_counts', 'dtype': 'float32', 'count': 'n'},
+            {'name': 'avg_pdist',    'dtype': 'float32', 'count': 'n'},
             {'name': 'subclass_id', 'dtype': 'uint16', 'count': 'n'},
             {'name': 'class_id',    'dtype': 'uint8',  'count': 'n'},
             {'name': 'subclass_confidence', 'dtype': 'uint8',
@@ -272,7 +288,7 @@ manifest = {
             {'name': 'min_cos_dist', 'dtype': 'uint8',
              'count': 'n', 'scale': 1 / 255},
         ],
-        'bytes_per_cell': 22,
+        'bytes_per_cell': 30,
     },
 }
 
@@ -308,8 +324,11 @@ for section in sorted(np.unique(ref_sample).tolist()):
     zero = np.zeros(n, dtype=np.uint8)
 
     # ref isn't transformed: ffd == affine == raw
+    # ref has no library size / pdist; fill with zeros
+    zero_counts = np.zeros(n, dtype=np.float32)
+    zero_pdist = np.zeros(n, dtype=np.float32)
     buf = pack_sample(
-        x_s, y_s, x_s, y_s,
+        x_s, y_s, x_s, y_s, zero_counts, zero_pdist,
         ref_class_ids[m], ref_subclass_ids[m],
         full, full, zero)
 
@@ -349,7 +368,7 @@ print(f'[reference] wrote {len(ref_section_list)} sections '
 cols_to_read = [
     'sample_rep', 'sample', 'condition', 'class', 'subclass',
     'subclass_confidence', 'subclass_margin', 'min_cos_dist',
-    'x_ffd', 'y_ffd',
+    'x_ffd', 'y_ffd', 'total_counts', 'avg_pdist',
 ]
 
 for name in datasets:
@@ -366,9 +385,32 @@ for name in datasets:
     sub = obs['subclass'].astype(str)
     x_ffd_arr = obs['x_ffd'].astype(np.float32)
     y_ffd_arr = obs['y_ffd'].astype(np.float32)
+    total_counts = obs['total_counts'].astype(np.float32)
+    avg_pdist = obs['avg_pdist'].astype(np.float32)
     conf = obs['subclass_confidence'].astype(np.float32)
     margin = obs['subclass_margin'].astype(np.float32)
     cos = obs['min_cos_dist'].astype(np.float32)
+
+    # drop samples listed for this dataset (keep in sync with 06_sumrank.py)
+    drop = drop_samples_map.get(name, [])
+    if drop:
+        keep_mask = ~np.isin(sample, drop)
+        n_before = len(sample)
+        sample_rep = sample_rep[keep_mask]
+        sample = sample[keep_mask]
+        condition = condition[keep_mask]
+        cls = cls[keep_mask]
+        sub = sub[keep_mask]
+        x_ffd_arr = x_ffd_arr[keep_mask]
+        y_ffd_arr = y_ffd_arr[keep_mask]
+        total_counts = total_counts[keep_mask]
+        avg_pdist = avg_pdist[keep_mask]
+        conf = conf[keep_mask]
+        margin = margin[keep_mask]
+        cos = cos[keep_mask]
+        n_total = len(sample)
+        print(f'[{name}] dropped samples {drop}: '
+              f'{n_before:,} → {n_total:,} cells')
 
     # match each cell to its row in coords_affine.pt via coords_ffd.pt
     sample_col = sample_col_map.get(name, 'sample')
@@ -397,9 +439,11 @@ for name in datasets:
 
         xf = x_ffd_arr[m]; yf = y_ffd_arr[m]
         xa = x_aff_arr[m]; ya = y_aff_arr[m]
+        tc = total_counts[m]
+        pdist_s = avg_pdist[m]
 
         buf = pack_sample(
-            xf, yf, xa, ya,
+            xf, yf, xa, ya, tc, pdist_s,
             class_ids[m], subclass_ids[m],
             conf_q[m], margin_q[m], cos_q[m])
 
@@ -434,9 +478,35 @@ for name in datasets:
 #endregion
 #region per-gene expression export #############################################
 
+import re
 import scipy.sparse as sp
 
 TARGET_SUM = 1e4  # library-size normalize to this
+
+# filter genes the same way 06_sumrank.py does for slidetags
+# (protein-coding AND NOT mt AND NOT ribo). for merfish/xenium the gene panel
+# is curated so no filter is applied.
+filter_genes_map = {
+    'xenium':    False,
+    'merfish':   False,
+    'slidetags': True,
+}
+
+# load protein-coding gene list (same source as 06_sumrank.py)
+_pc_df = pd.read_csv(
+    f'{working_dir}/input/MRK_ENSEMBL.csv', header=None)
+PROTEIN_CODING = set(
+    _pc_df[_pc_df[8] == 'protein coding gene'][1].astype(str).tolist())
+del _pc_df
+print(f'[filter] {len(PROTEIN_CODING):,} protein-coding gene symbols loaded')
+
+_mt_re = re.compile(r'^(mt-|MT-)')
+_ribo_re = re.compile(r'^(Rps|Rpl)')
+
+def is_keep_gene(g):
+    return (g in PROTEIN_CODING
+            and not _mt_re.match(g)
+            and not _ribo_re.match(g))
 
 for name in datasets:
     print(f'\n[{name}] exporting gene expression...')
@@ -455,17 +525,23 @@ for name in datasets:
                       for g in gene_names]
         n_genes = len(gene_names)
 
-        # read sample_rep for ordering
+        # read sample_rep + sample for ordering and drop filter
         obs = f['obs']
         sample_rep_arr = read_obs_column(obs, 'sample_rep').astype(str)
+        sample_arr_full = read_obs_column(obs, 'sample').astype(str)
         n_cells = len(sample_rep_arr)
 
-        # build the cell ordering that matches the main per-sample binary export
-        sorted_reps = sorted(np.unique(sample_rep_arr))
+        # keep mask (drop samples listed for this dataset)
+        drop = drop_samples_map.get(name, [])
+        keep = ~np.isin(sample_arr_full, drop) \
+            if drop else np.ones(n_cells, dtype=bool)
+        # build cell ordering: within-dataset sorted by sample_rep, KEEP cells
+        sorted_reps = sorted(np.unique(sample_rep_arr[keep]))
         gene_order = np.concatenate(
-            [np.where(sample_rep_arr == rep)[0] for rep in sorted_reps])
+            [np.where((sample_rep_arr == rep) & keep)[0]
+             for rep in sorted_reps])
 
-        # read sparse X matrix (CSR)
+        # read sparse X matrix (CSR) — RAW counts
         X_grp = f['X']
         data = X_grp['data'][:].astype(np.float32)
         indices = X_grp['indices'][:]
@@ -473,23 +549,30 @@ for name in datasets:
         X = sp.csr_matrix((data, indices, indptr), shape=(n_cells, n_genes))
         del data, indices, indptr
 
-    # normalize per cell: scale each row to TARGET_SUM
-    row_sums = np.array(X.sum(axis=1)).ravel().astype(np.float32)
-    scale = np.float32(TARGET_SUM) / np.maximum(row_sums, np.float32(1.0))
-    X = sp.diags(scale, dtype=np.float32) @ X
-    del row_sums, scale
+    # filter genes (06_sumrank.py convention: protein_coding AND NOT mt
+    # AND NOT ribo). only applied to datasets flagged in filter_genes_map.
+    if filter_genes_map.get(name, False):
+        keep_gene_idx = [j for j, g in enumerate(gene_names) if is_keep_gene(g)]
+        kept_names = [gene_names[j] for j in keep_gene_idx]
+        print(f'[{name}] gene filter: '
+              f'{len(kept_names):,}/{n_genes:,} kept '
+              f'(protein_coding ∧ ¬mt ∧ ¬ribo)')
+        X = X[:, keep_gene_idx]
+        gene_names = kept_names
+        n_genes = len(gene_names)
 
     # convert to CSC for efficient column access
     print(f'[{name}] converting to CSC ({n_genes:,} genes, '
           f'{X.nnz:,} nnz)...')
     X = X.tocsc()
 
-    # write per-gene binary (float32, cell order matching main binary)
+    # write per-gene binary = raw counts as float32, in sample_rep order.
+    # client derives: per-cell log2(count/total_counts*1e4+1) for coloring,
+    # per-sample pseudobulk log2(sum_count/n_cells*1e4+1) for violin.
     for j in range(n_genes):
         gene = gene_names[j]
-        col = X[:, j].toarray().ravel()
-        expr = np.log2(np.float32(1.0) + col).astype(np.float32)
-        expr_ordered = expr[gene_order]
+        col = X[:, j].toarray().ravel().astype(np.float32)
+        expr_ordered = col[gene_order]
         write_atomic(f'{gene_dir}/{gene}.bin', expr_ordered.tobytes())
         if (j + 1) % 500 == 0 or j + 1 == n_genes:
             print(f'[{name}]   {j+1:,}/{n_genes:,} genes')

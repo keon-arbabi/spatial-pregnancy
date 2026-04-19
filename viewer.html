@@ -324,10 +324,13 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
     <div id="dataset-radio" class="radio-row"></div>
 
     <h2>color by</h2>
-    <div id="colormode-radio" class="radio-row">
+    <div id="colormode-radio" class="radio-row" style="flex-wrap:wrap;gap:4px 10px">
         <label><input type="radio" name="cmode" value="class" checked>class</label>
         <label><input type="radio" name="cmode" value="subclass">subclass</label>
         <label><input type="radio" name="cmode" value="gene">gene</label>
+        <label><input type="radio" name="cmode" value="conf">conf</label>
+        <label><input type="radio" name="cmode" value="cos">cos_dist</label>
+        <label><input type="radio" name="cmode" value="pdist">avg_pdist</label>
     </div>
 
     <h2>coords</h2>
@@ -368,7 +371,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
             <span>0</span>
             <canvas id="cmap-legend"></canvas>
             <span id="cmap-max">max</span>
-            <span style="margin-left:8px">log<sub>2</sub>(norm+1)</span>
+            <span style="margin-left:8px">log<sub>2</sub>(cpm+1) per cell</span>
         </div>
     </div>
 </aside>
@@ -753,15 +756,19 @@ async function loadSlice(entry) {
     const buf = new Uint8Array(await r.arrayBuffer());
     const n = entry.n_cells;
 
-    // SoA layout (matches XX_export_viewer.py pack_sample, 22 bytes/cell):
-    //   x_ffd:f32  y_ffd:f32  x_aff:f32  y_aff:f32
+    // SoA layout (matches XX_export_viewer.py pack_sample, 30 bytes/cell):
+    //   x_ffd:f32  y_ffd:f32  x_aff:f32  y_aff:f32  totC:f32  pdist:f32
     //   sub:u16    cls:u8     conf:u8    margin:u8  cos:u8
     const xsFfd = new Float32Array(buf.buffer, buf.byteOffset + 0  * n, n);
     const ysFfd = new Float32Array(buf.buffer, buf.byteOffset + 4  * n, n);
     const xsAff = new Float32Array(buf.buffer, buf.byteOffset + 8  * n, n);
     const ysAff = new Float32Array(buf.buffer, buf.byteOffset + 12 * n, n);
-    const sub   = new Uint16Array (buf.buffer, buf.byteOffset + 16 * n, n);
-    const cls   = new Uint8Array  (buf.buffer, buf.byteOffset + 18 * n, n);
+    const totC  = new Float32Array(buf.buffer, buf.byteOffset + 16 * n, n);
+    const pdist = new Float32Array(buf.buffer, buf.byteOffset + 20 * n, n);
+    const sub   = new Uint16Array (buf.buffer, buf.byteOffset + 24 * n, n);
+    const cls   = new Uint8Array  (buf.buffer, buf.byteOffset + 26 * n, n);
+    const conf  = new Uint8Array  (buf.buffer, buf.byteOffset + 27 * n, n);
+    const cos   = new Uint8Array  (buf.buffer, buf.byteOffset + 29 * n, n);
 
     function makePosBuf(xs, ys) {
         const pos = new Float32Array(2 * n);
@@ -787,7 +794,15 @@ async function loadSlice(entry) {
     gl.bindBuffer(gl.ARRAY_BUFFER, subBuf);
     gl.bufferData(gl.ARRAY_BUFFER, subF, gl.STATIC_DRAW);
 
-    // keep CPU-side copies for hit testing
+    // dequantize uint8 conf/cos to floats in [0, 1] range
+    const confF = new Float32Array(n);
+    const cosF  = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+        confF[i] = conf[i] / 255;
+        cosF[i]  = cos[i]  / 255;
+    }
+
+    // keep CPU-side copies for hit testing + pseudobulk + metric color modes
     const slice = {
         n,
         posBufFfd, posBufAff,
@@ -802,6 +817,10 @@ async function loadSlice(entry) {
         ysAff: new Float32Array(ysAff),
         cls: new Uint8Array(cls),
         sub: new Uint16Array(sub),
+        totC:  new Float32Array(totC),   // per-cell raw library size
+        pdist: new Float32Array(pdist),  // per-cell avg ref-neighbor distance
+        conf:  confF,                    // per-cell subclass_confidence
+        cosd:  cosF,                     // per-cell min_cos_dist
     };
     state.slices.set(entry.file, slice);
     return slice;
@@ -1007,8 +1026,9 @@ function render() {
 
     gl.useProgram(state.program);
 
-    // color mode: 0=class, 1=subclass, 2=gene
-    const colorMode = state.colorMode === 'gene' ? 2
+    // color mode: 0=class, 1=subclass, 2=continuous (gene/conf/cos/pdist)
+    const isContinuous = ['gene','conf','cos','pdist'].includes(state.colorMode);
+    const colorMode = isContinuous ? 2
                     : state.colorMode === 'subclass' ? 1 : 0;
     const useSubFilter = state.filterLevel === 'subclass' ? 1 : 0;
     const palTex = colorMode === 1 ? state.subPaletteTex : state.classPaletteTex;
@@ -1276,6 +1296,7 @@ function buildSidebar() {
     document.querySelectorAll('input[name="cmode"]').forEach(r => {
         r.addEventListener('change', () => {
             state.colorMode = r.value;
+            applyContinuousMetric();
             render();
         });
     });
@@ -1474,22 +1495,75 @@ function updateFilteredCounts() {
     }
 }
 
+// for continuous color modes other than 'gene', upload the appropriate
+// per-cell array (conf, cos, pdist) into each slice's exprBuf and set
+// state.geneMax to the global max so the viridis colormap is scaled correctly.
+function applyContinuousMetric() {
+    const mode = state.colorMode;
+    const metricKey = mode === 'conf'  ? 'conf'
+                    : mode === 'cos'   ? 'cosd'
+                    : mode === 'pdist' ? 'pdist'
+                    : null;
+    if (!metricKey) {
+        // 'gene' or categorical
+        if (mode === 'gene') {
+            updateCmapLegend(state.geneMax, state.currentGene);
+            if (state.currentGene) {
+                // re-upload per-cell normalized gene expression
+                const ds = state.manifest.datasets[state.dataset];
+                if (ds) loadGene(state.currentGene);
+            }
+        }
+        return;
+    }
+    // hide the pseudobulk violin (it's gene-specific)
+    document.getElementById('violin-wrap').style.display = 'none';
+    const gl = state.gl;
+    let mx = 0;
+    for (const [, slice] of state.slices) {
+        const arr = slice[metricKey];
+        if (!arr) continue;
+        for (let i = 0; i < arr.length; i++) if (arr[i] > mx) mx = arr[i];
+    }
+    // guard against all-zero ref slices collapsing mx; always pick positive max
+    if (mx <= 0) mx = 1;
+    state.geneMax = mx;
+    for (const [, slice] of state.slices) {
+        const arr = slice[metricKey];
+        if (!arr) continue;
+        if (!slice.exprBuf) slice.exprBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
+        slice.exprData = arr;  // for tooltip
+    }
+    updateCmapLegend(mx, {
+        conf:  'subclass confidence',
+        cos:   'min_cos_dist',
+        pdist: 'avg_pdist',
+    }[mode]);
+}
+
+function updateCmapLegend(mx, label) {
+    document.getElementById('cmap-max').textContent =
+        typeof mx === 'number' ? mx.toFixed(2) : String(mx);
+    const legendLabel = document.querySelector('#violin-wrap .gene-legend span:last-child');
+    if (legendLabel) legendLabel.textContent = label || 'log2(cpm+1) per cell';
+    // ensure legend wrap visible for metric modes too
+    const wrap = document.getElementById('violin-wrap');
+    if (wrap && label) wrap.style.display = 'block';
+}
+
 function redrawViolinIfActive() {
     if (!state.currentGene) return;
     const ds = state.manifest.datasets[state.dataset];
     if (!ds) return;
-    // rebuild allExpr from per-slice exprData
-    const chunks = [];
-    for (const s of ds.samples) {
-        const slice = state.slices.get(s.file);
-        if (slice && slice.exprData) chunks.push(slice.exprData);
-    }
-    if (chunks.length === 0) return;
-    const total = chunks.reduce((a, c) => a + c.length, 0);
-    const allExpr = new Float32Array(total);
-    let off = 0;
-    for (const c of chunks) { allExpr.set(c, off); off += c.length; }
-    drawViolin(ds, allExpr);
+    // need at least one slice with rawCounts loaded for the current gene
+    const anyLoaded = ds.samples.some(s => {
+        const sl = state.slices.get(s.file);
+        return sl && sl.rawCounts;
+    });
+    if (!anyLoaded) return;
+    drawViolin(ds);
 }
 
 //----------------------------------------------------------------------------
@@ -1697,28 +1771,35 @@ async function loadGene(name) {
             return;
         }
         const buf = await r.arrayBuffer();
-        const allExpr = new Float32Array(buf);
+        const rawCounts = new Float32Array(buf);  // RAW per-cell counts
 
-        // find max across all cells
-        let mx = 0;
-        for (let i = 0; i < allExpr.length; i++) if (allExpr[i] > mx) mx = allExpr[i];
-        state.geneMax = mx;
         state.currentGene = gene;
 
-        // split by sample_rep and upload to each slice's exprBuf
+        // split by sample_rep. per-cell: log2(count/total_counts*1e4 + 1)
+        // for spatial coloring. keep raw counts on slice for pseudobulk.
         const samples = ds.samples;
         let offset = 0;
+        let mx = 0;
         for (const s of samples) {
             const slice = state.slices.get(s.file);
-            if (!slice) continue;
-            const chunk = allExpr.subarray(offset, offset + s.n_cells);
-            slice.exprData = new Float32Array(chunk); // copy for violin
+            if (!slice) { offset += s.n_cells; continue; }
+            const rawChunk = rawCounts.subarray(offset, offset + s.n_cells);
+            const colored = new Float32Array(s.n_cells);
+            for (let i = 0; i < s.n_cells; i++) {
+                const lib = slice.totC[i];
+                const v = lib > 0 ? Math.log2(rawChunk[i] / lib * 1e4 + 1) : 0;
+                colored[i] = v;
+                if (v > mx) mx = v;
+            }
+            slice.rawCounts = new Float32Array(rawChunk);  // for pseudobulk
+            slice.exprData = colored;  // per-cell log2-norm for tooltip + hit
             const gl = state.gl;
             if (!slice.exprBuf) slice.exprBuf = gl.createBuffer();
             gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
-            gl.bufferData(gl.ARRAY_BUFFER, chunk, gl.DYNAMIC_DRAW);
+            gl.bufferData(gl.ARRAY_BUFFER, colored, gl.DYNAMIC_DRAW);
             offset += s.n_cells;
         }
+        state.geneMax = mx;
         // also upload zeros to ref slices
         if (state.manifest.reference) {
             for (const s of state.manifest.reference.sections) {
@@ -1740,7 +1821,7 @@ async function loadGene(name) {
             r.checked = (r.value === 'gene');
         });
         render();
-        drawViolin(ds, allExpr);
+        drawViolin(ds);
     } catch (e) {
         statusEl.textContent = `error: ${e.message}`;
         console.error(e);
@@ -1751,6 +1832,7 @@ function clearGeneBuffers() {
     state.geneMax = 0;
     for (const [, slice] of state.slices) {
         slice.exprData = null;
+        slice.rawCounts = null;
     }
 }
 
@@ -1778,13 +1860,80 @@ const COND_COLORS = {
 // stored diamond hit regions for violin hover interaction
 let violinDiamonds = []; // [{x, y, sampleRep}]
 
-function drawViolin(ds, allExpr) {
+// compute per-sample pseudobulk for the active gene + filter,
+// then regress out log2(n_cells) + log2(total_lib_size) across samples
+// to match the DE design in 06_sumrank.py (~ group + log_num_cells + log_lib_size).
+function computePseudobulks(ds) {
+    const useSubFilter = state.filterLevel === 'subclass';
+    const visArr = useSubFilter ? state.subVisible : state.classVisible;
+    const rows = [];
+    for (const s of ds.samples) {
+        const slice = state.slices.get(s.file);
+        if (!slice || !slice.rawCounts) continue;
+        const ids = useSubFilter ? slice.sub : slice.cls;
+        const raw = slice.rawCounts;
+        const lib = slice.totC;
+        let totalGene = 0, totalLib = 0, nCells = 0;
+        for (let i = 0; i < slice.n; i++) {
+            if (visArr[ids[i]]) {
+                totalGene += raw[i];
+                totalLib  += lib[i];
+                nCells++;
+            }
+        }
+        if (nCells === 0 || totalLib === 0) continue;
+        // 06_sumrank.py: cpm = log2(total / n_cells * 1e4 + 1)
+        const cpm = Math.log2(totalGene / nCells * 1e4 + 1);
+        rows.push({
+            sample_rep: s.sample_rep,
+            condition: s.condition,
+            n_cells: nCells,
+            total_lib: totalLib,
+            log_n: Math.log2(nCells),
+            log_lib: Math.log2(totalLib),
+            cpm,
+        });
+    }
+    if (rows.length < 3) {
+        // not enough to regress; return raw cpm
+        for (const r of rows) r.adjusted = r.cpm;
+        return rows;
+    }
+    // OLS: cpm ~ log_n + log_lib (with intercept)
+    const n = rows.length;
+    let sx1 = 0, sx2 = 0, sy = 0;
+    for (const r of rows) { sx1 += r.log_n; sx2 += r.log_lib; sy += r.cpm; }
+    const mx1 = sx1 / n, mx2 = sx2 / n, my = sy / n;
+    let sxx11 = 0, sxx12 = 0, sxx22 = 0, sxy1 = 0, sxy2 = 0;
+    for (const r of rows) {
+        const dx1 = r.log_n - mx1, dx2 = r.log_lib - mx2, dy = r.cpm - my;
+        sxx11 += dx1 * dx1;
+        sxx22 += dx2 * dx2;
+        sxx12 += dx1 * dx2;
+        sxy1  += dx1 * dy;
+        sxy2  += dx2 * dy;
+    }
+    const det = sxx11 * sxx22 - sxx12 * sxx12;
+    let b1 = 0, b2 = 0;
+    if (Math.abs(det) > 1e-12) {
+        b1 = ( sxx22 * sxy1 - sxx12 * sxy2) / det;
+        b2 = (-sxx12 * sxy1 + sxx11 * sxy2) / det;
+    }
+    // adjusted = cpm - b1*(log_n - mx1) - b2*(log_lib - mx2)
+    // keeps mean(adjusted) = mean(cpm)
+    for (const r of rows) {
+        r.adjusted = r.cpm - b1 * (r.log_n - mx1) - b2 * (r.log_lib - mx2);
+    }
+    return rows;
+}
+
+function drawViolin(ds) {
     const wrap = document.getElementById('violin-wrap');
     wrap.style.display = 'block';
     const canvas = document.getElementById('violin-canvas');
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const cssW = canvas.clientWidth || 270;
-    const cssH = 200;
+    const cssH = 220;
     canvas.width = cssW * dpr; canvas.height = cssH * dpr;
     canvas.style.height = cssH + 'px';
     const ctx = canvas.getContext('2d');
@@ -1792,100 +1941,62 @@ function drawViolin(ds, allExpr) {
     ctx.clearRect(0, 0, cssW, cssH);
     violinDiamonds = [];
 
-    // group samples by condition in fixed order (CTRL → PREG → POSTPART),
-    // filtering to cells visible under the active cell-type filter.
+    const pb = computePseudobulks(ds);
+    if (pb.length === 0) {
+        const isDark = currentTheme() === 'dark';
+        ctx.fillStyle = isDark ? '#888' : '#999';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('no cells pass filter', cssW / 2, cssH / 2);
+        return;
+    }
+    // group by condition in fixed order
     const condMap = {};
-    let offset = 0;
-    // determine which visibility array to use
-    const useSubFilter = state.filterLevel === 'subclass';
-    const visArr = useSubFilter ? state.subVisible : state.classVisible;
-    for (const s of ds.samples) {
-        if (!condMap[s.condition])
-            condMap[s.condition] = { name: s.condition, samples: [], values: [] };
-        const slice = state.slices.get(s.file);
-        const rawVals = allExpr.subarray(offset, offset + s.n_cells);
-        // filter to visible cells only
-        const filtered = [];
-        if (slice) {
-            const ids = useSubFilter ? slice.sub : slice.cls;
-            for (let i = 0; i < s.n_cells; i++) {
-                if (visArr[ids[i]]) filtered.push(rawVals[i]);
-            }
-        } else {
-            for (let i = 0; i < s.n_cells; i++) filtered.push(rawVals[i]);
-        }
-        const vals = new Float32Array(filtered);
-        const exprVals = filtered.filter(v => v > 0);
-        condMap[s.condition].samples.push({
-            name: s.sample_rep,
-            parent: s.sample,
-            values: vals,
-            median: computeMedian(new Float32Array(exprVals)),
-            pctExpr: vals.length > 0 ? (exprVals.length / vals.length * 100) : 0,
-        });
-        condMap[s.condition].values.push(vals);
-        offset += s.n_cells;
+    for (const r of pb) {
+        if (!condMap[r.condition])
+            condMap[r.condition] = { name: r.condition, samples: [] };
+        condMap[r.condition].samples.push(r);
     }
-    // enforce CTRL → PREG → POSTPART order; skip absent conditions
     const conditions = [];
-    for (const cond of COND_ORDER) {
+    for (const cond of COND_ORDER)
         if (condMap[cond]) conditions.push(condMap[cond]);
-    }
-    // also include any condition not in COND_ORDER (future-proof)
-    for (const cond of Object.keys(condMap)) {
+    for (const cond of Object.keys(condMap))
         if (!COND_ORDER.includes(cond)) conditions.push(condMap[cond]);
-    }
-    // sort samples within each condition by sample_rep
+    // sort samples within condition by sample_rep (matches panel order)
     for (const c of conditions) {
-        c.samples.sort((a, b) => a.name.localeCompare(b.name));
-    }
-    // concatenate per-condition values; separate expressing (>0) for KDE
-    for (const c of conditions) {
-        const total = c.values.reduce((a, v) => a + v.length, 0);
-        const flat = new Float32Array(total);
-        let off = 0;
-        for (const v of c.values) { flat.set(v, off); off += v.length; }
-        c.flat = flat;
-        c.nTotal = total;
-        const expr = [];
-        for (let i = 0; i < total; i++) if (flat[i] > 0) expr.push(flat[i]);
-        c.expressing = new Float32Array(expr);
-        c.pctExpr = total > 0 ? (expr.length / total * 100) : 0;
+        c.samples.sort((a, b) => a.sample_rep.localeCompare(b.sample_rep));
+        const vals = c.samples.map(s => s.adjusted);
+        const mean = vals.reduce((a, b) => a + b, 0) / Math.max(vals.length, 1);
+        const sd = vals.length > 1
+            ? Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length - 1))
+            : 0;
+        c.mean = mean;
+        c.se = vals.length > 0 ? sd / Math.sqrt(vals.length) : 0;
     }
 
     // layout
-    const margin = { top: 20, right: 10, bottom: 40, left: 36 };
+    const margin = { top: 24, right: 12, bottom: 38, left: 40 };
     const plotW = cssW - margin.left - margin.right;
     const plotH = cssH - margin.top - margin.bottom;
     const nCond = conditions.length;
-    const violinW = plotW / nCond;
-    const maxVal = state.geneMax || 1;
+    const colW = plotW / nCond;
 
-    // y scale: 0 → maxVal
-    const yScale = v => margin.top + plotH * (1 - v / maxVal);
+    // y range from data (with some padding)
+    const allY = pb.map(r => r.adjusted);
+    const yMin = Math.min(...allY);
+    const yMax = Math.max(...allY);
+    const yPad = (yMax - yMin) * 0.15 || 1;
+    const y0 = yMin - yPad, y1 = yMax + yPad;
+    const yScale = v => margin.top + plotH * (1 - (v - y0) / (y1 - y0));
 
-    // KDE bins
-    const nBins = 100;
-    const binW = maxVal / nBins;
-
-    // KDE on expressing cells only (excludes zeros)
-    let globalMaxDens = 0;
-    for (const c of conditions) {
-        c.kde = c.expressing.length > 0
-            ? computeKDE(c.expressing, nBins, maxVal)
-            : new Float32Array(nBins + 1);
-        const md = Math.max(...c.kde);
-        if (md > globalMaxDens) globalMaxDens = md;
-    }
-
-    // is dark theme?
     const isDark = currentTheme() === 'dark';
     const axisColor = isDark ? '#666' : '#aaa';
     const textColor = isDark ? '#ccc' : '#333';
-    const medianDiamondStroke = isDark ? '#fff' : '#000';
+    const strokeColor = isDark ? '#fff' : '#000';
 
+    // y-axis ticks + faint grid
     ctx.save();
-    // y axis
     ctx.strokeStyle = axisColor;
     ctx.fillStyle = textColor;
     ctx.font = '10px sans-serif';
@@ -1893,14 +2004,13 @@ function drawViolin(ds, allExpr) {
     ctx.textBaseline = 'middle';
     const nTicks = 5;
     for (let i = 0; i <= nTicks; i++) {
-        const v = maxVal * i / nTicks;
+        const v = y0 + (y1 - y0) * i / nTicks;
         const y = yScale(v);
         ctx.beginPath();
         ctx.moveTo(margin.left - 3, y);
         ctx.lineTo(margin.left, y);
         ctx.stroke();
-        ctx.fillText(v.toFixed(1), margin.left - 5, y);
-        // faint grid line
+        ctx.fillText(v.toFixed(2), margin.left - 5, y);
         ctx.save();
         ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
         ctx.beginPath();
@@ -1909,48 +2019,52 @@ function drawViolin(ds, allExpr) {
         ctx.stroke();
         ctx.restore();
     }
+    // axis titles
+    ctx.save();
+    ctx.translate(12, margin.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = textColor;
+    ctx.font = '10px sans-serif';
+    ctx.fillText('adj. log2 pseudobulk', 0, 0);
+    ctx.restore();
 
-    // draw each violin
+    // draw condition means + SE error bars + per-sample scatter points
+    const cxs = [];
     for (let ci = 0; ci < nCond; ci++) {
         const c = conditions[ci];
-        const cx = margin.left + violinW * (ci + 0.5);
-        const halfW = violinW * 0.4;
+        const cx = margin.left + colW * (ci + 0.5);
+        cxs.push({ cx, cy: yScale(c.mean) });
         const color = COND_COLORS[c.name] || '#888';
+        const halfW = colW * 0.35;
 
-        // violin shape
-        ctx.fillStyle = color + '40'; // 25% alpha
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        for (let b = 0; b <= nBins; b++) {
-            const y = yScale(b * binW);
-            const w = (c.kde[b] || 0) / globalMaxDens * halfW;
-            if (b === 0) ctx.moveTo(cx - w, y);
-            else ctx.lineTo(cx - w, y);
+        // SE error bar
+        if (c.se > 0) {
+            const yHi = yScale(c.mean + c.se);
+            const yLo = yScale(c.mean - c.se);
+            ctx.strokeStyle = textColor;
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(cx, yHi); ctx.lineTo(cx, yLo);
+            ctx.moveTo(cx - 4, yHi); ctx.lineTo(cx + 4, yHi);
+            ctx.moveTo(cx - 4, yLo); ctx.lineTo(cx + 4, yLo);
+            ctx.stroke();
         }
-        for (let b = nBins; b >= 0; b--) {
-            const y = yScale(b * binW);
-            const w = (c.kde[b] || 0) / globalMaxDens * halfW;
-            ctx.lineTo(cx + w, y);
-        }
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
 
-        // per-sample median diamonds (spread horizontally, order matches panels)
+        // per-sample diamonds (spread horizontally, matches panel order)
         const nSamp = c.samples.length;
-        const spreadW = halfW * 0.6;
+        const spreadW = halfW;
         for (let si = 0; si < nSamp; si++) {
             const s = c.samples[si];
-            if (s.median <= 0) continue;
-            const y = yScale(s.median);
+            const y = yScale(s.adjusted);
             const dx = nSamp > 1
                 ? -spreadW + (2 * spreadW * si / (nSamp - 1))
                 : 0;
             const diamondX = cx + dx;
-            const sz = 4;
+            const sz = 4.5;
             ctx.fillStyle = color;
-            ctx.strokeStyle = medianDiamondStroke;
+            ctx.strokeStyle = strokeColor;
             ctx.lineWidth = 0.8;
             ctx.beginPath();
             ctx.moveTo(diamondX, y - sz);
@@ -1960,12 +2074,10 @@ function drawViolin(ds, allExpr) {
             ctx.closePath();
             ctx.fill();
             ctx.stroke();
-            // store for hover hit-test
-            violinDiamonds.push({ x: diamondX, y, sampleRep: s.name });
+            violinDiamonds.push({ x: diamondX, y, sampleRep: s.sample_rep });
         }
 
-        // condition label + overall median + % expressing
-        const condMedian = computeMedian(c.expressing);
+        // condition label
         ctx.fillStyle = textColor;
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'center';
@@ -1973,14 +2085,23 @@ function drawViolin(ds, allExpr) {
         ctx.fillText(c.name, cx, cssH - margin.bottom + 4);
         ctx.fillStyle = isDark ? '#888' : '#999';
         ctx.font = '9px sans-serif';
-        ctx.fillText(`med ${condMedian.toFixed(2)} · ${c.pctExpr.toFixed(0)}%`, cx, cssH - margin.bottom + 16);
+        ctx.fillText(`n=${c.samples.length}`, cx, cssH - margin.bottom + 16);
     }
-
+    // connect condition means with a line
+    if (cxs.length > 1) {
+        ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(cxs[0].cx, cxs[0].cy);
+        for (let i = 1; i < cxs.length; i++) ctx.lineTo(cxs[i].cx, cxs[i].cy);
+        ctx.stroke();
+    }
     // title
     ctx.fillStyle = textColor;
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(state.currentGene || '', cssW / 2, 6);
+    ctx.textBaseline = 'top';
+    ctx.fillText(state.currentGene || '', cssW / 2, 4);
 
     ctx.restore();
 }
