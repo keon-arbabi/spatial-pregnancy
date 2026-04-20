@@ -4,15 +4,9 @@ import os
 import subprocess
 import warnings
 import numpy as np
-import pandas as pd
 import polars as pl
 import scanpy as sc
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import seaborn as sns
 from pathlib import Path
-from scipy.stats import mannwhitneyu
-from statsmodels.stats.multitest import multipletests
 
 warnings.filterwarnings('ignore')
 
@@ -223,231 +217,393 @@ for name in datasets:
 
 #endregion
 
-# #region analysis ###############################################################
+#region meta analysis ##########################################################
+# Sumrank-style cross-platform meta-analysis of differential gsMap enrichment.
+# Adapted from 06_sumrank.py: cell-types replace genes as the ranked unit,
+# datasets replace platforms. Primary stat per (dataset, trait, cell-type):
+# Welch t on per-sample mean -log10(p) (sample-level inference, not per-cell).
+# Ranks within (dataset, trait), summed across datasets, Irwin-Hall analytical
+# p, label-permutation empirical p.
 
-# def load_cauchy(output_dir, conditions, cell_types=None):
-#     files = []
-#     for cond in conditions:
-#         d = Path(output_dir) / cond / 'cauchy_combination'
-#         if not d.is_dir():
-#             continue
-#         for f in d.glob('*.Cauchy.csv.gz'):
-#             files.append((f, cond))
-#     if not files:
-#         return None
-#     df = pl.concat([
-#         pl.scan_csv(str(f)) \
-#             .with_columns(
-#                 condition=pl.lit(cond),
-#                 trait=pl.lit(f.name
-#                     .replace(f'{cond}_', '')
-#                     .replace('.Cauchy.csv.gz', '')))
-#         for f, cond in files
-#     ])
-#     if cell_types is not None:
-#         df = df.filter(pl.col('annotation').is_in(list(cell_types)))
-#     return df
+import pickle
+import time
+from collections import defaultdict
+from math import comb, factorial
+from scipy.stats import t as t_dist
 
-# def cauchy_table(output_dir, conditions, cell_types=None, traits=None):
-#     df = load_cauchy(output_dir, conditions, cell_types)
-#     if df is None:
-#         return pd.DataFrame()
-#     agg = df \
-#         .with_columns(
-#             p_log=(-pl.col('p_cauchy').log10()).fill_null(0.0)) \
-#         .group_by(['condition', 'trait', 'annotation']) \
-#         .agg(pl.col('p_log').median()) \
-#         .collect() \
-#         .to_pandas()
-#     avg = agg \
-#         .groupby(['trait', 'annotation'])['p_log'] \
-#         .mean().reset_index() \
-#         .rename(columns={'p_log': 'avg_score'})
-#     wide = agg.pivot(
-#         index=['trait', 'annotation'],
-#         columns='condition', values='p_log'
-#     ).reset_index()
-#     result = pd.merge(wide, avg, on=['trait', 'annotation'])
-#     if traits:
-#         result = result[result['trait'].isin(traits)]
-#     return result.sort_values('avg_score', ascending=False)
+META_CONTRAST_PLATFORMS = {
+    'PREG_vs_CTRL':     ['slidetags', 'xenium'],
+    'POSTPART_vs_PREG': ['slidetags'],
+    'POSTPART_vs_CTRL': ['slidetags'],
+}
+META_MIN_CELLS_PER_SAMPLE = 20  # (sample, cell-type) included only if >= N cells
+META_MIN_SAMPLES_PER_COND = 2   # need >= N samples per condition to test
+META_N_PERM = 1000
+META_SEED = 12345
+META_FDR = FDR_THRESHOLD
 
-# def load_spatial_ldsc(output_dir, conditions, adata, traits):
-#     frames = []
-#     obs = adata.obs
-#     for cond in conditions:
-#         ldsc_dir = Path(output_dir) / cond / 'spatial_ldsc'
-#         if not ldsc_dir.is_dir():
-#             continue
-#         for trait in traits:
-#             f = ldsc_dir / f'{cond}_{trait}.csv.gz'
-#             if not f.exists():
-#                 continue
-#             df = pl.scan_csv(str(f)) \
-#                 .with_columns(
-#                     condition=pl.lit(cond),
-#                     trait=pl.lit(trait),
-#                     gsmap_score=-pl.col('p').log10())
-#             frames.append(df)
-#     if not frames:
-#         return None
-#     cell_ann = pl.DataFrame({
-#         'spot': obs.index.tolist(),
-#         'annotation': obs[cell_type_col].astype(str).tolist(),
-#     })
-#     return pl.concat(frames) \
-#         .join(cell_ann.lazy(), on='spot', how='inner') \
-#         .select(['spot', 'gsmap_score', 'annotation',
-#                  'trait', 'condition'])
+meta_out = f'{working_dir}/output'
+meta_perm_dir = f'{meta_out}/gsmap_meta_perms'
+os.makedirs(meta_perm_dir, exist_ok=True)
 
-# def trait_associations(output_dir, conditions, contrasts,
-#                        adata, traits):
-#     df = load_spatial_ldsc(output_dir, conditions, adata, traits)
-#     if df is None:
-#         return pd.DataFrame()
-#     df = df.collect().to_pandas()
-#     results = []
-#     for (trait, annotation), group in df.groupby(['trait', 'annotation']):
-#         for treat, ctrl in contrasts:
-#             t_vals = group.loc[
-#                 group['condition'] == treat, 'gsmap_score'].values
-#             c_vals = group.loc[
-#                 group['condition'] == ctrl, 'gsmap_score'].values
-#             if len(t_vals) < 3 or len(c_vals) < 3:
-#                 continue
-#             _, p = mannwhitneyu(
-#                 t_vals, c_vals, alternative='two-sided')
-#             results.append({
-#                 'trait': trait,
-#                 'cell_type': annotation,
-#                 'comparison': f'{treat}_vs_{ctrl}',
-#                 'median_diff': np.median(t_vals) - np.median(c_vals),
-#                 'p_value': p,
-#                 'n_treat': len(t_vals),
-#                 'n_ctrl': len(c_vals),
-#             })
-#     result = pd.DataFrame(results)
-#     if not result.empty:
-#         valid = ~result['p_value'].isna()
-#         result['p_adj'] = np.nan
-#         if valid.sum() > 0:
-#             _, p_adj, _, _ = multipletests(
-#                 result.loc[valid, 'p_value'], method='fdr_bh')
-#             result.loc[valid, 'p_adj'] = p_adj
-#     return result
+def bh_fdr(p):
+    p = np.asarray(p, dtype=float)
+    valid = ~np.isnan(p)
+    out = np.full_like(p, np.nan)
+    if not valid.any():
+        return out
+    pv = p[valid]
+    n = len(pv)
+    order = np.argsort(pv)
+    ranks = np.empty(n, dtype=np.int64)
+    ranks[order] = np.arange(1, n + 1)
+    q = (pv * n / ranks)[order]
+    q = np.minimum.accumulate(q[::-1])[::-1]
+    q_final = np.empty(n)
+    q_final[order] = np.clip(q, 0, 1)
+    out[valid] = q_final
+    return out
 
-# for name, cfg in datasets.items():
-#     conditions = sorted(adatas[name].obs['condition'].unique())
-#     output = f'{working_dir}/output/{name}/gsmap'
-#     out_dir = f'{working_dir}/output/{name}'
-#     os.makedirs(out_dir, exist_ok=True)
+def irwin_hall_cdf(x, n):
+    # CDF of sum of n iid Uniform(0,1). Analytical null for sum of normalized
+    # ranks across n platforms.
+    x = np.clip(np.atleast_1d(x).astype(float), 0.0, float(n))
+    out = np.zeros_like(x)
+    for k in range(n + 1):
+        diff = x - k
+        m = diff > 0
+        if m.any():
+            out[m] += ((-1) ** k) * comb(n, k) * diff[m] ** n
+    return out / factorial(n)
 
-#     cell_types = set(adatas[name].obs[cell_type_col].unique())
+def load_ldsc_long(name, adata):
+    # Per-cell long frame: (spot, trait, dataset, score, sample, condition, cell_type)
+    obs = adata.obs[['sample', 'condition', cell_type_col]].astype(str)
+    obs_pl = pl.from_pandas(
+        obs.reset_index().rename(columns={
+            'index': 'spot', cell_type_col: 'cell_type'}))
+    base = f'{meta_out}/{name}/gsmap'
+    frames = []
+    for cond in sorted(obs['condition'].unique()):
+        d = Path(base) / cond / 'spatial_ldsc'
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob(f'{cond}_*.csv.gz')):
+            trait = f.name.replace(f'{cond}_', '').replace('.csv.gz', '')
+            frames.append(
+                pl.scan_csv(str(f))
+                  .with_columns(
+                      score=-pl.col('p').log10(),
+                      trait=pl.lit(trait),
+                      dataset=pl.lit(name))
+                  .select(['spot', 'trait', 'dataset', 'score']))
+    if not frames:
+        return pl.DataFrame()
+    return pl.concat(frames).collect().join(obs_pl, on='spot', how='inner')
 
-#     ct = cauchy_table(output, conditions, cell_types)
-#     if not ct.empty:
-#         ct.to_csv(
-#             f'{out_dir}/gsmap_cauchy_table.csv', index=False)
-#         print(f'[{name}] cauchy table: {ct.shape[0]} rows')
+def compute_sample_means(long_df):
+    # Collapse cells -> per-sample mean -log10(p), min-cells filter.
+    return long_df \
+        .group_by(['dataset', 'trait', 'cell_type', 'sample', 'condition']) \
+        .agg([pl.col('score').mean().alias('mean_score'),
+              pl.col('score').count().alias('n_cells')]) \
+        .filter(pl.col('n_cells') >= META_MIN_CELLS_PER_SAMPLE)
 
-#     ta = trait_associations(
-#         output, conditions, cfg['contrasts'],
-#         adatas[name], all_traits)
-#     if not ta.empty:
-#         ta.to_csv(
-#             f'{out_dir}/gsmap_associations.csv', index=False)
-#         n_sig = int((ta['p_adj'] < FDR_THRESHOLD).sum())
-#         print(f'[{name}] associations: {ta.shape[0]} tests, '
-#               f'{n_sig} sig (FDR<{FDR_THRESHOLD})')
-#         ta_sig = ta[ta['p_adj'] < FDR_THRESHOLD] \
-#             .sort_values('p_adj')
-#         if not ta_sig.empty:
-#             ta_sig.to_csv(
-#                 f'{out_dir}/gsmap_associations_sig.csv',
-#                 index=False)
+def per_dataset_diff(means, contrast):
+    # Welch t on sample means between treat and base of `contrast`, per
+    # (dataset, trait, cell_type). Vectorized.
+    treat, base = contrast.split('_vs_')
+    agg = means \
+        .filter(pl.col('condition').is_in([treat, base])) \
+        .group_by(['dataset', 'trait', 'cell_type', 'condition']) \
+        .agg([pl.col('mean_score').mean().alias('m'),
+              pl.col('mean_score').var(ddof=1).fill_null(0.0).alias('v'),
+              pl.col('mean_score').count().alias('n')])
+    treat_df = agg.filter(pl.col('condition') == treat) \
+        .drop('condition') \
+        .rename({'m': 'm_t', 'v': 'v_t', 'n': 'n_t'})
+    base_df = agg.filter(pl.col('condition') == base) \
+        .drop('condition') \
+        .rename({'m': 'm_b', 'v': 'v_b', 'n': 'n_b'})
+    wide = treat_df.join(
+        base_df, on=['dataset', 'trait', 'cell_type'], how='inner') \
+        .filter((pl.col('n_t') >= META_MIN_SAMPLES_PER_COND) &
+                (pl.col('n_b') >= META_MIN_SAMPLES_PER_COND))
+    if wide.height == 0:
+        return pl.DataFrame()
+    m_t = wide['m_t'].to_numpy()
+    m_b = wide['m_b'].to_numpy()
+    v_t = np.nan_to_num(wide['v_t'].to_numpy())
+    v_b = np.nan_to_num(wide['v_b'].to_numpy())
+    n_t = wide['n_t'].to_numpy().astype(float)
+    n_b = wide['n_b'].to_numpy().astype(float)
+    beta = m_t - m_b
+    se2 = v_t / n_t + v_b / n_b
+    with np.errstate(divide='ignore', invalid='ignore'):
+        se = np.sqrt(se2)
+        t = np.where(se > 0, beta / se, np.nan)
+        num = se2 ** 2
+        den = (v_t ** 2) / (n_t ** 2 * np.maximum(n_t - 1, 1)) \
+            + (v_b ** 2) / (n_b ** 2 * np.maximum(n_b - 1, 1))
+        df = np.where(den > 0, num / den, 1.0)
+    p = np.where(np.isfinite(t), 2 * t_dist.sf(np.abs(t), df), np.nan)
+    return wide.with_columns([
+        pl.Series('beta', beta),
+        pl.Series('t', t),
+        pl.Series('p', p),
+        pl.lit(contrast).alias('contrast'),
+    ]).select([
+        'dataset', 'contrast', 'trait', 'cell_type',
+        'beta', 't', 'p',
+        pl.col('n_t').alias('n_treat'),
+        pl.col('n_b').alias('n_base'),
+    ])
 
-# #endregion
+def sumrank_gsmap(stats_df, platforms, contrast):
+    # Within each trait, rank cell-types per dataset by signed -log10(p),
+    # sum normalized ranks across datasets. Cell-types present in only one
+    # dataset (D<2) are dropped.
+    out = []
+    for trait in stats_df['trait'].unique().to_list():
+        sub_t = stats_df.filter(pl.col('trait') == trait)
+        rank_dfs, active = [], []
+        for ds in platforms:
+            s = sub_t.filter(pl.col('dataset') == ds)
+            if s.height == 0:
+                continue
+            pv = np.clip(s['p'].to_numpy().astype(float), 1e-300, 1.0)
+            sign = np.sign(s['beta'].to_numpy())
+            score = np.nan_to_num(-np.log10(pv) * sign)
+            order = np.argsort(-score, kind='stable')
+            rank = np.empty(len(score), dtype=np.int64)
+            rank[order] = np.arange(1, len(score) + 1)
+            nrank = (rank - 1) / max(len(score) - 1, 1)
+            rank_dfs.append(pl.DataFrame({
+                'cell_type': s['cell_type'],
+                f'nrank_{ds}': nrank}))
+            active.append(ds)
+        if len(rank_dfs) < 2:
+            continue
+        merged = rank_dfs[0]
+        for rd in rank_dfs[1:]:
+            merged = merged.join(rd, on='cell_type', how='full',
+                                 coalesce=True)
+        arr = merged.select(
+            [f'nrank_{p}' for p in active]).to_numpy()
+        d = (~np.isnan(arr)).sum(axis=1)
+        s_sum = np.nansum(arr, axis=1)
+        keep = d >= 2
+        if not keep.any():
+            continue
+        nlp_up = np.full(len(d), np.nan)
+        nlp_dn = np.full(len(d), np.nan)
+        for k in np.unique(d[keep]):
+            idx = (d == int(k)) & keep
+            cdf = irwin_hall_cdf(s_sum[idx], int(k))
+            nlp_up[idx] = -np.log10(np.clip(cdf, 1e-300, 1.0))
+            nlp_dn[idx] = -np.log10(np.clip(1 - cdf, 1e-300, 1.0))
+        out.append(pl.DataFrame({
+            'contrast': contrast,
+            'trait': trait,
+            'cell_type': merged['cell_type'],
+            'D': d.astype(np.int64),
+            'sum_stat': s_sum,
+            'nlp_up': nlp_up,
+            'nlp_down': nlp_dn,
+        }).filter(pl.col('D') >= 2))
+    return pl.concat(out) if out else pl.DataFrame()
 
-# #region plot — trait ranking ###################################################
+def build_perm_map(means, rng):
+    # Shuffle sample->condition within each dataset independently.
+    parts = []
+    for ds in means['dataset'].unique().to_list():
+        meta = means.filter(pl.col('dataset') == ds) \
+            .select(['sample', 'condition']).unique()
+        samples = meta['sample'].to_list()
+        conds = meta['condition'].to_numpy().copy()
+        rng.shuffle(conds)
+        parts.append(pl.DataFrame({
+            'dataset': [ds] * len(samples),
+            'sample': samples,
+            'perm_condition': conds.tolist()}))
+    return pl.concat(parts)
 
-# plt.rcParams['svg.fonttype'] = 'none'
-# plt.rcParams['font.family'] = 'DejaVu Sans'
-# plt.rcParams['figure.dpi'] = 300
+def apply_perm_map(means, perm_map):
+    return means.drop('condition').join(
+        perm_map, on=['dataset', 'sample'], how='inner'
+    ).rename({'perm_condition': 'condition'})
 
-# BONFERRONI_ALPHA = 0.05
+def calibrate_emp_p(real, null_by_ct):
+    # Empirical p per (trait, cell-type): tail fraction of null for that cell-
+    # type. Pooled up+down under exchangeability doubles null resolution.
+    emp_up = np.full(real.height, np.nan)
+    emp_dn = np.full(real.height, np.nan)
+    nlp_up = real['nlp_up'].to_numpy()
+    nlp_dn = real['nlp_down'].to_numpy()
+    cts = real['cell_type'].to_numpy()
+    for ct in np.unique(cts):
+        nu = null_by_ct.get(ct, np.array([]))
+        if len(nu) == 0:
+            continue
+        msk = cts == ct
+        for vals, emp in [(nlp_up[msk], emp_up), (nlp_dn[msk], emp_dn)]:
+            idx = np.searchsorted(nu, vals, side='left')
+            emp[msk] = np.maximum((len(nu) - idx) / len(nu),
+                                  1.0 / len(nu))
+    return emp_up, emp_dn
 
-# rankings = {}
-# thresholds = {}
-# for name in datasets:
-#     conditions = sorted(adatas[name].obs['condition'].unique())
-#     cell_types = set(adatas[name].obs[cell_type_col].unique())
-#     output = f'{working_dir}/output/{name}/gsmap'
-#     df = load_cauchy(output, conditions, cell_types)
-#     if df is None:
-#         continue
-#     stats = df.select(['trait', 'annotation']).collect()
-#     n_traits = stats['trait'].n_unique()
-#     n_ann = stats['annotation'].n_unique()
-#     thresholds[name] = \
-#         -np.log10(BONFERRONI_ALPHA / (n_traits * n_ann))
-#     rankings[name] = df \
-#         .with_columns(p_log=(-pl.col('p_cauchy').log10())) \
-#         .group_by('trait', 'annotation', 'condition') \
-#         .agg(pl.median('p_log').alias('median_log_p')) \
-#         .group_by('trait') \
-#         .agg(pl.max('median_log_p').alias('peak_score')) \
-#         .sort('peak_score', descending=True) \
-#         .collect() \
-#         .to_pandas()
+def summarize_null_by_ct(sr_k, null_by_ct):
+    for ct in sr_k['cell_type'].unique().to_list():
+        sub = sr_k.filter(pl.col('cell_type') == ct)
+        u = sub['nlp_up'].to_numpy()
+        d = sub['nlp_down'].to_numpy()
+        null_by_ct[ct].append(u[~np.isnan(u)])
+        null_by_ct[ct].append(d[~np.isnan(d)])
 
-# trait_scores = {}
-# for ranking in rankings.values():
-#     for _, row in ranking.iterrows():
-#         trait_scores \
-#             .setdefault(row['trait'], []) \
-#             .append(row['peak_score'])
-# trait_order = sorted(
-#     trait_scores, key=lambda t: np.mean(trait_scores[t]))
+# ---- main pipeline ----------------------------------------------------------
 
-# ds_list = [n for n in datasets if n in rankings]
-# fig, axes = plt.subplots(
-#     1, len(ds_list),
-#     figsize=(2.5 * len(ds_list), 3.5),
-#     sharey=True, squeeze=False)
+# 1. per-cell scores -> per-sample means (cached)
+means_cache = f'{meta_out}/gsmap_sample_means.parquet'
+if os.path.exists(means_cache):
+    means = pl.read_parquet(means_cache)
+    print(f'[meta] sample means cached: {means.height:,} rows')
+else:
+    long_frames = []
+    for name in datasets:
+        df = load_ldsc_long(name, adatas[name])
+        if df.height:
+            long_frames.append(df)
+            print(f'[meta] {name}: {df.height:,} cell-trait rows loaded')
+    if long_frames:
+        means = compute_sample_means(pl.concat(long_frames, how='diagonal'))
+        means.write_parquet(means_cache)
+        print(f'[meta] computed {means.height:,} sample means')
+    else:
+        means = pl.DataFrame()
 
-# for i, name in enumerate(ds_list):
-#     ax = axes[0, i]
-#     ranking = rankings[name] \
-#         .set_index('trait') \
-#         .reindex(trait_order) \
-#         .reset_index()
-#     ranking['peak_score'] = ranking['peak_score'].fillna(0)
-#     scores = ranking['peak_score'].values
-#     norm = mcolors.Normalize(
-#         vmin=scores.min(), vmax=scores.max())
-#     cmap = plt.get_cmap('GnBu')
-#     sns.barplot(
-#         x='peak_score', y='trait', data=ranking,
-#         hue='trait',
-#         palette=[cmap(norm(s)) for s in scores],
-#         ax=ax, orient='h', legend=False)
-#     ax.axvline(
-#         x=thresholds[name], color='black',
-#         linestyle='--', linewidth=1)
-#     ax.set_xlabel('Peak Score')
-#     ax.set_ylabel('')
-#     ax.set_title(name, fontsize=9)
-#     sns.despine(ax=ax)
-#     ax.tick_params(axis='y', length=0)
+# 2. per-dataset Welch t per contrast
+per_ds_frames = []
+for contrast, platforms in META_CONTRAST_PLATFORMS.items():
+    for ds in platforms:
+        if ds not in datasets:
+            continue
+        ds_contrasts = {f'{t}_vs_{c}' for t, c in datasets[ds]['contrasts']}
+        if contrast not in ds_contrasts:
+            continue
+        d = per_dataset_diff(
+            means.filter(pl.col('dataset') == ds), contrast)
+        if d.height:
+            per_ds_frames.append(d)
+            print(f'[meta] {ds} {contrast}: '
+                  f'{d.height} (trait, cell-type) tests')
 
-# fig.tight_layout()
-# os.makedirs(f'{working_dir}/figures', exist_ok=True)
-# fig.savefig(
-#     f'{working_dir}/figures/gsmap_trait_ranking.png',
-#     dpi=300, bbox_inches='tight')
-# fig.savefig(
-#     f'{working_dir}/figures/gsmap_trait_ranking.svg',
-#     bbox_inches='tight')
-# plt.close(fig)
+if per_ds_frames:
+    per_dataset = pl.concat(per_ds_frames)
+    per_dataset = per_dataset.with_columns(
+        pl.Series('fdr', bh_fdr(per_dataset['p'].to_numpy())))
+    per_dataset.write_csv(f'{meta_out}/gsmap_per_dataset.csv')
+else:
+    per_dataset = pl.DataFrame()
 
-# #endregion
+# 3. meta-analysis + permutation null for contrasts with >=2 platforms
+meta_frames = []
+for contrast, platforms in META_CONTRAST_PLATFORMS.items():
+    if len(platforms) < 2 or per_dataset.height == 0:
+        continue
+    stats_c = per_dataset.filter(pl.col('contrast') == contrast)
+    if stats_c.height == 0:
+        continue
+    real = sumrank_gsmap(stats_c, platforms, contrast)
+    if real.height == 0:
+        print(f'[meta] {contrast}: no (trait, cell-type) with D>=2')
+        continue
+
+    # permutation null (cached per contrast)
+    cache_path = f'{meta_perm_dir}/null_{contrast}.pkl'
+    if os.path.exists(cache_path):
+        with open(cache_path, 'rb') as fh:
+            null_by_ct = pickle.load(fh)
+        print(f'[meta] {contrast}: null cached')
+    else:
+        treat, base = contrast.split('_vs_')
+        ds_means = means.filter(
+            pl.col('dataset').is_in(platforms) &
+            pl.col('condition').is_in([treat, base]))
+        rng = np.random.default_rng(META_SEED)
+        null_by_ct = defaultdict(list)
+        t0 = time.time()
+        print(f'[meta] {contrast}: running {META_N_PERM} permutations')
+        for k in range(META_N_PERM):
+            perm_means = apply_perm_map(
+                ds_means, build_perm_map(ds_means, rng))
+            per_ds_k = []
+            for ds in platforms:
+                d = per_dataset_diff(
+                    perm_means.filter(pl.col('dataset') == ds), contrast)
+                if d.height:
+                    per_ds_k.append(d)
+            if not per_ds_k:
+                continue
+            sr_k = sumrank_gsmap(
+                pl.concat(per_ds_k), platforms, contrast)
+            if sr_k.height:
+                summarize_null_by_ct(sr_k, null_by_ct)
+            if (k + 1) % 100 == 0:
+                el = time.time() - t0
+                print(f'[meta] {contrast}: perm {k+1}/{META_N_PERM} '
+                      f'({el:.0f}s, eta '
+                      f'{el*(META_N_PERM-k-1)/(k+1):.0f}s)',
+                      flush=True)
+        null_by_ct = {
+            ct: np.sort(np.concatenate(arrs)) if arrs else np.array([])
+            for ct, arrs in null_by_ct.items()}
+        with open(cache_path, 'wb') as fh:
+            pickle.dump(null_by_ct, fh)
+        print(f'[meta] {contrast}: null saved '
+              f'({(time.time()-t0)/60:.1f} min)')
+
+    emp_up, emp_dn = calibrate_emp_p(real, null_by_ct)
+    real = real.with_columns([
+        pl.Series('emp_p_up', emp_up),
+        pl.Series('emp_p_down', emp_dn),
+        pl.Series('emp_fdr_up', bh_fdr(emp_up)),
+        pl.Series('emp_fdr_down', bh_fdr(emp_dn)),
+    ])
+    meta_frames.append(real)
+
+if meta_frames:
+    meta = pl.concat(meta_frames)
+    # attach per-dataset betas for interpretability
+    beta_wide = per_dataset.select(
+        ['contrast', 'trait', 'cell_type', 'dataset', 'beta']) \
+        .pivot(on='dataset', index=['contrast', 'trait', 'cell_type'],
+               values='beta')
+    beta_wide = beta_wide.rename({
+        c: f'beta_{c}' for c in beta_wide.columns
+        if c not in ('contrast', 'trait', 'cell_type')})
+    meta = meta.join(
+        beta_wide, on=['contrast', 'trait', 'cell_type'], how='left')
+    meta.write_csv(f'{meta_out}/gsmap_meta.csv')
+else:
+    meta = pl.DataFrame()
+
+# 4. summary
+for contrast in META_CONTRAST_PLATFORMS:
+    if per_dataset.height:
+        s = per_dataset.filter(pl.col('contrast') == contrast)
+        if s.height:
+            n_sig = s.filter(pl.col('fdr') < META_FDR).height
+            print(f'[meta] {contrast} per-dataset: {s.height} tests, '
+                  f'{n_sig} FDR<{META_FDR}')
+    if meta.height:
+        s = meta.filter(pl.col('contrast') == contrast)
+        if s.height:
+            n_up = s.filter(pl.col('emp_fdr_up') < META_FDR).height
+            n_dn = s.filter(pl.col('emp_fdr_down') < META_FDR).height
+            n_ct = s['cell_type'].n_unique()
+            n_tr = s['trait'].n_unique()
+            print(f'[meta] {contrast} meta: {n_tr} traits x {n_ct} cts, '
+                  f'{n_up} up / {n_dn} down emp_fdr<{META_FDR}')
+
+#endregion
+
