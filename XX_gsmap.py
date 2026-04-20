@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import scanpy as sc
-import yaml
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import seaborn as sns
@@ -41,118 +40,6 @@ gwas_dir = f'{gsmap_input}/GWAS'
 gwas_formatted_dir = f'{gsmap_input}/GWAS_formatted'
 resource_dir = f'{gsmap_input}/gsMap_resource'
 homolog_file = f'{resource_dir}/homologs/mouse_human_homologs.txt'
-gwas_config_path = f'{gwas_formatted_dir}/gwas_config.yaml'
-
-def load_cauchy(output_dir, conditions, cell_types=None):
-    files = []
-    for cond in conditions:
-        d = Path(output_dir) / cond / 'cauchy_combination'
-        if not d.is_dir():
-            continue
-        for f in d.glob('*.Cauchy.csv.gz'):
-            files.append((f, cond))
-    if not files:
-        return None
-    df = pl.concat([
-        pl.scan_csv(str(f)) \
-            .with_columns(
-                condition=pl.lit(cond),
-                trait=pl.lit(f.name
-                    .replace(f'{cond}_', '')
-                    .replace('.Cauchy.csv.gz', '')))
-        for f, cond in files
-    ])
-    if cell_types is not None:
-        df = df.filter(pl.col('annotation').is_in(list(cell_types)))
-    return df
-
-def cauchy_table(output_dir, conditions, cell_types=None, traits=None):
-    df = load_cauchy(output_dir, conditions, cell_types)
-    if df is None:
-        return pd.DataFrame()
-    agg = df \
-        .with_columns(
-            p_log=(-pl.col('p_cauchy').log10()).fill_null(0.0)) \
-        .group_by(['condition', 'trait', 'annotation']) \
-        .agg(pl.col('p_log').median()) \
-        .collect() \
-        .to_pandas()
-    avg = agg \
-        .groupby(['trait', 'annotation'])['p_log'] \
-        .mean().reset_index() \
-        .rename(columns={'p_log': 'avg_score'})
-    wide = agg.pivot(
-        index=['trait', 'annotation'],
-        columns='condition', values='p_log'
-    ).reset_index()
-    result = pd.merge(wide, avg, on=['trait', 'annotation'])
-    if traits:
-        result = result[result['trait'].isin(traits)]
-    return result.sort_values('avg_score', ascending=False)
-
-def load_spatial_ldsc(output_dir, conditions, adata, traits):
-    frames = []
-    obs = adata.obs
-    for cond in conditions:
-        ldsc_dir = Path(output_dir) / cond / 'spatial_ldsc'
-        if not ldsc_dir.is_dir():
-            continue
-        for trait in traits:
-            f = ldsc_dir / f'{cond}_{trait}.csv.gz'
-            if not f.exists():
-                continue
-            df = pl.scan_csv(str(f)) \
-                .with_columns(
-                    condition=pl.lit(cond),
-                    trait=pl.lit(trait),
-                    gsmap_score=-pl.col('p').log10())
-            frames.append(df)
-    if not frames:
-        return None
-    cell_ann = pl.DataFrame({
-        'spot': obs.index.tolist(),
-        'annotation': obs[cell_type_col].astype(str).tolist(),
-    })
-    return pl.concat(frames) \
-        .join(cell_ann.lazy(), on='spot', how='inner') \
-        .select(['spot', 'gsmap_score', 'annotation',
-                 'trait', 'condition'])
-
-def trait_associations(output_dir, conditions, contrasts,
-                       adata, traits):
-    df = load_spatial_ldsc(output_dir, conditions, adata, traits)
-    if df is None:
-        return pd.DataFrame()
-    df = df.collect().to_pandas()
-    results = []
-    for (trait, annotation), group in df.groupby(['trait', 'annotation']):
-        for treat, ctrl in contrasts:
-            t_vals = group.loc[
-                group['condition'] == treat, 'gsmap_score'].values
-            c_vals = group.loc[
-                group['condition'] == ctrl, 'gsmap_score'].values
-            if len(t_vals) < 3 or len(c_vals) < 3:
-                continue
-            _, p = mannwhitneyu(
-                t_vals, c_vals, alternative='two-sided')
-            results.append({
-                'trait': trait,
-                'cell_type': annotation,
-                'comparison': f'{treat}_vs_{ctrl}',
-                'median_diff': np.median(t_vals) - np.median(c_vals),
-                'p_value': p,
-                'n_treat': len(t_vals),
-                'n_ctrl': len(c_vals),
-            })
-    result = pd.DataFrame(results)
-    if not result.empty:
-        valid = ~result['p_value'].isna()
-        result['p_adj'] = np.nan
-        if valid.sum() > 0:
-            _, p_adj, _, _ = multipletests(
-                result.loc[valid, 'p_value'], method='fdr_bh')
-            result.loc[valid, 'p_adj'] = p_adj
-    return result
 
 #endregion
 
@@ -161,8 +48,7 @@ def trait_associations(output_dir, conditions, contrasts,
 adatas = {}
 for name, cfg in datasets.items():
     adata = sc.read_h5ad(cfg['path'])
-    drop = cfg.get('drop_samples', [])
-    if drop:
+    if drop := cfg.get('drop_samples'):
         adata = adata[~adata.obs['sample'].isin(drop)].copy()
         print(f'[{name}] dropped samples: {drop}')
     adatas[name] = adata
@@ -170,8 +56,6 @@ for name, cfg in datasets.items():
           f'{adata.obs[cell_type_col].nunique()} subclasses, '
           f'{adata.obs["sample"].nunique()} samples')
 
-for name in datasets:
-    adata = adatas[name]
     st_dir = f'{gsmap_input}/{name}/ST'
     os.makedirs(st_dir, exist_ok=True)
     for cond in sorted(adata.obs['condition'].unique()):
@@ -215,17 +99,10 @@ for f in sorted(os.listdir(gwas_dir)):
         shell=True, check=True)
     print(f'formatted {basename}')
 
-with open(gwas_config_path, 'w') as fh:
-    for gwas_file in sorted(os.listdir(gwas_formatted_dir)):
-        if gwas_file.endswith('.sumstats.gz'):
-            trait = gwas_file.replace('.sumstats.gz', '')
-            path = os.path.abspath(
-                f'{gwas_formatted_dir}/{gwas_file}')
-            fh.write(f'{trait}: {path}\n')
-
-with open(gwas_config_path) as fh:
-    config = yaml.safe_load(fh)
-all_traits = list(config.keys()) if config else []
+all_traits = sorted(
+    f.removesuffix('.sumstats.gz')
+    for f in os.listdir(gwas_formatted_dir)
+    if f.endswith('.sumstats.gz'))
 print(f'{len(all_traits)} GWAS traits')
 
 #endregion
@@ -277,6 +154,14 @@ os.makedirs(log_dir, exist_ok=True)
 ds_abbr = {'slidetags': 'sl', 'xenium': 'xe'}
 cond_abbr = {'CTRL': 'C', 'PREG': 'P', 'POSTPART': 'PP'}
 
+try:
+    active = set(subprocess.check_output(
+        'squeue -h -u "$USER" -o "%500j"',
+        shell=True, text=True).split())
+except subprocess.CalledProcessError:
+    active = set()
+print(f'{len(active)} active jobs')
+
 for name in datasets:
     conditions = sorted(adatas[name].obs['condition'].unique())
     output = f'{working_dir}/output/{name}/gsmap'
@@ -284,19 +169,30 @@ for name in datasets:
 
     for cond in conditions:
         hdf5 = f'{gsmap_input}/{name}/ST/{cond}.h5ad'
-        ldsc_done = (
-            Path(output) / cond / 'generate_ldscore' /
-            f'{cond}_generate_ldscore.done').exists()
-        pending = [
-            t for t in all_traits
-            if not os.path.exists(
-                f'{output}/{cond}/cauchy_combination/'
-                f'{cond}_{t}.Cauchy.csv.gz')]
+        ldsc_done = (Path(output) / cond / 'generate_ldscore' /
+                     f'{cond}_generate_ldscore.done').exists()
+        tag_for = lambda t: (
+            f'{ds_abbr.get(name, name[:2])}_'
+            f'{cond_abbr.get(cond, cond)}_{t}')
+        done, queued, pending = [], [], []
+        for t in all_traits:
+            if os.path.exists(f'{output}/{cond}/cauchy_combination/'
+                              f'{cond}_{t}.Cauchy.csv.gz'):
+                done.append(t)
+            elif tag_for(t) in active:
+                queued.append(t)
+            else:
+                pending.append(t)
+        print(f'[{name}] {cond}: {len(done)} done, '
+              f'{len(queued)} in-flight, {len(pending)} to submit')
         if not pending:
-            print(f'[{name}] {cond}: all {len(all_traits)} traits done')
             continue
 
+        done_marker = (f'{output}/{cond}/generate_ldscore/'
+                       f'{cond}_generate_ldscore.done')
         def submit(trait, depends=None):
+            cauchy = (f'{output}/{cond}/cauchy_combination/'
+                      f'{cond}_{trait}.Cauchy.csv.gz')
             cmd = (
                 f"python -m gsMap quick_mode "
                 f"--workdir '{output}' "
@@ -308,28 +204,137 @@ for name in datasets:
                 f"--data_layer 'X' "
                 f"--trait_name '{trait}' "
                 f"--sumstats_file '{gwas_formatted_dir}/{trait}.sumstats.gz' "
-                f"--max_processes $(nproc)")
-            tag = (f'{ds_abbr.get(name, name[:2])}_'
-                   f'{cond_abbr.get(cond, cond)}_{trait}')
+                f"--max_processes $(nproc) "
+                f"|| {{ test -f '{done_marker}' && test -f '{cauchy}'; }}")
             return submit_slurm(
-                cmd, job_name=tag,
+                cmd, job_name=tag_for(trait),
                 log_file=f'{log_dir}/{name}_{cond}_{trait}.log',
                 depends=depends)
 
         anchor_jid = None
         if not ldsc_done:
-            anchor_trait = pending.pop(0)
-            anchor_jid = submit(anchor_trait)
-            print(f'[{name}] {cond} {anchor_trait} (prep+ldsc) '
-                  f'-> job {anchor_jid}')
+            anchor = pending.pop(0)
+            anchor_jid = submit(anchor)
+            print(f'  {anchor} (prep+ldsc) -> {anchor_jid}')
         for trait in pending:
             jid = submit(trait, depends=anchor_jid)
-            dep = f' (waits on {anchor_jid})' if anchor_jid else ''
-            print(f'[{name}] {cond} {trait} -> job {jid}{dep}')
+            tail = f' (waits {anchor_jid})' if anchor_jid else ''
+            print(f'  {trait} -> {jid}{tail}')
 
 #endregion
 
 # #region analysis ###############################################################
+
+# def load_cauchy(output_dir, conditions, cell_types=None):
+#     files = []
+#     for cond in conditions:
+#         d = Path(output_dir) / cond / 'cauchy_combination'
+#         if not d.is_dir():
+#             continue
+#         for f in d.glob('*.Cauchy.csv.gz'):
+#             files.append((f, cond))
+#     if not files:
+#         return None
+#     df = pl.concat([
+#         pl.scan_csv(str(f)) \
+#             .with_columns(
+#                 condition=pl.lit(cond),
+#                 trait=pl.lit(f.name
+#                     .replace(f'{cond}_', '')
+#                     .replace('.Cauchy.csv.gz', '')))
+#         for f, cond in files
+#     ])
+#     if cell_types is not None:
+#         df = df.filter(pl.col('annotation').is_in(list(cell_types)))
+#     return df
+
+# def cauchy_table(output_dir, conditions, cell_types=None, traits=None):
+#     df = load_cauchy(output_dir, conditions, cell_types)
+#     if df is None:
+#         return pd.DataFrame()
+#     agg = df \
+#         .with_columns(
+#             p_log=(-pl.col('p_cauchy').log10()).fill_null(0.0)) \
+#         .group_by(['condition', 'trait', 'annotation']) \
+#         .agg(pl.col('p_log').median()) \
+#         .collect() \
+#         .to_pandas()
+#     avg = agg \
+#         .groupby(['trait', 'annotation'])['p_log'] \
+#         .mean().reset_index() \
+#         .rename(columns={'p_log': 'avg_score'})
+#     wide = agg.pivot(
+#         index=['trait', 'annotation'],
+#         columns='condition', values='p_log'
+#     ).reset_index()
+#     result = pd.merge(wide, avg, on=['trait', 'annotation'])
+#     if traits:
+#         result = result[result['trait'].isin(traits)]
+#     return result.sort_values('avg_score', ascending=False)
+
+# def load_spatial_ldsc(output_dir, conditions, adata, traits):
+#     frames = []
+#     obs = adata.obs
+#     for cond in conditions:
+#         ldsc_dir = Path(output_dir) / cond / 'spatial_ldsc'
+#         if not ldsc_dir.is_dir():
+#             continue
+#         for trait in traits:
+#             f = ldsc_dir / f'{cond}_{trait}.csv.gz'
+#             if not f.exists():
+#                 continue
+#             df = pl.scan_csv(str(f)) \
+#                 .with_columns(
+#                     condition=pl.lit(cond),
+#                     trait=pl.lit(trait),
+#                     gsmap_score=-pl.col('p').log10())
+#             frames.append(df)
+#     if not frames:
+#         return None
+#     cell_ann = pl.DataFrame({
+#         'spot': obs.index.tolist(),
+#         'annotation': obs[cell_type_col].astype(str).tolist(),
+#     })
+#     return pl.concat(frames) \
+#         .join(cell_ann.lazy(), on='spot', how='inner') \
+#         .select(['spot', 'gsmap_score', 'annotation',
+#                  'trait', 'condition'])
+
+# def trait_associations(output_dir, conditions, contrasts,
+#                        adata, traits):
+#     df = load_spatial_ldsc(output_dir, conditions, adata, traits)
+#     if df is None:
+#         return pd.DataFrame()
+#     df = df.collect().to_pandas()
+#     results = []
+#     for (trait, annotation), group in df.groupby(['trait', 'annotation']):
+#         for treat, ctrl in contrasts:
+#             t_vals = group.loc[
+#                 group['condition'] == treat, 'gsmap_score'].values
+#             c_vals = group.loc[
+#                 group['condition'] == ctrl, 'gsmap_score'].values
+#             if len(t_vals) < 3 or len(c_vals) < 3:
+#                 continue
+#             _, p = mannwhitneyu(
+#                 t_vals, c_vals, alternative='two-sided')
+#             results.append({
+#                 'trait': trait,
+#                 'cell_type': annotation,
+#                 'comparison': f'{treat}_vs_{ctrl}',
+#                 'median_diff': np.median(t_vals) - np.median(c_vals),
+#                 'p_value': p,
+#                 'n_treat': len(t_vals),
+#                 'n_ctrl': len(c_vals),
+#             })
+#     result = pd.DataFrame(results)
+#     if not result.empty:
+#         valid = ~result['p_value'].isna()
+#         result['p_adj'] = np.nan
+#         if valid.sum() > 0:
+#             _, p_adj, _, _ = multipletests(
+#                 result.loc[valid, 'p_value'], method='fdr_bh')
+#             result.loc[valid, 'p_adj'] = p_adj
+#     return result
 
 # for name, cfg in datasets.items():
 #     conditions = sorted(adatas[name].obs['condition'].unique())

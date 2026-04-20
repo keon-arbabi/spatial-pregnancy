@@ -832,14 +832,12 @@ async function selectDataset(name) {
     for (const s of state.manifest.reference.sections) {
         const el = makePanel('REF', `section ${s.short}`, s.n_cells);
         refGrid.appendChild(el);
-        refPanels.push({el, entry: s});
+        refPanels.push({el, entry: s, entries: [s]});
     }
 
     // build query panels, ordered CTRL → PREG → POSTPART then by sample_rep
     const qGrid = document.getElementById('query-grid');
     qGrid.innerHTML = '';
-    const ncols = Math.min(5, ds.samples.length);
-    qGrid.style.gridTemplateColumns = `repeat(${ncols}, 1fr)`;
     const sortedSamples = [...ds.samples].sort((a, b) => {
         const ca = COND_ORDER.indexOf(a.condition);
         const cb = COND_ORDER.indexOf(b.condition);
@@ -847,12 +845,32 @@ async function selectDataset(name) {
         const ib = cb >= 0 ? cb : COND_ORDER.length;
         return ia !== ib ? ia - ib : a.sample_rep.localeCompare(b.sample_rep);
     });
+
+    // slidetags has multiple sample_reps per sample — merge them into one
+    // panel per sample (matching the sample-level pseudobulk aggregation).
     const queryPanels = [];
-    for (const s of sortedSamples) {
-        const el = makePanel(s.condition, s.sample_rep, s.n_cells);
-        qGrid.appendChild(el);
-        queryPanels.push({el, entry: s});
+    if (name === 'slidetags') {
+        const groups = new Map();  // sample -> [entries...]
+        for (const s of sortedSamples) {
+            if (!groups.has(s.sample)) groups.set(s.sample, []);
+            groups.get(s.sample).push(s);
+        }
+        for (const [sample, entries] of groups) {
+            const primary = entries[0];
+            const total = entries.reduce((a, e) => a + e.n_cells, 0);
+            const el = makePanel(primary.condition, sample, total);
+            qGrid.appendChild(el);
+            queryPanels.push({el, entry: primary, entries});
+        }
+    } else {
+        for (const s of sortedSamples) {
+            const el = makePanel(s.condition, s.sample_rep, s.n_cells);
+            qGrid.appendChild(el);
+            queryPanels.push({el, entry: s, entries: [s]});
+        }
     }
+    const ncols = Math.min(5, Math.max(queryPanels.length, 1));
+    qGrid.style.gridTemplateColumns = `repeat(${ncols}, 1fr)`;
 
     state.panels = [...refPanels, ...queryPanels];
 
@@ -868,14 +886,17 @@ async function selectDataset(name) {
     // load all binaries in parallel
     setStatus(`loading ${state.panels.length} slices…`);
     try {
-        await Promise.all(state.panels.map(p => loadSlice(p.entry)));
+        await Promise.all(
+            state.panels.flatMap(p => p.entries.map(e => loadSlice(e))));
     } catch (e) {
         setStatus(`error loading slice: ${e.message}`);
         console.error('loadSlice failed:', e);
         return;
     }
-    setStatus(`${state.panels.length} slices loaded · ` +
-        `${(state.panels.reduce((a,p)=>a+p.entry.n_cells,0)).toLocaleString()} cells`);
+    setStatus(`${state.panels.length} panels loaded · ` +
+        `${state.panels.reduce((a,p) =>
+            a + p.entries.reduce((b,e) => b + e.n_cells, 0), 0)
+            .toLocaleString()} cells`);
 
     // wait for the browser to lay out the new panels before measuring them
     await new Promise(r => requestAnimationFrame(r));
@@ -973,10 +994,24 @@ function sliceXY(slice) {
         : { xs: slice.xsFfd, ys: slice.ysFfd };
 }
 
-// fit slice's range into the panel preserving aspect, with padding.
-// returns (sx, sy, cx, cy) such that ndc = (world - c) * s.
-function panelTransform(p, slice) {
-    const r = sliceRange(slice);
+// union of coord ranges across all entries for a panel (for merged panels).
+function entriesRange(entries) {
+    const affine = state.coordsMode === 'affine';
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const e of entries) {
+        const rx = affine ? e.x_range_affine : e.x_range_ffd;
+        const ry = affine ? e.y_range_affine : e.y_range_ffd;
+        if (rx[0] < x0) x0 = rx[0];
+        if (rx[1] > x1) x1 = rx[1];
+        if (ry[0] < y0) y0 = ry[0];
+        if (ry[1] > y1) y1 = ry[1];
+    }
+    return { x: [x0, x1], y: [y0, y1] };
+}
+
+// fit union range into the panel preserving aspect, with padding.
+function panelTransform(p, entries) {
+    const r = entriesRange(entries || p.entries);
     const [x0, x1] = r.x;
     const [y0, y1] = r.y;
     const wx = x1 - x0, wy = y1 - y0;
@@ -1038,9 +1073,6 @@ function render() {
 
     for (const p of state.panels) {
         if (!p.vp) continue;
-        const slice = state.slices.get(p.entry.file);
-        if (!slice) continue;
-
         // cull panels fully outside the visible canvas
         if (p.vp.right <= 0 || p.vp.left >= cw ||
             p.vp.bottom <= 0 || p.vp.top >= ch) continue;
@@ -1057,34 +1089,38 @@ function render() {
         gl.clearColor(clear[0], clear[1], clear[2], 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        const t = panelTransform(p, slice);
+        // shared union transform for all entries in this panel
+        const t = panelTransform(p);
         gl.uniform4f(state.locs.u_xform,
             t.sx, t.sy, -t.cx * t.sx, -t.cy * t.sy);
 
-        // bind attributes
-        gl.bindBuffer(gl.ARRAY_BUFFER, slicePosBuf(slice));
-        gl.enableVertexAttribArray(state.locs.a_pos);
-        gl.vertexAttribPointer(state.locs.a_pos, 2, gl.FLOAT, false, 0, 0);
+        for (const entry of p.entries) {
+            const slice = state.slices.get(entry.file);
+            if (!slice) continue;
 
-        gl.bindBuffer(gl.ARRAY_BUFFER, slice.classBuf);
-        gl.enableVertexAttribArray(state.locs.a_classId);
-        gl.vertexAttribPointer(state.locs.a_classId, 1, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, slicePosBuf(slice));
+            gl.enableVertexAttribArray(state.locs.a_pos);
+            gl.vertexAttribPointer(state.locs.a_pos, 2, gl.FLOAT, false, 0, 0);
 
-        gl.bindBuffer(gl.ARRAY_BUFFER, slice.subBuf);
-        gl.enableVertexAttribArray(state.locs.a_subId);
-        gl.vertexAttribPointer(state.locs.a_subId, 1, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, slice.classBuf);
+            gl.enableVertexAttribArray(state.locs.a_classId);
+            gl.vertexAttribPointer(state.locs.a_classId, 1, gl.FLOAT, false, 0, 0);
 
-        // gene expression attribute (0.0 when no gene loaded)
-        if (slice.exprBuf && colorMode === 2) {
-            gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
-            gl.enableVertexAttribArray(state.locs.a_expression);
-            gl.vertexAttribPointer(state.locs.a_expression, 1, gl.FLOAT, false, 0, 0);
-        } else {
-            gl.disableVertexAttribArray(state.locs.a_expression);
-            gl.vertexAttrib1f(state.locs.a_expression, 0.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, slice.subBuf);
+            gl.enableVertexAttribArray(state.locs.a_subId);
+            gl.vertexAttribPointer(state.locs.a_subId, 1, gl.FLOAT, false, 0, 0);
+
+            if (slice.exprBuf && colorMode === 2) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, slice.exprBuf);
+                gl.enableVertexAttribArray(state.locs.a_expression);
+                gl.vertexAttribPointer(state.locs.a_expression, 1, gl.FLOAT, false, 0, 0);
+            } else {
+                gl.disableVertexAttribArray(state.locs.a_expression);
+                gl.vertexAttrib1f(state.locs.a_expression, 0.0);
+            }
+
+            gl.drawArrays(gl.POINTS, 0, slice.n);
         }
-
-        gl.drawArrays(gl.POINTS, 0, slice.n);
     }
 }
 
@@ -1170,9 +1206,7 @@ function handleHover(mx, my) {
     const panelEl = el && el.closest && el.closest('.panel');
     if (!panelEl) { hideTooltip(); return; }
     const p = state.panels.find(pp => pp.el === panelEl);
-    if (!p) { hideTooltip(); return; }
-    const slice = state.slices.get(p.entry.file);
-    if (!slice || !p.vp) { hideTooltip(); return; }
+    if (!p || !p.vp) { hideTooltip(); return; }
 
     // pixel -> NDC -> world via the inverse of the panel transform
     const r = p.rect || p.el.getBoundingClientRect();
@@ -1183,52 +1217,51 @@ function handleHover(mx, my) {
     }
     const ndcX = (localX / r.width) * 2 - 1;
     const ndcY = 1 - (localY / r.height) * 2;
-    const t = panelTransform(p, slice);
+    const t = panelTransform(p);
     const wx = ndcX / t.sx + t.cx;
     const wy = ndcY / t.sy + t.cy;
 
     // hit threshold: ~6 css pixels in the panel, converted to world units
-    // 1 ndc unit = r.width/2 css pixels, and 1 ndc = 1/sx world units
     const pxToWorldX = (1 / t.sx) / (r.width / 2);
     const pxToWorldY = (1 / t.sy) / (r.height / 2);
     const thr = 6;
-    const thrWX = thr * pxToWorldX;
-    const thrWY = thr * pxToWorldY;
+    const invThrX2 = 1 / (thr * pxToWorldX * thr * pxToWorldX);
+    const invThrY2 = 1 / (thr * pxToWorldY * thr * pxToWorldY);
 
-    // brute-force NN over visible cells only (using active coords)
-    const xy = sliceXY(slice);
-    const xs = xy.xs, ys = xy.ys;
-    const cls = slice.cls, sub = slice.sub;
     const useSubFilter = state.filterLevel === 'subclass';
     const visArr = useSubFilter ? state.subVisible : state.classVisible;
-    const ids = useSubFilter ? sub : cls;
-    const n = slice.n;
-    let bestI = -1;
-    let bestD = Infinity;
-    // ellipse-shaped early reject in screen space (anisotropic if panel is non-square)
-    const invThrX2 = 1 / (thrWX * thrWX);
-    const invThrY2 = 1 / (thrWY * thrWY);
-    for (let i = 0; i < n; i++) {
-        if (!visArr[ids[i]]) continue;
-        const dx = xs[i] - wx;
-        const dy = ys[i] - wy;
-        const d = dx * dx * invThrX2 + dy * dy * invThrY2;
-        if (d < bestD) { bestD = d; bestI = i; }
+
+    // brute-force NN over visible cells across every entry in this panel
+    let bestSlice = null, bestEntry = null, bestI = -1, bestD = Infinity;
+    for (const entry of p.entries) {
+        const slice = state.slices.get(entry.file);
+        if (!slice) continue;
+        const xy = sliceXY(slice);
+        const xs = xy.xs, ys = xy.ys;
+        const cls = slice.cls, sub = slice.sub;
+        const ids = useSubFilter ? sub : cls;
+        for (let i = 0; i < slice.n; i++) {
+            if (!visArr[ids[i]]) continue;
+            const dx = xs[i] - wx;
+            const dy = ys[i] - wy;
+            const d = dx * dx * invThrX2 + dy * dy * invThrY2;
+            if (d < bestD) { bestD = d; bestI = i; bestSlice = slice; bestEntry = entry; }
+        }
     }
     if (bestI < 0 || bestD > 1) { hideTooltip(); return; }
 
-    showTooltip(mx, my, p, slice, bestI);
+    showTooltip(mx, my, p, bestEntry, bestSlice, bestI);
 }
 
-function showTooltip(mx, my, panel, slice, i) {
+function showTooltip(mx, my, panel, entry, slice, i) {
     const tt = document.getElementById('tooltip');
     const cls = slice.cls[i];
     const sub = slice.sub[i];
     const cP = state.manifest.class_palette[cls] || {name: '?', color: '#666'};
     const sP = state.manifest.subclass_palette[sub] || {name: '?', color: '#666'};
-    const sampleLabel = panel.entry.sample_rep
-        ? `${panel.entry.condition} · ${panel.entry.sample_rep}`
-        : `REF · section ${panel.entry.short}`;
+    const sampleLabel = entry.sample_rep
+        ? `${entry.condition} · ${entry.sample_rep}`
+        : `REF · section ${entry.short}`;
     let exprLine = '';
     if (state.currentGene && slice.exprData) {
         const val = slice.exprData[i];
@@ -1461,15 +1494,17 @@ function updateFilteredCounts() {
     const useSubFilter = state.filterLevel === 'subclass';
     const visArr = useSubFilter ? state.subVisible : state.classVisible;
     for (const p of state.panels) {
-        const slice = state.slices.get(p.entry.file);
         const el = p.el.querySelector('.filtered-count');
-        if (!slice || !el) continue;
-        const ids = useSubFilter ? slice.sub : slice.cls;
-        let count = 0;
-        for (let i = 0; i < slice.n; i++) {
-            if (visArr[ids[i]]) count++;
+        if (!el) continue;
+        let count = 0, total = 0;
+        for (const entry of p.entries) {
+            const slice = state.slices.get(entry.file);
+            if (!slice) continue;
+            total += entry.n_cells;
+            const ids = useSubFilter ? slice.sub : slice.cls;
+            for (let i = 0; i < slice.n; i++) if (visArr[ids[i]]) count++;
         }
-        if (count < p.entry.n_cells) {
+        if (count < total) {
             el.textContent = `${count.toLocaleString()} selected`;
             el.style.display = '';
         } else {
@@ -1520,7 +1555,7 @@ function initGene() {
         if (best) {
             const repSet = new Set(best.reps);
             for (const p of state.panels) {
-                if (repSet.has(p.entry.sample_rep)) {
+                if (p.entries.some(e => repSet.has(e.sample_rep))) {
                     p.el.classList.add('highlight');
                     highlightedPanels.push(p.el);
                 }
