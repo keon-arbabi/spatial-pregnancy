@@ -228,6 +228,7 @@ for name in datasets:
 import pickle
 import time
 from collections import defaultdict
+from itertools import combinations, product
 from math import comb, factorial
 from scipy.stats import t as t_dist
 
@@ -238,7 +239,7 @@ META_CONTRAST_PLATFORMS = {
 }
 META_MIN_CELLS_PER_SAMPLE = 20  # (sample, cell-type) included only if >= N cells
 META_MIN_SAMPLES_PER_COND = 2   # need >= N samples per condition to test
-META_N_PERM = 1000
+META_PERM_CAP = 10000           # exhaustive if total combos <= this, else random
 META_SEED = 12345
 META_FDR = FDR_THRESHOLD
 
@@ -413,20 +414,57 @@ def sumrank_gsmap(stats_df, platforms, contrast):
         }).filter(pl.col('D') >= 2))
     return pl.concat(out) if out else pl.DataFrame()
 
-def build_perm_map(means, rng):
-    # Shuffle sample->condition within each dataset independently.
-    parts = []
-    for ds in means['dataset'].unique().to_list():
+def enum_perm_space(means, contrast):
+    # For each dataset, enumerate all C(n_samples, n_treat) unique label
+    # partitions. Returns (datasets_order, per_ds_samples, per_ds_cond_tuples,
+    # total_combos).
+    treat, base = contrast.split('_vs_')
+    per_ds_samples, per_ds_cond_tuples = {}, {}
+    for ds in sorted(means['dataset'].unique().to_list()):
         meta = means.filter(pl.col('dataset') == ds) \
-            .select(['sample', 'condition']).unique()
+            .filter(pl.col('condition').is_in([treat, base])) \
+            .select(['sample', 'condition']).unique() \
+            .sort('sample')
         samples = meta['sample'].to_list()
-        conds = meta['condition'].to_numpy().copy()
-        rng.shuffle(conds)
-        parts.append(pl.DataFrame({
-            'dataset': [ds] * len(samples),
-            'sample': samples,
-            'perm_condition': conds.tolist()}))
-    return pl.concat(parts)
+        n_treat = meta.filter(pl.col('condition') == treat).height
+        combos = [
+            tuple(treat if i in idx else base for i in range(len(samples)))
+            for idx in combinations(range(len(samples)), n_treat)]
+        per_ds_samples[ds] = samples
+        per_ds_cond_tuples[ds] = combos
+    datasets_order = list(per_ds_samples.keys())
+    total = 1
+    for ds in datasets_order:
+        total *= len(per_ds_cond_tuples[ds])
+    return datasets_order, per_ds_samples, per_ds_cond_tuples, total
+
+def iter_perm_maps(means, contrast, cap=META_PERM_CAP, seed=META_SEED):
+    # Exhaustive if total combos <= cap, else random sample `cap` times.
+    # First yield: dict with mode ('exhaustive'|'random'), n_perms, total.
+    ds_order, samples_by_ds, combos_by_ds, total = enum_perm_space(
+        means, contrast)
+    if total <= cap:
+        mode = 'exhaustive'
+        n_perms = total
+        combo_iter = product(*[combos_by_ds[ds] for ds in ds_order])
+    else:
+        mode = 'random'
+        n_perms = cap
+        rng = np.random.default_rng(seed)
+        def _sampler():
+            for _ in range(cap):
+                yield tuple(
+                    combos_by_ds[ds][rng.integers(len(combos_by_ds[ds]))]
+                    for ds in ds_order)
+        combo_iter = _sampler()
+    yield {'mode': mode, 'n_perms': n_perms, 'total_unique': total}
+    for combo in combo_iter:
+        rows = []
+        for ds, cond_tuple in zip(ds_order, combo):
+            for s, c in zip(samples_by_ds[ds], cond_tuple):
+                rows.append({'dataset': ds, 'sample': s,
+                             'perm_condition': c})
+        yield pl.DataFrame(rows)
 
 def apply_perm_map(means, perm_map):
     return means.drop('condition').join(
@@ -529,13 +567,15 @@ for contrast, platforms in META_CONTRAST_PLATFORMS.items():
         ds_means = means.filter(
             pl.col('dataset').is_in(platforms) &
             pl.col('condition').is_in([treat, base]))
-        rng = np.random.default_rng(META_SEED)
+        perm_iter = iter_perm_maps(ds_means, contrast)
+        info = next(perm_iter)
+        n_perms = info['n_perms']
+        print(f'[meta] {contrast}: {info["mode"]} perms '
+              f'({n_perms} of {info["total_unique"]} unique combos)')
         null_by_ct = defaultdict(list)
         t0 = time.time()
-        print(f'[meta] {contrast}: running {META_N_PERM} permutations')
-        for k in range(META_N_PERM):
-            perm_means = apply_perm_map(
-                ds_means, build_perm_map(ds_means, rng))
+        for k, perm_map in enumerate(perm_iter):
+            perm_means = apply_perm_map(ds_means, perm_map)
             per_ds_k = []
             for ds in platforms:
                 d = per_dataset_diff(
@@ -548,11 +588,12 @@ for contrast, platforms in META_CONTRAST_PLATFORMS.items():
                 pl.concat(per_ds_k), platforms, contrast)
             if sr_k.height:
                 summarize_null_by_ct(sr_k, null_by_ct)
-            if (k + 1) % 100 == 0:
+            step = max(n_perms // 10, 1)
+            if (k + 1) % step == 0 or k + 1 == n_perms:
                 el = time.time() - t0
-                print(f'[meta] {contrast}: perm {k+1}/{META_N_PERM} '
+                print(f'[meta] {contrast}: perm {k+1}/{n_perms} '
                       f'({el:.0f}s, eta '
-                      f'{el*(META_N_PERM-k-1)/(k+1):.0f}s)',
+                      f'{el*(n_perms-k-1)/(k+1):.0f}s)',
                       flush=True)
         null_by_ct = {
             ct: np.sort(np.concatenate(arrs)) if arrs else np.array([])
@@ -563,7 +604,14 @@ for contrast, platforms in META_CONTRAST_PLATFORMS.items():
               f'({(time.time()-t0)/60:.1f} min)')
 
     emp_up, emp_dn = calibrate_emp_p(real, null_by_ct)
+    # Analytical p from Irwin-Hall, direct from nlp columns.
+    ana_up = np.clip(10.0 ** (-real['nlp_up'].to_numpy()), 0, 1)
+    ana_dn = np.clip(10.0 ** (-real['nlp_down'].to_numpy()), 0, 1)
     real = real.with_columns([
+        pl.Series('p_up', ana_up),
+        pl.Series('p_down', ana_dn),
+        pl.Series('fdr_up', bh_fdr(ana_up)),
+        pl.Series('fdr_down', bh_fdr(ana_dn)),
         pl.Series('emp_p_up', emp_up),
         pl.Series('emp_p_down', emp_dn),
         pl.Series('emp_fdr_up', bh_fdr(emp_up)),
@@ -587,7 +635,44 @@ if meta_frames:
 else:
     meta = pl.DataFrame()
 
-# 4. summary
+# 4. Cauchy per-condition enrichment with BH-FDR (for Fig 5A/5B plotting)
+#    Scope: FDR across (trait x cell-type) within each (dataset, condition).
+cauchy_frames = []
+for name in datasets:
+    base = f'{meta_out}/{name}/gsmap'
+    for cond in sorted(adatas[name].obs['condition'].unique()):
+        d = Path(base) / cond / 'cauchy_combination'
+        if not d.is_dir():
+            continue
+        files = sorted(d.glob(f'{cond}_*.Cauchy.csv.gz'))
+        if not files:
+            continue
+        parts = [
+            pl.scan_csv(str(f))
+              .with_columns(
+                  trait=pl.lit(f.name
+                    .replace(f'{cond}_', '')
+                    .replace('.Cauchy.csv.gz', '')),
+                  dataset=pl.lit(name),
+                  condition=pl.lit(cond))
+              .rename({'annotation': 'cell_type'})
+              .select(['dataset', 'condition', 'trait', 'cell_type',
+                       'p_cauchy', 'p_median'])
+            for f in files]
+        df = pl.concat(parts).collect()
+        df = df.with_columns(
+            pl.Series('fdr_cauchy', bh_fdr(df['p_cauchy'].to_numpy())),
+            pl.Series('neg_log10_p_cauchy',
+                      -np.log10(np.clip(
+                          df['p_cauchy'].to_numpy(), 1e-300, 1.0))))
+        cauchy_frames.append(df)
+        n_sig = df.filter(pl.col('fdr_cauchy') < META_FDR).height
+        print(f'[meta] cauchy {name} {cond}: {df.height} tests, '
+              f'{n_sig} FDR<{META_FDR}')
+if cauchy_frames:
+    pl.concat(cauchy_frames).write_csv(f'{meta_out}/gsmap_cauchy_fdr.csv')
+
+# 5. summary
 for contrast in META_CONTRAST_PLATFORMS:
     if per_dataset.height:
         s = per_dataset.filter(pl.col('contrast') == contrast)
@@ -598,12 +683,16 @@ for contrast in META_CONTRAST_PLATFORMS:
     if meta.height:
         s = meta.filter(pl.col('contrast') == contrast)
         if s.height:
-            n_up = s.filter(pl.col('emp_fdr_up') < META_FDR).height
-            n_dn = s.filter(pl.col('emp_fdr_down') < META_FDR).height
+            n_up_a = s.filter(pl.col('fdr_up') < META_FDR).height
+            n_dn_a = s.filter(pl.col('fdr_down') < META_FDR).height
+            n_up_e = s.filter(pl.col('emp_fdr_up') < META_FDR).height
+            n_dn_e = s.filter(pl.col('emp_fdr_down') < META_FDR).height
             n_ct = s['cell_type'].n_unique()
             n_tr = s['trait'].n_unique()
-            print(f'[meta] {contrast} meta: {n_tr} traits x {n_ct} cts, '
-                  f'{n_up} up / {n_dn} down emp_fdr<{META_FDR}')
+            print(f'[meta] {contrast} meta: {n_tr} traits x {n_ct} cts; '
+                  f'analytical {n_up_a} up / {n_dn_a} down; '
+                  f'empirical {n_up_e} up / {n_dn_e} down '
+                  f'(FDR<{META_FDR})')
 
 #endregion
 

@@ -25,6 +25,7 @@ from ryp import r, to_r, to_py
 warnings.filterwarnings('ignore')
 
 from single_cell import SingleCell, Pseudobulk
+from single_cell import _voomByGroup_source_code
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
@@ -402,7 +403,7 @@ if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
     RhpcBLASctl::omp_set_num_threads(1)
 }
 ''')
-r(Pseudobulk._voomByGroup_source_code)
+r(_voomByGroup_source_code)
 r('''
 run_voom_perms <- function(pseudobulks, treat, base, design_formula,
                             n_perm, n_cores, start_perm = 1L,
@@ -479,7 +480,14 @@ def populate_pb_r(pb_sub, r_var='pb_cur'):
         ''')
     r('rm(obs_tmp, X_tmp, ct_tmp); invisible(gc())')
 
-for (name, contrast), pb_sub in all_pbs.items():
+# process contrasts with existing partial chunks first to resume sooner
+def _perm_priority(item):
+    (name, contrast), _ = item
+    n_chunks = len(glob.glob(
+        f'{sumrank_cache_dir}/perm_{name}_{contrast}_chunk_*.parquet'))
+    return (-n_chunks, name, contrast)
+
+for (name, contrast), pb_sub in sorted(all_pbs.items(), key=_perm_priority):
     if name not in SUMRANK_CONTRAST_PLATFORMS.get(contrast, []):
         continue
     final_path = f'{sumrank_cache_dir}/perm_{name}_{contrast}.parquet'
@@ -708,8 +716,9 @@ if (!file.exists(cache_file)) {{
             'TRANSLATION','RIBOSOMAL','PROTEASOME',
             'UBIQUITIN','AUTOPHAGY','PROTEIN_FOLDING',
             'CHAPERONE'),
-        'Ion_Transport' = c('CALCIUM','POTASSIUM','ION_TRANSPORT',
-                            'MEMBRANE_POTENTIAL','ION_HOMEOSTASIS')
+        'Ion_Transport' = c(
+            'CALCIUM','POTASSIUM','ION_TRANSPORT',
+            'MEMBRANE_POTENTIAL','ION_HOMEOSTASIS')
     )
     all_keywords <- unlist(theme_keywords)
     regex_pattern <- paste(all_keywords, collapse = "|")
