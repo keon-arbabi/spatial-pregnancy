@@ -1,7 +1,9 @@
 #region imports and setup ######################################################
 
 import os
+import re
 import warnings
+
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -10,7 +12,9 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import seaborn as sns
-from pathlib import Path
+from scipy.stats import pearsonr
+from scipy.cluster.hierarchy import linkage, leaves_list
+from scipy.spatial.distance import squareform
 
 warnings.filterwarnings('ignore')
 plt.rcParams['svg.fonttype'] = 'none'
@@ -24,22 +28,8 @@ os.makedirs(fig_dir, exist_ok=True)
 FDR = 0.10
 cell_type_col = 'subclass'
 
-# Top 5 traits pass Bonferroni in at least one dataset.
 TOP_TRAITS = ['MDD', 'ADHD', 'Neuroticism', 'Autism', 'PTSD']
-# Exemplar cell-types for Fig 5D. Criterion: (i) MDD-heritability-enriched
-# (Cauchy FDR<0.05 in both datasets), (ii) concordant DE direction PREG_vs_CTRL
-# across slidetags + xenium, (iii) nominal p<0.05 in at least one dataset.
 EXEMPLAR_CELLTYPES = {
-    # Ordered by anatomy:
-    #   Subcortical UP (rostral→caudal, maternal motivation network):
-    #     081 ACB-BST-FS D1 Gaba — ventral striatum reward (Wray 2025)
-    #     066 NDB-SI-ant Prdm12 Gaba — anterior basal forebrain
-    #     119 SI-MA-LPO-LHA Skor1 Glut — preoptic / lateral hypothalamic
-    #   Cortical divergence (L5 sharpens, L6b retrenches):
-    #     032 L5 NP CTX Glut UP — local cortical microcircuit
-    #     029 L6b CTX Glut DOWN — subplate-derived state modulator
-    #   Olfactory cortex DOWN:
-    #     114 COAa-PAA-MEA Barhl2 Glut — reduced non-specific olfactory salience
     'MDD': ['081 ACB-BST-FS D1 Gaba',
             '066 NDB-SI-ant Prdm12 Gaba',
             '119 SI-MA-LPO-LHA Skor1 Glut',
@@ -47,17 +37,55 @@ EXEMPLAR_CELLTYPES = {
             '029 L6b CTX Glut',
             '114 COAa-PAA-MEA Barhl2 Glut'],
 }
+XENIUM_ONLY_CELLTYPES = {
+    'MDD': ['088 BST Tac2 Gaba',
+            '090 BST-MPN Six3 Nrgn Gaba',
+            '089 PVR Six3 Sox3 Gaba',
+            '072 LSX Sall3 Lmo1 Gaba'],
+}
 COND_ORDER = {
     'slidetags': ['CTRL', 'PREG', 'POSTPART'],
     'xenium': ['CTRL', 'PREG']}
 COND_COLORS = {
-    'CTRL': '#7209b7', 'PREG': '#b5179e','POSTPART': '#f72585'}
+    'CTRL': '#7209b7', 'PREG': '#b5179e', 'POSTPART': '#f72585'}
 DS_COLORS = {
-    'slidetags': '#0B6FA8', 'xenium': '#1FAA6B'}  # cerulean / jade
+    'slidetags': '#0B6FA8', 'xenium': '#1FAA6B'}
 DS_LABEL = {
     'slidetags': 'Slide-tags', 'xenium': 'Xenium'}
 POINT_SIZE = {
     'slidetags': 1, 'xenium': 0.2}
+
+def _save(fig, name):
+    for ext in ('png', 'svg'):
+        fig.savefig(f'{fig_dir}/{name}.{ext}',
+                    dpi=400 if ext == 'png' else None,
+                    bbox_inches='tight')
+    plt.close(fig)
+    print(f'[plot] {name}')
+
+def _bh_fdr(p):
+    p = np.asarray(p, dtype=float)
+    valid = ~np.isnan(p)
+    out = np.full_like(p, np.nan)
+    if not valid.any():
+        return out
+    pv = p[valid]
+    n = len(pv)
+    order = np.argsort(pv)
+    ranks = np.empty(n, dtype=np.int64)
+    ranks[order] = np.arange(1, n + 1)
+    q = (pv * n / ranks)[order]
+    q = np.minimum.accumulate(q[::-1])[::-1]
+    q_final = np.empty(n)
+    q_final[order] = np.clip(q, 0, 1)
+    out[valid] = q_final
+    return out
+
+def _wrap_ct(ct):
+    parts = ct.split()
+    if len(parts) <= 3:
+        return ct
+    return ' '.join(parts[:-2]) + '\n' + ' '.join(parts[-2:])
 
 #endregion
 
@@ -113,16 +141,8 @@ def plot_trait_ranking():
 #endregion
 
 #region fig 5B — trait × cell-type heatmap (across-condition) ##################
-# Per dataset: rows = top traits, cols = data-driven featured cell-types.
-# Single value per cell: max -log10(p_cauchy) across conditions (peak
-# enrichment). * marks cell-types with fdr_cauchy<FDR in any condition.
 
 def select_featured_cts(n_glut=12, n_gaba=12, n_nn=6):
-    # Top-N per class by summed -log10(p_cauchy) across top traits
-    # (trait-agnostic, avoids cherry-picking for MDD). NN included as
-    # negative control: psychiatric GWAS heritability concentrates in
-    # neurons (Skene 2018, Bryois 2020, Wray 2025).
-    import re
     sub = cauchy.filter(pl.col('trait').is_in(TOP_TRAITS))
     totals = (sub.group_by('cell_type')
               .agg(pl.col('neg_log10_p_cauchy').sum().alias('total'),
@@ -146,28 +166,7 @@ def select_featured_cts(n_glut=12, n_gaba=12, n_nn=6):
         picks.extend(group_cts)
     return picks
 
-def _bh_fdr(p):
-    p = np.asarray(p, dtype=float)
-    valid = ~np.isnan(p)
-    out = np.full_like(p, np.nan)
-    if not valid.any():
-        return out
-    pv = p[valid]
-    n = len(pv)
-    order = np.argsort(pv)
-    ranks = np.empty(n, dtype=np.int64)
-    ranks[order] = np.arange(1, n + 1)
-    q = (pv * n / ranks)[order]
-    q = np.minimum.accumulate(q[::-1])[::-1]
-    q_final = np.empty(n)
-    q_final[order] = np.clip(q, 0, 1)
-    out[valid] = q_final
-    return out
-
 def _pivot_scores(df_ds, dataset, featured):
-    # Recompute FDR at the dataset level: pool all (condition, trait,
-    # cell_type) p_cauchy values within this dataset and BH-correct. Then
-    # per (trait, cell_type), take the min across conditions.
     sub = (df_ds.filter(pl.col('dataset') == dataset)
            .filter(pl.col('trait').is_in(TOP_TRAITS))
            .to_pandas())
@@ -257,11 +256,6 @@ def plot_condition_heatmap(sig_fdr=0.01):
 
 def plot_trait_specificity(ref_trait='MDD',
                            compare_traits=('PPD', 'Stroke')):
-    # Top-10 neuronal cell-types by MDD PREG_vs_CTRL meta min(p_up,p_down).
-    # Row 0: slidetags (N, P, PP). Row 1: xenium (N, P).
-    # For each cell-type, overlay sample-level trajectory for ref_trait +
-    # compare_traits, normalized by subtracting CTRL mean (per trait ×
-    # cell-type) so traits with different magnitudes are comparable.
     traits = [ref_trait] + list(compare_traits)
     TR_COLORS = {'MDD': '#D62728', 'PPD': '#1F77B4',
                  'Neuroticism': '#1F77B4', 'Stroke': '#808080',
@@ -292,10 +286,6 @@ def plot_trait_specificity(ref_trait='MDD',
         2, n, figsize=(1.5 * n + 1.0, 4.2), facecolor='white',
         squeeze=False, sharex='col')
     rng = np.random.default_rng(0)
-
-    # Shared x-axis across rows: iterate over slidetags' 3 conditions for
-    # both rows; xenium just has no data at POSTPART (x=2) so that slot is
-    # empty, keeping CTRL and PREG aligned vertically across rows.
     all_conds = COND_ORDER['slidetags']
     xs = np.arange(len(all_conds))
 
@@ -341,8 +331,6 @@ def plot_trait_specificity(ref_trait='MDD',
 
             ax.axhline(0, color='black', linewidth=0.4, alpha=0.4, zorder=0)
 
-            # Reserve headroom above data for the p-value text block so it
-            # never overlaps trajectories.
             if np.isfinite(panel_ymin) and np.isfinite(panel_ymax):
                 rng_span = max(panel_ymax - panel_ymin, 0.4)
                 pad_for_text = rng_span * 0.50
@@ -368,7 +356,6 @@ def plot_trait_specificity(ref_trait='MDD',
                               r'$-\log_{10}$ p$_{\mathrm{Cauchy}}$',
                               fontsize=9)
 
-            # Per-trait PREG_vs_CTRL p-values in headroom
             x0, y0 = 0.03, 0.97
             for k, trait in enumerate(traits):
                 p = pvals_all.get((ds, trait, ct), np.nan)
@@ -395,10 +382,6 @@ def plot_trait_specificity(ref_trait='MDD',
 
 
 def plot_platform_concordance(traits=None):
-    # Per cell-type, peak -log10 p_Cauchy max across conditions, for each
-    # platform. Scatter slidetags vs xenium, colored by ABC class, with
-    # y=x and regression trend line. One panel per top trait.
-    from scipy.stats import pearsonr
     traits = traits or TOP_TRAITS
     n = len(traits)
 
@@ -456,7 +439,6 @@ def plot_platform_concordance(traits=None):
         ax.tick_params(labelsize=8)
         sns.despine(ax=ax)
 
-    # shared legend on the right with only classes that appeared
     legend_classes = sorted(classes_used)
     handles = [plt.Line2D([], [], marker='o', linestyle='',
                           markerfacecolor=class_color.get(c, '#d3d3d3'),
@@ -472,14 +454,6 @@ def plot_platform_concordance(traits=None):
 
 
 def plot_trait_correlation():
-    # Trait x trait Pearson on vectorized -log10(p_cauchy) across
-    # (dataset, condition, cell_type). Pairwise (skips rows where either
-    # trait lacks data), so PPD (slidetags-only) correlates against other
-    # traits on their shared slidetags rows. Hierarchical clustering on
-    # 1 - |r| distance to group trait families.
-    from scipy.cluster.hierarchy import linkage, leaves_list
-    from scipy.spatial.distance import squareform
-
     mat = (cauchy
         .with_columns(key=pl.col('dataset') + '|' + pl.col('condition') +
                       '|' + pl.col('cell_type'))
@@ -498,7 +472,6 @@ def plot_trait_correlation():
             r = sub[a].corr(sub[b])
             corr.loc[a, b] = corr.loc[b, a] = r
 
-    # cluster by 1 - r distance (preserves sign: anti-correlated = far)
     d = 1 - corr.fillna(0).values
     np.fill_diagonal(d, 0)
     d = (d + d.T) / 2
@@ -532,8 +505,6 @@ def plot_trait_correlation():
 #endregion
 
 #region fig 5C — single-cell spatial map #######################################
-# For one trait/condition pair, scatter per-cell -log10(p)
-# per dataset. Uses spatial_ldsc CSVs + adata obs.
 
 _adata_cache = {}
 def _load_adata(dataset):
@@ -546,9 +517,6 @@ def _load_adata(dataset):
     return _adata_cache[dataset]
 
 def plot_spatial(trait='MDD', condition='PREG'):
-    # Per-dataset normalization and point size since score magnitude and
-    # cell density differ ~10x between platforms. viridis on black axes
-    # gives high-score cells a bright-yellow glow.
     panels = {}
     for ds in ('slidetags', 'xenium'):
         path = (f'{out_dir}/{ds}/gsmap/{condition}/spatial_ldsc/'
@@ -575,7 +543,7 @@ def plot_spatial(trait='MDD', condition='PREG'):
     for ax, ds in zip(axes, ('slidetags', 'xenium')):
         df = panels.get(ds)
         ax.set_facecolor('black')
-        ax.set_box_aspect(1)  # identical square frames both panels
+        ax.set_box_aspect(1)
         ax.set_aspect('equal', adjustable='datalim')
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values(): s.set_visible(False)
@@ -588,7 +556,6 @@ def plot_spatial(trait='MDD', condition='PREG'):
             df['x_ffd'], df['y_ffd'], c=df['score'],
             s=POINT_SIZE[ds], cmap='viridis', vmin=vmin, vmax=vmax,
             rasterized=True, edgecolors='none')
-        # inset horizontal colorbar, bottom-right, aligned to box
         cax = ax.inset_axes([0.62, 0.09, 0.33, 0.03])
         cb = fig.colorbar(sc_plt, cax=cax, orientation='horizontal')
         cb.set_ticks([vmin, vmax])
@@ -606,22 +573,8 @@ def plot_spatial(trait='MDD', condition='PREG'):
 #endregion
 
 #region fig 5D — exemplar cell-type trajectories ###############################
-# Grid (rows=datasets, cols=cell-types). Within each panel:
-#   - cell-level swarm of -log10(p) per condition (subsampled, faint)
-#   - sample-mean dots (large, colored by condition)
-#   - line connecting sample means + SEM error bars
-# Significance from per-dataset Welch t on sample means.
-
-def _wrap_ct(ct):
-    # Two-line label: last two tokens (marker + class) on line 2.
-    parts = ct.split()
-    if len(parts) <= 3:
-        return ct
-    return ' '.join(parts[:-2]) + '\n' + ' '.join(parts[-2:])
-
 
 def _load_percell_scores(trait, cts):
-    # Returns per (dataset, sample, cond, cell_type): list of cell scores.
     cts = set(cts)
     out = {}
     for ds in ('slidetags', 'xenium'):
@@ -651,18 +604,17 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
     if n == 0: return
     data = _load_percell_scores(trait, cts)
 
-    # Modest width growth with more cell-types (6 cols ~ 9.2").
     fig, axes = plt.subplots(
         2, n, figsize=(1.45 * n + 0.5, 4.8), facecolor='white',
         squeeze=False, sharex='col')
     rng = np.random.default_rng(0)
 
-    all_conds = COND_ORDER['slidetags']  # shared x-axis layout
+    all_conds = COND_ORDER['slidetags']
     for row, ds in enumerate(('slidetags', 'xenium')):
-        conds = all_conds  # iterate over all 3; no-op at conds xenium lacks
+        conds = all_conds
         for col, ct in enumerate(cts):
             ax = axes[row, col]
-            sample_means_ct = []  # per-condition dict of (samples, means)
+            sample_means_ct = []
             swarm_y = []
             swarm_x = []
             swarm_c = []
@@ -675,7 +627,6 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
                 if cell_df.empty:
                     sample_means_ct.append(([], [])); continue
 
-                # cell-level swarm (subsampled)
                 vals = cell_df['score'].values
                 if len(vals) > max_swarm:
                     idx = rng.choice(len(vals), max_swarm, replace=False)
@@ -687,7 +638,6 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
                 swarm_c.extend([COND_COLORS[cond]] * len(vals_sub))
                 y_all.extend(vals)
 
-                # per-sample means
                 sm = (cell_df.groupby('sample')['score'].mean()
                       .reset_index())
                 sample_means_ct.append(
@@ -698,7 +648,6 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
                            alpha=0.22, rasterized=True,
                            edgecolors='none', zorder=1)
 
-            # sample means + SEM + connecting line
             xs = np.arange(len(conds))
             means_arr, sems_arr = [], []
             for i, cond in enumerate(conds):
@@ -707,7 +656,6 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
                     means_arr.append(np.nan); sems_arr.append(np.nan)
                     continue
                 v = np.asarray(v, float)
-                # sample-level dots (jittered mildly)
                 jit = rng.normal(0, 0.035, size=len(v))
                 ax.scatter(np.full(len(v), i) + jit, v,
                            color=COND_COLORS[cond], s=34,
@@ -724,7 +672,6 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
                             linewidth=1.0, capsize=3, capthick=0.8,
                             ecolor='black', marker='None', zorder=5)
 
-            # significance from Welch t (sample-level)
             ct_stats = per_ds.filter(
                 (pl.col('trait') == trait) &
                 (pl.col('cell_type') == ct) &
@@ -772,22 +719,11 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
     fig.tight_layout(rect=[0, 0, 1, 0.955])
     _save(fig, f'fig5D_trajectories_{trait}')
 
-# Supplementary: xenium-only peripartum populations (too few cells in
-# slidetags for sample-level testing). Criterion: MDD-enriched (Cauchy
-# FDR<0.001), peripartum-relevant anatomy, DE p<=0.06.
-XENIUM_ONLY_CELLTYPES = {
-    'MDD': ['088 BST Tac2 Gaba',
-            '090 BST-MPN Six3 Nrgn Gaba',
-            '089 PVR Six3 Sox3 Gaba',
-            '072 LSX Sall3 Lmo1 Gaba'],
-}
 
 def plot_xenium_only_supp(trait='MDD', cts=None, max_swarm=1200):
     cts = cts or XENIUM_ONLY_CELLTYPES.get(trait, [])
     if not cts: return
     data = _load_percell_scores(trait, cts)
-
-    # Order by direction (down first, then up) by consulting Welch β
     de_xe = (per_ds.filter((pl.col('trait') == trait) &
                            (pl.col('contrast') == 'PREG_vs_CTRL') &
                            (pl.col('dataset') == 'xenium'))
@@ -797,14 +733,12 @@ def plot_xenium_only_supp(trait='MDD', cts=None, max_swarm=1200):
     cts = sorted(cts, key=lambda c: (betas[c] >= 0, -abs(betas[c])))
     n = len(cts)
 
-    # Match per-column width with Fig 5D (1.45 / col).
     fig, axes = plt.subplots(
         1, n, figsize=(1.45 * n + 0.5, 3.0), facecolor='white',
         squeeze=False)
     axes = axes[0]
     rng = np.random.default_rng(0)
 
-    # Tight condition spacing: N at 0, P at 0.5
     conds = COND_ORDER['xenium']
     xs = np.array([0.0, 0.5])
 
@@ -857,7 +791,6 @@ def plot_xenium_only_supp(trait='MDD', cts=None, max_swarm=1200):
                         linewidth=1.0, capsize=3, capthick=0.8,
                         ecolor='black', marker='None', zorder=5)
 
-        # Welch p with bracket + raw p value text
         ct_stats = per_ds.filter(
             (pl.col('trait') == trait) &
             (pl.col('cell_type') == ct) &
@@ -895,14 +828,6 @@ def plot_xenium_only_supp(trait='MDD', cts=None, max_swarm=1200):
 #endregion
 
 #region main ###################################################################
-
-def _save(fig, name):
-    for ext in ('png', 'svg'):
-        fig.savefig(f'{fig_dir}/{name}.{ext}',
-                    dpi=400 if ext == 'png' else None,
-                    bbox_inches='tight')
-    plt.close(fig)
-    print(f'[plot] {name}')
 
 if __name__ == '__main__':
     plot_trait_ranking()

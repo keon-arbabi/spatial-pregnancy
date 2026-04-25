@@ -1,31 +1,63 @@
-#region imports and setup ######################################################
+#region imports & CLI #########################################################
 
 import os
 import gc
 import re
+import sys
 import glob
 import time
+import argparse
+import subprocess
 import pickle as pkl
 import warnings
 from math import comb, factorial
 from collections import defaultdict
+from tempfile import NamedTemporaryFile
+sys.path.insert(0, os.path.expanduser('~'))
+
+os.environ.setdefault('POLARS_MAX_THREADS', '16')
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import scanpy as sc
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
-from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
 os.environ['R_HOME'] = os.path.expanduser('~/miniforge3/lib/R')
 from ryp import r, to_r, to_py
 
 warnings.filterwarnings('ignore')
 
-from single_cell import SingleCell, Pseudobulk
+from single_cell import SingleCell
 from single_cell import _voomByGroup_source_code
+
+_p = argparse.ArgumentParser()
+_p.add_argument('--perm-job', choices=['de', 'gsea'], default=None,
+                help='worker mode: run perms for one (platform, contrast)')
+_p.add_argument('--platform', default=None)
+_p.add_argument('--contrast', default=None)
+_p.add_argument('--perm-start', type=int, default=None,
+                help='0-indexed inclusive start of perm range')
+_p.add_argument('--perm-end', type=int, default=None,
+                help='0-indexed exclusive end of perm range')
+_a, _ = _p.parse_known_args()
+
+IS_WORKER = _a.perm_job is not None
+WORKER_STAGE = _a.perm_job
+WORKER_PLATFORM = _a.platform
+WORKER_CONTRAST = _a.contrast
+WORKER_PERM_START = _a.perm_start
+WORKER_PERM_END = _a.perm_end
+if IS_WORKER and (WORKER_PLATFORM is None or WORKER_CONTRAST is None
+                  or WORKER_PERM_START is None or WORKER_PERM_END is None):
+    raise SystemExit(
+        '--perm-job requires --platform, --contrast, '
+        '--perm-start, --perm-end')
+
+#endregion
+
+#region config ################################################################
 
 working_dir = '/home/karbabi/spatial-pregnancy'
 cell_type_col = 'subclass'
@@ -33,25 +65,212 @@ de_suffix = f'_{cell_type_col}' if cell_type_col != 'subclass' else ''
 
 datasets = {
     'slidetags': {
-        'path': f'{working_dir}/output/slidetags/03_adata_query_slidetags.h5ad',
+        'path': f'{working_dir}/output/slidetags'
+                f'/03_adata_query_slidetags.h5ad',
         'contrasts': [('PREG', 'CTRL'), ('POSTPART', 'PREG'),
                       ('POSTPART', 'CTRL')],
     },
     'merfish': {
-        'path': f'{working_dir}/output/merfish/03_adata_query_merfish.h5ad',
+        'path': f'{working_dir}/output/merfish'
+                f'/03_adata_query_merfish.h5ad',
         'contrasts': [('PREG', 'CTRL'), ('POSTPART', 'PREG'),
                       ('POSTPART', 'CTRL')],
     },
     'xenium': {
-        'path': f'{working_dir}/output/xenium/03_adata_query_xenium.h5ad',
+        'path': f'{working_dir}/output/xenium'
+                f'/03_adata_query_xenium.h5ad',
         'contrasts': [('PREG', 'CTRL')],
         'drop_samples': ['CTRL_3'],
     },
 }
 
-pct_file = f'{working_dir}/output/ref_pct_detected.pkl'
+DESIGN_FORMULAS = {
+    'slidetags': '~ 0 + condition + log2(num_cells) + log2(library_size)',
+    'merfish':   '~ 0 + condition + log2(num_cells) + log2(library_size)',
+    'xenium':    '~ 0 + condition + log2(num_cells)',
+}
+SUMRANK_CONTRAST_PLATFORMS = {
+    'PREG_vs_CTRL': ['slidetags', 'merfish', 'xenium'],
+    'POSTPART_vs_PREG': ['slidetags', 'merfish'],
+    'POSTPART_vs_CTRL': ['slidetags', 'merfish'],
+}
+
+SUMRANK_N_PERM = 1000
+SUMRANK_PERM_BATCH = 100   # perms per SLURM job
+SUMRANK_CHUNK_SIZE = 20    # perms per chunk parquet
+SUMRANK_N_CORES = os.cpu_count() if IS_WORKER else 16
+SUMRANK_GSEA_CHUNK = 20
+SUMRANK_GSEA_PERM_BATCH = 100
+SUMRANK_GSEA_N_CORES = os.cpu_count() if IS_WORKER else 16
+SUMRANK_GSEA_NPERM_SIMPLE = 100
+PERM_SEED_BASE = 12345
+MIN_N_CELLS_EXPR = 10
+
+sumrank_cache_dir = f'{working_dir}/output/sumrank_cache{de_suffix}'
+SUMRANK_GSEA_CACHE_DIR = \
+    f'{working_dir}/output/sumrank_gsea_cache{de_suffix}'
+PERM_LOG_DIR = f'{working_dir}/output/perm_logs'
+de_path = f'{working_dir}/output/de_results{de_suffix}.csv'
+sumrank_path = f'{working_dir}/output/sumrank_results{de_suffix}.csv'
+sumrank_gsea_path = \
+    f'{working_dir}/output/sumrank_gsea_results{de_suffix}.csv'
+for d in (sumrank_cache_dir, SUMRANK_GSEA_CACHE_DIR, PERM_LOG_DIR,
+          f'{working_dir}/output'):
+    os.makedirs(d, exist_ok=True)
+
+# Worker mode: restrict datasets to its one target (platform, contrast)
+if IS_WORKER:
+    if WORKER_PLATFORM not in datasets:
+        raise SystemExit(f'unknown platform {WORKER_PLATFORM}')
+    for _ds in list(datasets):
+        if _ds != WORKER_PLATFORM:
+            del datasets[_ds]
+    treat, base = WORKER_CONTRAST.split('_vs_')
+    datasets[WORKER_PLATFORM]['contrasts'] = [(treat, base)]
+    print(f'[worker] stage={WORKER_STAGE} platform={WORKER_PLATFORM} '
+          f'contrast={WORKER_CONTRAST} '
+          f'perms={WORKER_PERM_START}:{WORKER_PERM_END}', flush=True)
+
+#endregion
+
+#region slurm #################################################################
+
+PLATFORM_ABBR = {'slidetags': 'sl', 'merfish': 'mf', 'xenium': 'xn'}
+CONTRAST_ABBR = {'PREG_vs_CTRL': 'PvC',
+                 'POSTPART_vs_PREG': 'PPvP',
+                 'POSTPART_vs_CTRL': 'PPvC'}
+
+def _batch_tag(stage, plt_name, contrast, start, end):
+    return (f'{stage}_{PLATFORM_ABBR.get(plt_name, plt_name[:2])}_'
+            f'{CONTRAST_ABBR.get(contrast, contrast)}_{start}_{end}')
+
+def _active_slurm_jobs():
+    try:
+        out = subprocess.check_output(
+            'squeue -h -u "$USER" -o "%j"', shell=True, text=True)
+    except subprocess.CalledProcessError:
+        return set()
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+LOGIN_HOST = 'tri-login01'
+
+def submit_slurm(cmd, *, job_name, log_file, hours=6):
+    script = '\n'.join([
+        '#!/bin/bash',
+        '#SBATCH -p compute',
+        '#SBATCH --account=rrg-shreejoy',
+        '#SBATCH -N 1',
+        '#SBATCH -n 1',
+        f'#SBATCH -t {hours}:00:00',
+        f'#SBATCH -J {job_name}',
+        f'#SBATCH -o {log_file}',
+        f"bash -i -c 'export POLARS_MAX_THREADS=192; "
+        f"set -euo pipefail; {cmd}'",
+    ]) + '\n'
+    scratch = os.environ.get('SCRATCH', '.')
+    with NamedTemporaryFile(
+        'w', dir=scratch, suffix='.sh', delete=False) as fh:
+        fh.write(script)
+        sp = fh.name
+    try:
+        subprocess.check_call(
+            f'ssh -o BatchMode=yes {LOGIN_HOST} '
+            f'CLUSTER=trillium /opt/slurm/bin/sbatch '
+            f'--export=NONE --get-user-env=L {sp}',
+            shell=True, executable='/bin/bash')
+    finally:
+        os.unlink(sp)
+
+def _batch_ranges(n_perm, batch_perms):
+    return [(s, min(s + batch_perms, n_perm))
+            for s in range(0, n_perm, batch_perms)]
+
+def chunk_map(pattern):
+    return {int(m.group(1)): p for p in glob.glob(pattern)
+            if (m := re.search(r'_chunk_(\d+)\.parquet$', p))}
+
+def _merge_chunks_if_ready(
+        pair, parquet_stage, cache_dir, chunk_size, n_perm, unique_cols):
+    name, contrast = pair
+    final_path = f'{cache_dir}/{parquet_stage}_{name}_{contrast}.parquet'
+    if os.path.exists(final_path):
+        return False
+    chunk_glob = (
+        f'{cache_dir}/{parquet_stage}_{name}_{contrast}_chunk_*.parquet')
+    existing = chunk_map(chunk_glob)
+    needed = list(range(0, n_perm, chunk_size))
+    if not all(s in existing for s in needed):
+        return False
+    full = pl.concat([pl.read_parquet(existing[s]) for s in needed])\
+        .unique(subset=unique_cols)
+    full.write_parquet(final_path)
+    for p in glob.glob(chunk_glob):
+        os.remove(p)
+    print(f'[merge] {parquet_stage} {name} {contrast}: '
+          f'{full.height:,} rows -> {final_path}', flush=True)
+    return True
+
+def _sumrank_pairs():
+    out = []
+    for c, plts in SUMRANK_CONTRAST_PLATFORMS.items():
+        for n in plts:
+            if n not in datasets:
+                continue
+            ds_ctrs = {f'{t}_vs_{cc}' for t, cc in datasets[n]['contrasts']}
+            if c in ds_ctrs:
+                out.append((n, c))
+    return out
+
+def _submit_missing_batches(
+        *, parquet_stage, job_stage, perm_job, pairs, cache_dir,
+        batch_perms, chunk_size, active_jobs):
+    submitted, pending = [], []
+    for name, contrast in pairs:
+        final_path = (
+            f'{cache_dir}/{parquet_stage}_{name}_{contrast}.parquet')
+        if os.path.exists(final_path):
+            continue
+        existing = chunk_map(
+            f'{cache_dir}/{parquet_stage}_{name}_{contrast}'
+            f'_chunk_*.parquet')
+        for start, end in _batch_ranges(SUMRANK_N_PERM, batch_perms):
+            batch_chunks = list(range(start, end, chunk_size))
+            if all(s in existing for s in batch_chunks):
+                continue
+            tag = _batch_tag(job_stage, name, contrast, start, end)
+            if tag in active_jobs:
+                pending.append(tag)
+                continue
+            cmd = (f'{sys.executable} {os.path.abspath(__file__)} '
+                   f'--perm-job={perm_job} --platform={name} '
+                   f'--contrast={contrast} --perm-start={start} '
+                   f'--perm-end={end}')
+            submit_slurm(cmd, job_name=tag,
+                         log_file=f'{PERM_LOG_DIR}/{tag}.log', hours=6)
+            submitted.append(tag)
+            pending.append(tag)
+    return submitted, pending
+
+def _gate_on_missing(parquet_stage, cache_dir, label):
+    missing = [(n, c) for n, c in _sumrank_pairs()
+               if not os.path.exists(
+                   f'{cache_dir}/{parquet_stage}_{n}_{c}.parquet')]
+    if missing:
+        print(f'[{label}] waiting on {len(missing)} {parquet_stage} '
+              f'parquets:')
+        for n, c in missing:
+            print(f'  {n} {c}')
+        print(f'[{label}] re-run once SLURM jobs complete')
+        sys.exit(0)
+
+#endregion
+
+#region adatas & reference pct detected #######################################
+
+pct_file = f'{working_dir}/output/ref_pct_detected{de_suffix}.pkl'
 if not os.path.exists(pct_file):
-    ref = sc.read_h5ad('single-cell/ABC/zeng_combined_10Xv3.h5ad')
+    ref = sc.read_h5ad(os.path.expanduser(
+        '~/single-cell/ABC/zeng_combined_10Xv3.h5ad'))
     ref.var_names_make_unique()
     pct_detected = {}
     for s in ref.obs[cell_type_col].dropna().unique():
@@ -120,12 +339,12 @@ for name, cfg in datasets.items():
         print(f'[{name}] dropped samples: {drop}')
     adatas[name] = adata
     print(f'[{name}] {adata.shape[0]:,} cells, '
-          f'{adata.obs[cell_type_col].nunique()} subclasses, '
+          f'{adata.obs[cell_type_col].nunique()} cell types, '
           f'{adata.obs["condition"].nunique()} conditions')
 
 #endregion
 
-#region run de #################################################################
+#region pseudobulk & real DE ##################################################
 
 def make_pseudobulk(adata, name):
     sc_obj = SingleCell(adata).skip_qc()
@@ -136,24 +355,18 @@ def make_pseudobulk(adata, name):
     return sc_obj\
         .pseudobulk('sample', cell_type_col)\
         .qc('condition',
-            min_samples=2,
-            min_cells=20,
+            min_samples=2, min_cells=20,
             max_standard_deviations=None,
-            min_nonzero_fraction=0.3,
-            verbose=False)\
+            min_nonzero_fraction=0.3, verbose=False)\
         .library_size(allow_float=True)
-
-MIN_N_CELLS_EXPR = 10
 
 def n_cells_mask(name, contrast, thresh=MIN_N_CELLS_EXPR):
     # (cell_type, gene) pairs with >=thresh cells expressing in each real
-    # condition of the contrast. Used to suppress sparse-detection hits
-    # consistently across real and permuted DE.
+    # condition of the contrast; applied to real and perm DE alike
     treat, base = contrast.split('_vs_')
-    path = f'{working_dir}/output/n_cells_expr_{name}.parquet'
+    path = f'{working_dir}/output/n_cells_expr_{name}{de_suffix}.parquet'
     if not os.path.exists(path):
-        compute_n_cells_expr(adatas[name], cell_type_col)\
-        .write_parquet(path)
+        compute_n_cells_expr(adatas[name], cell_type_col).write_parquet(path)
     long = pl.read_parquet(path)\
         .filter(pl.col('condition').is_in([treat, base]))
     wide = long.pivot(
@@ -161,10 +374,26 @@ def n_cells_mask(name, contrast, thresh=MIN_N_CELLS_EXPR):
         values='n_cells_expr')
     return wide\
         .with_columns(
-            pl.min_horizontal(pl.col(treat), pl.col(base))
-            .alias('min_n'))\
+            pl.min_horizontal(pl.col(treat), pl.col(base)).alias('min_n'))\
         .filter(pl.col('min_n') >= thresh)\
         .select(['cell_type', 'gene'])
+
+def load_n_cells_long(name):
+    path = f'{working_dir}/output/n_cells_expr_{name}{de_suffix}.parquet'
+    if not os.path.exists(path):
+        compute_n_cells_expr(adatas[name], cell_type_col).write_parquet(path)
+    return pl.read_parquet(path).with_columns(pl.lit(name).alias('dataset'))
+
+def add_n_cells_contrast(df, n_long):
+    df = df.with_columns(
+        pl.col('contrast').str.split('_vs_').list.get(0).alias('treat'),
+        pl.col('contrast').str.split('_vs_').list.get(1).alias('base'))
+    for side in ('treat', 'base'):
+        df = df.join(
+            n_long.rename({'condition': side,
+                           'n_cells_expr': f'n_cells_{side}'}),
+            on=['dataset', 'cell_type', 'gene', side], how='left')
+    return df.drop(['treat', 'base'])
 
 def run_de(pb_sub, name, contrast, num_threads):
     treat, ctrl = contrast.split('_vs_')
@@ -176,41 +405,22 @@ def run_de(pb_sub, name, contrast, num_threads):
     de_obj = pb_sub.DE(
         DESIGN_FORMULAS[name],
         contrasts={contrast: f'condition{treat} - condition{ctrl}'},
-        categorical_columns='condition',
-        group='condition',
-        cell_types=valid_cts,
-        strict=False,
-        return_voom_info=False,
-        allow_float=True,
-        verbose=False,
-        num_threads=num_threads)
+        categorical_columns='condition', group='condition',
+        cell_types=valid_cts, strict=False,
+        return_voom_info=False, allow_float=True,
+        verbose=False, num_threads=num_threads)
     mask = n_cells_mask(name, contrast)
     return de_obj.table\
         .rename({'p': 'PValue'})\
         .drop(['coefficient', 'Bonferroni'])\
         .join(mask, on=['cell_type', 'gene'], how='inner')
 
-DESIGN_FORMULAS = {
-    'slidetags': '~ 0 + condition + log2(num_cells) + log2(library_size)',
-    'merfish':   '~ 0 + condition + log2(num_cells) + log2(library_size)',
-    'xenium':    '~ 0 + condition + log2(num_cells)',
-}
-SUMRANK_CONTRAST_PLATFORMS = {
-    'PREG_vs_CTRL': ['slidetags', 'merfish', 'xenium'],
-    'POSTPART_vs_PREG': ['slidetags', 'merfish'],
-    'POSTPART_vs_CTRL': ['slidetags', 'merfish'],
-}
-SUMRANK_N_PERM = 1000
-SUMRANK_N_CORES = os.cpu_count()
-SUMRANK_CHUNK_SIZE = 20
-PERM_SEED_BASE = 12345
-
-sumrank_cache_dir = f'{working_dir}/output/sumrank_cache'
-os.makedirs(sumrank_cache_dir, exist_ok=True)
-os.makedirs(f'{working_dir}/output', exist_ok=True)
-de_path = f'{working_dir}/output/de_results{de_suffix}.csv'
 real_cached = os.path.exists(de_path)
+if IS_WORKER and not real_cached:
+    raise SystemExit(
+        f'[worker] {de_path} missing; run driver first to cache real DE')
 
+# Build pseudobulks only for pairs that need real DE or perms
 pairs_to_run = set()
 for name, cfg in datasets.items():
     for treat, ctrl in cfg['contrasts']:
@@ -231,23 +441,6 @@ for name in {n for n, _ in pairs_to_run}:
                 pb.filter_obs(pl.col('condition').is_in([treat, ctrl]))
             print(f'[{name}] {contrast}: pseudobulk built')
 
-def load_n_cells_long(name):
-    path = f'{working_dir}/output/n_cells_expr_{name}.parquet'
-    if not os.path.exists(path):
-        compute_n_cells_expr(adatas[name], cell_type_col).write_parquet(path)
-    return pl.read_parquet(path).with_columns(pl.lit(name).alias('dataset'))
-
-def add_n_cells_contrast(df, n_long):
-    df = df.with_columns(
-        pl.col('contrast').str.split('_vs_').list.get(0).alias('treat'),
-        pl.col('contrast').str.split('_vs_').list.get(1).alias('base'))
-    for side in ('treat', 'base'):
-        df = df.join(
-            n_long.rename({'condition': side,
-                           'n_cells_expr': f'n_cells_{side}'}),
-            on=['dataset', 'cell_type', 'gene', side], how='left')
-    return df.drop(['treat', 'base'])
-
 if not real_cached:
     de_frames = []
     for (name, contrast), pb_sub in all_pbs.items():
@@ -260,15 +453,13 @@ if not real_cached:
         n_sig = df.filter(pl.col('FDR') < 0.10).height
         print(f'[{name}] {contrast}: {df.height:,} tests, '
               f'{n_sig} DEGs (FDR<0.10), {time.time()-t0:.0f}s', flush=True)
-
     de_results = add_ref_pct(pl.concat(de_frames))
     n_long = pl.concat(
         [load_n_cells_long(n) for n in de_results['dataset'].unique()],
         how='diagonal_relaxed')
     de_results = add_n_cells_contrast(de_results, n_long)
     de_results.write_csv(de_path)
-    de_results\
-        .filter(pl.col('FDR') < 0.10)\
+    de_results.filter(pl.col('FDR') < 0.10)\
         .write_csv(f'{working_dir}/output/de_results_sig{de_suffix}.csv')
 else:
     de_results = pl.read_csv(de_path)
@@ -278,11 +469,9 @@ else:
 
 #endregion
 
-#region sumrank meta-analysis ##################################################
+#region sumrank math ##########################################################
 
-# CDF of the sum of n iid Uniform(0,1); null distribution of the sum of
-# n normalized ranks. Using CDF (not density as in Nakatsuka et al.) gives
-# proper two-tail p-values without needing the N/2 cap workaround.
+# CDF of sum of n iid Uniform(0,1); null for sum of normalized ranks
 def irwin_hall_cdf(x, n):
     x = np.clip(np.atleast_1d(x).astype(float), 0.0, float(n))
     out = np.zeros_like(x)
@@ -310,8 +499,7 @@ def sumrank_one(de_frame, platforms):
         rank_dfs, active = [], []
         for plt in platforms:
             sub = de_frame.filter(
-                (pl.col('dataset') == plt) &
-                (pl.col('cell_type') == ct))
+                (pl.col('dataset') == plt) & (pl.col('cell_type') == ct))
             if sub.height == 0:
                 continue
             rank_dfs.append(signed_norm_rank(
@@ -331,7 +519,7 @@ def sumrank_one(de_frame, platforms):
         keep = d >= 2
         if not keep.any():
             continue
-        # stratify p-values by d: Irwin-Hall parameter = number of uniforms
+        # Irwin-Hall parameter = number of uniforms (d varies per gene)
         nlp_up = np.full(len(d), np.nan)
         nlp_dn = np.full(len(d), np.nan)
         for k in np.unique(d[keep]):
@@ -340,14 +528,17 @@ def sumrank_one(de_frame, platforms):
             nlp_up[idx] = -np.log10(np.clip(cdf, 1e-300, 1.0))
             nlp_dn[idx] = -np.log10(np.clip(1 - cdf, 1e-300, 1.0))
         out.append(pl.DataFrame({
-            'cell_type': ct,
-            'gene': merged['gene'],
-            'D': d.astype(np.int64),
-            'sum_stat': s,
-            'nlp_up': nlp_up,
-            'nlp_down': nlp_dn,
+            'cell_type': ct, 'gene': merged['gene'],
+            'D': d.astype(np.int64), 'sum_stat': s,
+            'nlp_up': nlp_up, 'nlp_down': nlp_dn,
         }).filter(pl.col('D') >= 2))
     return pl.concat(out) if out else pl.DataFrame()
+
+def sumrank_one_pw(gsea_frame, platforms):
+    renamed = gsea_frame.rename({
+        'pathway': 'gene', 'NES': 'logFC', 'pvalue': 'PValue'})
+    out = sumrank_one(renamed, platforms)
+    return out.rename({'gene': 'pathway'}) if out.height > 0 else out
 
 def bh_fdr(p):
     p = np.asarray(p, dtype=float)
@@ -367,6 +558,67 @@ def bh_fdr(p):
     out[valid] = q_final
     return out
 
+def null_pool_vec(perm_frames, *, item_col='gene', fc_col='logFC',
+                  p_col='PValue', chunk_perms=100, label='[null]'):
+    if len(perm_frames) < 2:
+        return {}
+    max_k = min(int(pf['perm'].max()) for pf in perm_frames.values())
+    null_by_ct = defaultdict(list)
+    score_expr = (((-pl.col(p_col).clip(lower_bound=1e-300).log10()) *
+                   pl.col(fc_col).sign())
+                  .fill_nan(0.0).fill_null(0.0))
+    t0 = time.time()
+    for lo in range(1, max_k + 1, chunk_perms):
+        hi = min(lo + chunk_perms - 1, max_k)
+        parts = [pf.filter(pl.col('perm').is_between(lo, hi))
+                 for pf in perm_frames.values()]
+        sub = pl.concat(parts, how='diagonal')
+        if sub.height == 0:
+            continue
+        scored = sub.with_columns(score=score_expr).with_columns(
+            n_items=pl.len().over(['perm', 'cell_type', 'dataset']),
+            rk=pl.col('score').rank('ordinal', descending=True)
+                .over(['perm', 'cell_type', 'dataset'])
+        ).with_columns(
+            nrank=(pl.col('rk') - 1).cast(pl.Float64) /
+                  pl.max_horizontal(pl.col('n_items') - 1, 1)
+                    .cast(pl.Float64)
+        ).select(['perm', 'cell_type', item_col, 'dataset', 'nrank'])
+        wide = scored.pivot(
+            on='dataset',
+            index=['perm', 'cell_type', item_col],
+            values='nrank')
+        nrank_cols = [c for c in wide.columns
+                      if c not in ('perm', 'cell_type', item_col)]
+        if not nrank_cols:
+            continue
+        arr = wide.select(nrank_cols).to_numpy()
+        d = (~np.isnan(arr)).sum(axis=1)
+        s = np.nansum(arr, axis=1)
+        keep = d >= 2
+        if not keep.any():
+            continue
+        nlp_up = np.full(len(d), np.nan)
+        nlp_dn = np.full(len(d), np.nan)
+        for kk in np.unique(d[keep]):
+            idx = (d == int(kk)) & keep
+            cdf = irwin_hall_cdf(s[idx], int(kk))
+            nlp_up[idx] = -np.log10(np.clip(cdf, 1e-300, 1.0))
+            nlp_dn[idx] = -np.log10(np.clip(1 - cdf, 1e-300, 1.0))
+        cts = wide['cell_type'].to_numpy()
+        valid_up = keep & ~np.isnan(nlp_up)
+        valid_dn = keep & ~np.isnan(nlp_dn)
+        for ct in np.unique(cts[keep]):
+            mask = (cts == ct)
+            null_by_ct[ct].append(nlp_up[mask & valid_up])
+            null_by_ct[ct].append(nlp_dn[mask & valid_dn])
+        elapsed = time.time() - t0
+        eta = (max_k - hi) * elapsed / max(hi, 1)
+        print(f'{label} perms {lo}:{hi} done '
+              f'({elapsed:.0f}s, eta {eta:.0f}s)', flush=True)
+    return {ct: np.sort(np.concatenate(arrs)) if arrs else np.array([])
+            for ct, arrs in null_by_ct.items()}
+
 def calibrate_emp_p(real, null_by_ct):
     emp_up = np.full(real.height, np.nan)
     emp_dn = np.full(real.height, np.nan)
@@ -383,18 +635,77 @@ def calibrate_emp_p(real, null_by_ct):
             emp[msk] = np.maximum((len(nu) - idx) / len(nu), 1.0 / len(nu))
     return emp_up, emp_dn
 
-def chunk_map(pattern):
-    return {int(m.group(1)): p for p in glob.glob(pattern)
-            if (m := re.search(r'_chunk_(\d+)\.parquet$', p))}
+def run_sumrank_meta(*, output_path, cache_dir, parquet_stage,
+                     real_for_contrast, sumrank_fn, item_col,
+                     fc_col, p_col, post_process, log_prefix):
+    # Compute or load the sumrank meta-analysis for one stage.
+    # real_for_contrast(c): polars DF of real-data results for contrast c
+    # sumrank_fn: sumrank_one (gene) or sumrank_one_pw (pathway)
+    # item_col/fc_col/p_col: column names for the unit + log-fc + p-value
+    # post_process(out): final column re-ordering hook
+    if os.path.exists(output_path):
+        out = pl.read_csv(output_path)
+        print(f'{log_prefix} cached: {out.height:,} rows, '
+              f'{out["contrast"].n_unique()} contrasts')
+        return out
+    parts = []
+    for contrast, platforms in SUMRANK_CONTRAST_PLATFORMS.items():
+        real_c = real_for_contrast(contrast)
+        if real_c.height == 0:
+            continue
+        real = sumrank_fn(real_c, platforms)
+        if real.height == 0:
+            print(f'{log_prefix} {contrast}: '
+                  f'no cell types with >=2 platforms')
+            continue
+        perm_frames = {}
+        for plt in platforms:
+            p = f'{cache_dir}/{parquet_stage}_{plt}_{contrast}.parquet'
+            if os.path.exists(p):
+                perm_frames[plt] = pl.read_parquet(p).with_columns(
+                    pl.lit(plt).alias('dataset'))
+        if len(perm_frames) < 2:
+            print(f'{log_prefix} {contrast}: skip, <2 perm caches')
+            continue
+        null_final = null_pool_vec(
+            perm_frames, item_col=item_col,
+            fc_col=fc_col, p_col=p_col,
+            label=f'{log_prefix} {contrast} null:')
+        emp_up, emp_dn = calibrate_emp_p(real, null_final)
+        parts.append(real.with_columns(
+            pl.lit(contrast).alias('contrast'),
+            pl.Series('emp_p_up', emp_up),
+            pl.Series('emp_p_down', emp_dn),
+            pl.Series('emp_fdr_up', bh_fdr(emp_up)),
+            pl.Series('emp_fdr_down', bh_fdr(emp_dn))))
+    out = pl.concat(parts) if parts else pl.DataFrame()
+    if out.height > 0:
+        out = post_process(out)
+    out.write_csv(output_path)
+    return out
 
-# perms run via R-side mclapply
+def print_sumrank_summary(out, *, item_col, log_prefix):
+    for contrast in SUMRANK_CONTRAST_PLATFORMS:
+        if out.height == 0:
+            return
+        sub = out.filter(pl.col('contrast') == contrast)
+        if sub.height == 0:
+            continue
+        n_up = sub.filter(pl.col('emp_fdr_up') < 0.10).height
+        n_dn = sub.filter(pl.col('emp_fdr_down') < 0.10).height
+        print(f'{log_prefix} {contrast}: '
+              f'{sub["cell_type"].n_unique()} cell types, '
+              f'{sub[item_col].n_unique():,} {item_col}s, '
+              f'{n_up} up / {n_dn} down (emp_fdr<0.10)')
+
+#endregion
+
+#region DE perms — R code #####################################################
+
 r('''
 suppressPackageStartupMessages({
-    library(limma)
-    library(dplyr)
-    library(tibble)
-    library(purrr)
-    library(parallel)
+    library(limma); library(dplyr); library(tibble)
+    library(purrr); library(parallel)
 })
 Sys.setenv(OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1",
            MKL_NUM_THREADS = "1", BLIS_NUM_THREADS = "1")
@@ -480,65 +791,75 @@ def populate_pb_r(pb_sub, r_var='pb_cur'):
         ''')
     r('rm(obs_tmp, X_tmp, ct_tmp); invisible(gc())')
 
-# process contrasts with existing partial chunks first to resume sooner
-def _perm_priority(item):
-    (name, contrast), _ = item
-    n_chunks = len(glob.glob(
-        f'{sumrank_cache_dir}/perm_{name}_{contrast}_chunk_*.parquet'))
-    return (-n_chunks, name, contrast)
+#endregion
 
-for (name, contrast), pb_sub in sorted(all_pbs.items(), key=_perm_priority):
+#region DE perms — submit & worker ############################################
+
+# Driver: merge any ready pairs, then submit missing batches
+if not IS_WORKER:
+    for pair in _sumrank_pairs():
+        _merge_chunks_if_ready(
+            pair, 'perm', sumrank_cache_dir,
+            SUMRANK_CHUNK_SIZE, SUMRANK_N_PERM,
+            unique_cols=['perm', 'cell_type', 'gene'])
+    active = _active_slurm_jobs()
+    submitted, pending = _submit_missing_batches(
+        parquet_stage='perm', job_stage='de', perm_job='de',
+        pairs=[p for p in _sumrank_pairs() if p in all_pbs],
+        cache_dir=sumrank_cache_dir,
+        batch_perms=SUMRANK_PERM_BATCH,
+        chunk_size=SUMRANK_CHUNK_SIZE,
+        active_jobs=active)
+    if submitted:
+        print(f'[sumrank] submitted {len(submitted)} DE perm batches:')
+        for tag in submitted:
+            print(f'  {tag}')
+    elif pending:
+        print(f'[sumrank] {len(pending)} DE perm batches in flight')
+    else:
+        print('[sumrank] all DE perms cached')
+
+def run_de_worker(name, contrast, pb_sub, perm_start, perm_end):
+    # Compute DE perm chunks for one (platform, contrast, perm-range).
     if name not in SUMRANK_CONTRAST_PLATFORMS.get(contrast, []):
-        continue
+        return
     final_path = f'{sumrank_cache_dir}/perm_{name}_{contrast}.parquet'
     if os.path.exists(final_path):
         print(f'[sumrank] perm cached: {name} {contrast}', flush=True)
-        continue
-
+        return
     chunk_glob = (
         f'{sumrank_cache_dir}/perm_{name}_{contrast}_chunk_*.parquet')
     existing = chunk_map(chunk_glob)
-
-    starts = list(range(0, SUMRANK_N_PERM, SUMRANK_CHUNK_SIZE))
-    print(f'[sumrank] {name} {contrast}: {SUMRANK_N_PERM} perms in '
+    starts = list(range(perm_start, perm_end, SUMRANK_CHUNK_SIZE))
+    range_label = f'{perm_start}:{perm_end}'
+    print(f'[sumrank] {name} {contrast} [{range_label}]: '
           f'{len(starts)} chunks of {SUMRANK_CHUNK_SIZE} '
-          f'({len(existing)} cached), n_cores={SUMRANK_N_CORES}',
-          flush=True)
-
-    need_any = any(start not in existing for start in starts)
+          f'({sum(s in existing for s in starts)} cached), '
+          f'n_cores={SUMRANK_N_CORES}', flush=True)
+    need_any = any(s not in existing for s in starts)
     if need_any:
-        print(f'[sumrank] {name} {contrast}: populating R pseudobulks...',
-              flush=True)
         t_pop = time.time()
         populate_pb_r(pb_sub, 'pb_cur')
-        print(f'[sumrank] {name} {contrast}: populated in '
+        print(f'[sumrank] {name} {contrast}: R pseudobulks populated in '
               f'{time.time()-t_pop:.0f}s', flush=True)
         treat, base = contrast.split('_vs_')
-        to_r(treat, 'treat')
-        to_r(base, 'base')
+        to_r(treat, 'treat'); to_r(base, 'base')
         to_r(DESIGN_FORMULAS[name], 'design_formula')
         to_r(SUMRANK_N_CORES, 'n_cores')
         to_r(PERM_SEED_BASE, 'seed_base')
-    # same detection-threshold mask applied to real DE, used to suppress
-    # sparse-detection hits consistently across real and all perms
     perm_mask = n_cells_mask(name, contrast)
-
-    chunks = []
     t_pair = time.time()
     for i, start in enumerate(starts, 1):
         if start in existing:
-            chunks.append(pl.read_parquet(existing[start]))
             print(f'[sumrank] {name} {contrast}: chunk {i}/{len(starts)} '
                   f'(cached)', flush=True)
             continue
         n_this = min(SUMRANK_CHUNK_SIZE, SUMRANK_N_PERM - start)
-        print(f'[sumrank] {name} {contrast}: chunk {i}/{len(starts)} '
-              f'starting ({n_this} perms)', flush=True)
         t0 = time.time()
         to_r(n_this, 'n_perm')
         to_r(start + 1, 'start_perm')
-        r('chunk_df <- run_voom_perms(pb_cur, treat, base, design_formula, '
-          'n_perm, n_cores, start_perm, seed_base)')
+        r('chunk_df <- run_voom_perms(pb_cur, treat, base, '
+          'design_formula, n_perm, n_cores, start_perm, seed_base)')
         chunk_df = to_py('chunk_df')
         dt = time.time() - t0
         if chunk_df is None or chunk_df.height == 0:
@@ -551,190 +872,215 @@ for (name, contrast), pb_sub in sorted(all_pbs.items(), key=_perm_priority):
         chunk_path = (f'{sumrank_cache_dir}/'
                       f'perm_{name}_{contrast}_chunk_{start}.parquet')
         chunk_df.write_parquet(chunk_path)
-        chunks.append(chunk_df)
-        eta_min = dt * (len(starts) - i) / 60
+        eta = dt * (len(starts) - i) / 60
         print(f'[sumrank] {name} {contrast}: chunk {i}/{len(starts)} '
               f'done ({chunk_df["perm"].n_unique()} perms, '
-              f'{chunk_df.height:,} rows, '
-              f'{chunk_df["cell_type"].n_unique()} cell types, '
-              f'{dt:.0f}s; eta {eta_min:.1f} min)', flush=True)
-
-    if not chunks:
-        print(f'[sumrank] WARN {name} {contrast}: no permutations produced',
+              f'{chunk_df.height:,} rows, {dt:.0f}s; eta {eta:.1f} min)',
               flush=True)
-        continue
-    full = pl.concat(chunks).unique(subset=['perm', 'cell_type', 'gene'])
-    full.write_parquet(final_path)
-    for p in glob.glob(chunk_glob):
-        os.remove(p)
-    print(f'[sumrank] {name} {contrast}: saved {full.height:,} rows '
-          f'({full["perm"].n_unique()}/{SUMRANK_N_PERM} perms, '
-          f'{(time.time() - t_pair) / 60:.1f} min total)', flush=True)
+    print(f'[sumrank] {name} {contrast} [{range_label}]: chunks written '
+          f'({(time.time() - t_pair) / 60:.1f} min)', flush=True)
     if need_any:
         r('rm(pb_cur); invisible(gc())')
 
-sumrank_final = []
-for contrast, platforms in SUMRANK_CONTRAST_PLATFORMS.items():
-    de_c = de_results.filter(pl.col('contrast') == contrast)
-    if de_c.height == 0:
-        continue
-    real = sumrank_one(de_c, platforms)
-    if real.height == 0:
-        print(f'[sumrank] {contrast}: no cell types with >=2 platforms')
-        continue
+if IS_WORKER and WORKER_STAGE == 'de':
+    pb_sub = all_pbs.get((WORKER_PLATFORM, WORKER_CONTRAST))
+    if pb_sub is None:
+        raise SystemExit(
+            f'[worker] no pseudobulk for {WORKER_PLATFORM} '
+            f'{WORKER_CONTRAST}')
+    run_de_worker(WORKER_PLATFORM, WORKER_CONTRAST, pb_sub,
+                  WORKER_PERM_START, WORKER_PERM_END)
+    print(f'[worker] de perm job done for {WORKER_PLATFORM} '
+          f'{WORKER_CONTRAST}', flush=True)
+    sys.exit(0)
 
-    perm_frames = {}
-    for plt in platforms:
-        p = f'{sumrank_cache_dir}/perm_{plt}_{contrast}.parquet'
-        if os.path.exists(p):
-            perm_frames[plt] = pl.read_parquet(p).with_columns(
-                pl.lit(plt).alias('dataset'))
-    if len(perm_frames) < 2:
-        print(f'[sumrank] {contrast}: skip calibration, <2 perm caches')
-        continue
+# Driver: gate on all DE perm parquets being present
+if not IS_WORKER:
+    _gate_on_missing('perm', sumrank_cache_dir, 'sumrank')
 
-    null_by_ct = defaultdict(list)
-    max_k = min(int(pf['perm'].max()) for pf in perm_frames.values())
-    t_null = time.time()
-    for k in range(1, max_k + 1):
-        dfs = [pf.filter(pl.col('perm') == k) for pf in perm_frames.values()]
-        dfs = [d for d in dfs if d.height > 0]
-        if len(dfs) < 2:
-            continue
-        sr_k = sumrank_one(pl.concat(dfs, how='diagonal'), platforms)
-        if sr_k.height == 0:
-            continue
-        # pool nlp_up + nlp_down into one null per cell type: under the
-        # null hypothesis the two directions are exchangeable (2x resolution)
-        for ct in sr_k['cell_type'].unique().to_list():
-            sub = sr_k.filter(pl.col('cell_type') == ct)
-            u = sub['nlp_up'].to_numpy()
-            d = sub['nlp_down'].to_numpy()
-            null_by_ct[ct].append(u[~np.isnan(u)])
-            null_by_ct[ct].append(d[~np.isnan(d)])
-        if k % 10 == 0 or k == max_k:
-            elapsed = time.time() - t_null
-            eta = (max_k - k) * elapsed / max(k, 1)
-            print(f'[sumrank] {contrast} null: {k}/{max_k} '
-                  f'({elapsed:.0f}s elapsed, eta {eta:.0f}s)', flush=True)
-    null_final = {
-        ct: np.sort(np.concatenate(arrs)) if arrs else np.array([])
-        for ct, arrs in null_by_ct.items()}
-    emp_up, emp_dn = calibrate_emp_p(real, null_final)
+#endregion
 
-    sumrank_final.append(real.with_columns(
-        pl.lit(contrast).alias('contrast'),
-        pl.Series('emp_p_up', emp_up),
-        pl.Series('emp_p_down', emp_dn),
-        pl.Series('emp_fdr_up', bh_fdr(emp_up)),
-        pl.Series('emp_fdr_down', bh_fdr(emp_dn))))
+#region gene-level sumrank meta ###############################################
 
-sumrank_out = pl.concat(sumrank_final) if sumrank_final else pl.DataFrame()
-if sumrank_out.height > 0:
-    # sum n_cells across contributing datasets per (contrast, cell_type, gene)
+def _gene_post_process(out):
+    # sum n_cells across datasets per (contrast, cell_type, gene)
     n_cells_agg = de_results\
         .group_by(['contrast', 'cell_type', 'gene'])\
         .agg(pl.col('n_cells_treat').sum(),
              pl.col('n_cells_base').sum())
-    sumrank_out = add_ref_pct(sumrank_out)\
-        .join(n_cells_agg, on=['contrast', 'cell_type', 'gene'], how='left')\
+    return add_ref_pct(out)\
+        .join(n_cells_agg, on=['contrast', 'cell_type', 'gene'],
+              how='left')\
         .select([
             'contrast', 'cell_type', 'gene', 'D', 'sum_stat',
             'nlp_up', 'nlp_down', 'emp_p_up', 'emp_p_down',
             'emp_fdr_up', 'emp_fdr_down', 'ref_pct_detected',
             'n_cells_treat', 'n_cells_base'])
-sumrank_out.write_csv(
-    f'{working_dir}/output/sumrank_results{de_suffix}.csv')
 
-for contrast in SUMRANK_CONTRAST_PLATFORMS:
-    sub = sumrank_out.filter(pl.col('contrast') == contrast)
-    if sub.height == 0:
-        continue
-    n_up = sub.filter(pl.col('emp_fdr_up') < 0.10).height
-    n_dn = sub.filter(pl.col('emp_fdr_down') < 0.10).height
-    n_ct = sub['cell_type'].n_unique()
-    n_gn = sub['gene'].n_unique()
-    print(f'[sumrank] {contrast}: {n_ct} cell types, {n_gn:,} genes, '
-          f'{n_up} up / {n_dn} down DEGs (emp_fdr<0.10)')
+# Driver-only: workers exit before reaching this via the DE worker
+# dispatch above; without this guard a GSEA worker (which falls through)
+# would race the driver writing sumrank_results.csv.
+if not IS_WORKER:
+    sumrank_out = run_sumrank_meta(
+        output_path=sumrank_path,
+        cache_dir=sumrank_cache_dir,
+        parquet_stage='perm',
+        real_for_contrast=lambda c: de_results.filter(
+            pl.col('contrast') == c),
+        sumrank_fn=sumrank_one,
+        item_col='gene', fc_col='logFC', p_col='PValue',
+        post_process=_gene_post_process,
+        log_prefix='[sumrank]')
+    print_sumrank_summary(sumrank_out, item_col='gene',
+                          log_prefix='[sumrank]')
 
 #endregion
 
-#region sumrank gsea pathways ##################################################
-
-SUMRANK_GSEA_CACHE_DIR = f'{working_dir}/output/sumrank_gsea_cache'
-os.makedirs(SUMRANK_GSEA_CACHE_DIR, exist_ok=True)
-SUMRANK_GSEA_CHUNK = 20
-SUMRANK_GSEA_N_CORES = os.cpu_count()
-sumrank_gsea_path = f'{working_dir}/output/sumrank_gsea_results{de_suffix}.csv'
+#region GSEA — R code #########################################################
 
 r(f'''
 suppressPackageStartupMessages({{
-    library(fgsea)
-    library(msigdbr)
-    library(dplyr)
-    library(tibble)
-    library(purrr)
+    library(fgsea); library(msigdbr); library(dplyr); library(tibble)
+    library(purrr); library(parallel)
 }})
+Sys.setenv(OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1",
+           MKL_NUM_THREADS = "1", BLIS_NUM_THREADS = "1")
+if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {{
+    RhpcBLASctl::blas_set_num_threads(1)
+    RhpcBLASctl::omp_set_num_threads(1)
+}}
 
-cache_file <- "{working_dir}/input/m_df_themed.rds"
+cache_file <- "{working_dir}/input/m_df_themed_v2.rds"
 if (!file.exists(cache_file)) {{
     m_df <- msigdbr(species = "Mus musculus", category = "C5",
                     subcategory = "GO:BP")
+    # Themes ordered most-specific first; first match wins.
     theme_keywords <- list(
-        'Neuronal' = c(
-            'NEURO','SYNAP','AXON','DENDRITE','GLUTAMATE','GABA',
-            'CHOLINERGIC','DOPAMINERGIC','SEROTONERGIC',
-            'ACTION_POTENTIAL','REGULATION_NEUROTRANSMITTER_LEVELS',
-            'REGULATION_SYNAPTIC_PLASTICITY'),
-        'Metabolic' = c(
-            'METABOLIC','LIPID','CHOLESTEROL','GLUCOSE_METABOLIC',
-            'ATP_METABOLIC','CELLULAR_RESPIRATION',
-            'ELECTRON_TRANSPORT','OXIDATIVE_PHOSPHORYLATION'),
-        'Vascular' = c(
-            'VASCULAR','VASCULATURE','ANGIOGENESIS','ENDOTHELIAL',
-            'BLOOD_BRAIN_BARRIER','BLOOD_VESSEL',
-            'ENDOTHELIAL_CELL_MIGRATION'),
-        'Immune' = c(
-            'IMMUNE','INFLAMMATORY','CYTOKINE','INTERFERON',
-            'INNATE_IMMUNE','MICROGLIAL'),
+        'Maternal_Reproduction' = c(
+            'MATERNAL','PREGNAN','GESTATION','PARTURITION','LACTATION',
+            'MAMMARY','PLACENTA','_MILK_','OVULATION','OVARIAN',
+            'ESTROUS','ESTRUS','FEMALE_GONAD','FEMALE_SEX',
+            'MENSTRUAL','UTERINE','OOGENESIS','EMBRYO_IMPLANTATION',
+            'REPRODUCTIVE_BEHAVIOR','REPRODUCTIVE_STRUCTURE',
+            'MULTICELLULAR_ORGANISMAL_REPRODUCTIVE'),
+        'Glial_Myelination' = c(
+            'ASTROCYT','GLIAL_','GLIOGENESIS','OLIGODENDRO',
+            'MYELIN','SCHWANN','MICROGLIA','MICROGLIAL',
+            'ENSHEATHMENT','NEUROINFLAMM','REMYELINATION'),
+        'Plasticity' = c(
+            'NEUROGENESIS','DENDRITIC_SPINE',
+            'AXON_GUIDANCE','AXONOGENESIS',
+            'SYNAPSE_ORGANIZATION','SYNAPSE_ASSEMBLY',
+            'SYNAPSE_PRUNING','SYNAPTIC_PLASTICITY',
+            'LONG_TERM_SYNAPTIC','LONG_TERM_POTENTIATION',
+            'LONG_TERM_DEPRESSION',
+            'NEURON_PROJECTION_DEVELOPMENT',
+            'NEURON_PROJECTION_MORPHOGENESIS',
+            'NEURON_DIFFERENTIATION','NEURON_MIGRATION',
+            'NEURON_FATE','NEURAL_PRECURSOR','NEURAL_PROGENITOR',
+            'SEMAPHORIN','SLIT','EPHRIN',
+            'CELL_MORPHOGENESIS_INVOLVED_IN_NEURON'),
         'Hormonal' = c(
             'HORMONE','STEROID','ESTROGEN','PROGESTERONE',
+            'ANDROGEN','PROLACTIN','CORTICOSTERON',
+            'CORTICOTROPIN','GONADOTROPIN','VASOPRESSIN',
+            'NEUROPEPTIDE','LUTEIN','FOLLICLE_STIMULAT',
             'GLUCOCORTICOID','MINERALOCORTICOID',
-            'CELLULAR_RESPONSE_HORMONE_STIMULUS'),
+            'ENDOCRINE_','INSULIN_SECR','LEPTIN','GHRELIN'),
         'Growth_Factors' = c(
-            'GROWTH_FACTOR','NEUROTROPHIC','BDNF','NGF','IGF',
-            'FIBROBLAST_GROWTH',
-            'CELLULAR_RESPONSE_GROWTH_FACTOR'),
-        'Plasticity' = c(
-            'NEUROGENESIS','DENDRITIC_SPINE','AXON_GUIDANCE',
-            'SYNAPSE_ORGANIZATION',
-            'NEURON_PROJECTION_DEVELOPMENT'),
-        'Structural' = c(
-            'ADHESION','EXTRACELLULAR_MATRIX','CELL_JUNCTION',
-            'CELL_ADHESION'),
-        'Protein_Dynamics' = c(
-            'TRANSLATION','RIBOSOMAL','PROTEASOME',
-            'UBIQUITIN','AUTOPHAGY','PROTEIN_FOLDING',
-            'CHAPERONE'),
+            'NEUROTROPH','NERVE_GROWTH_FACTOR',
+            'INSULIN_LIKE_GROWTH_FACTOR',
+            'FIBROBLAST_GROWTH_FACTOR',
+            'EPIDERMAL_GROWTH_FACTOR',
+            'VASCULAR_ENDOTHELIAL_GROWTH_FACTOR',
+            'HEPATOCYTE_GROWTH_FACTOR',
+            'PLATELET_DERIVED_GROWTH_FACTOR',
+            'TRANSFORMING_GROWTH_FACTOR',
+            'GLIAL_CELL_LINE_DERIVED_NEUROTROPH',
+            'BONE_MORPHOGENETIC_PROTEIN',
+            'GROWTH_FACTOR_ACTIVITY',
+            'GROWTH_FACTOR_PRODUCTION',
+            'RESPONSE_TO_GROWTH_FACTOR'),
+        'Immune' = c(
+            'IMMUNE','IMMUNO','INFLAMMAT','CYTOKINE','INTERFERON',
+            'INTERLEUKIN','INNATE','COMPLEMENT_ACTIVATION','ANTIGEN',
+            'T_CELL','B_CELL','LYMPHOCYTE','LEUKOCYTE',
+            'MACROPHAGE','NK_CELL','TOLL_LIKE','CHEMOKINE'),
+        'Behavior_Cognition' = c(
+            'BEHAVIOR','LEARNING','MEMORY','COGNITION','LOCOMOT',
+            'FEEDING_BEHAVIOR','SUCKLING','VOCALIZATION',
+            'CIRCADIAN','RHYTHMIC','SLEEP','AROUSAL'),
         'Ion_Transport' = c(
-            'CALCIUM','POTASSIUM','ION_TRANSPORT',
-            'MEMBRANE_POTENTIAL','ION_HOMEOSTASIS')
+            'CALCIUM','POTASSIUM','SODIUM','CHLORIDE','ZINC',
+            'METAL_ION_TRANSPORT','ION_TRANSPORT','ION_HOMEOSTASIS',
+            'CATION_CHANNEL','ANION_CHANNEL','MEMBRANE_POTENTIAL',
+            'ACTION_POTENTIAL','CHANNEL_ACTIVITY','_ION_CHANNEL'),
+        'Vascular' = c(
+            'VASCUL','ANGIOGEN','ENDOTHELIAL',
+            'BLOOD_BRAIN_BARRIER','VASOCONSTR','VASODILA',
+            'ARTERY','ARTERIOGEN','PERICYTE',
+            'BLOOD_CIRCULATION','MICROVASCUL'),
+        'Protein_Dynamics' = c(
+            'TRANSLATION','RIBOSOM','PROTEASOME','UBIQUITIN',
+            'AUTOPHAG','PROTEIN_FOLD','UNFOLDED_PROTEIN',
+            'CHAPERONE','ER_STRESS',
+            'ENDOPLASMIC_RETICULUM_STRESS',
+            'TOPOLOGICALLY_INCORRECT_PROTEIN'),
+        'Stress_Apoptosis' = c(
+            'APOPTO','NECROP','PYROPTO','FERROPTO','CELL_DEATH',
+            'NEURON_DEATH','PROGRAMMED_CELL_DEATH',
+            'INTRINSIC_APOPTOTIC','CASPASE',
+            'OXIDATIVE_STRESS','REACTIVE_OXYGEN',
+            'RESPONSE_TO_STRESS','CELLULAR_RESPONSE_TO_STRESS',
+            'RESPONSE_TO_OXIDATIVE','DNA_DAMAGE_RESPONSE',
+            'RESPONSE_TO_HYPOXIA','HEAT_SHOCK',
+            'RESPONSE_TO_HEAT','RESPONSE_TO_COLD'),
+        'Metabolic' = c(
+            'METABOLI','LIPID','CHOLESTEROL','GLUCOSE','GLYCOLY',
+            'ATP_','CELLULAR_RESPIRATION','AEROBIC_RESPIRATION',
+            'ELECTRON_TRANSPORT','OXIDATIVE_PHOSPHOR',
+            'MITOCHONDR','MITOPHAG','TRICARBOX','NADH_',
+            'FATTY_ACID','BETA_OXID','AMINO_ACID_METAB',
+            'NUCLEOTIDE_METAB','GLYCOGEN','KETONE_BODY'),
+        'Neuronal' = c(
+            'NEURON_','NEUROTRANS','SYNAP','AXON_','DENDRIT',
+            'GLUTAMATE','GABA','CHOLINERGIC','DOPAMINERGIC',
+            'SEROTONERGIC','SEROTONIN','NEUROMODUL',
+            'NEUROSECRETORY','NEUROMUSCUL'),
+        'Structural' = c(
+            'CELL_ADHESION','CELL_CELL_ADHESION','CELL_JUNCTION',
+            'EXTRACELLULAR_MATRIX','BASEMENT_MEMBRANE',
+            'GAP_JUNCTION','TIGHT_JUNCTION','INTEGRIN',
+            'CYTOSKELET','ACTIN_FILAMENT','INTERMEDIATE_FILAMENT',
+            'MICROTUBULE','COLLAGEN')
     )
-    all_keywords <- unlist(theme_keywords)
-    regex_pattern <- paste(all_keywords, collapse = "|")
-    get_theme <- function(gs_name, themes) {{
-        for (tn in names(themes)) {{
-            if (any(sapply(themes[[tn]], grepl, gs_name, ignore.case=TRUE)))
-                return(tn)
+    theme_patterns <- vapply(
+        theme_keywords,
+        function(kws) paste(kws, collapse = "|"),
+        character(1))
+    assign_theme <- function(names_vec) {{
+        res <- rep(NA_character_, length(names_vec))
+        for (tn in names(theme_patterns)) {{
+            todo <- is.na(res)
+            if (!any(todo)) break
+            hit <- grepl(theme_patterns[[tn]], names_vec[todo],
+                         ignore.case = TRUE, perl = TRUE)
+            res[which(todo)[hit]] <- tn
         }}
-        NA_character_
+        res
     }}
     m_df_themed <- m_df %>%
-        filter(grepl(regex_pattern, gs_name, ignore.case = TRUE)) %>%
-        rowwise() %>%
-        mutate(theme = get_theme(gs_name, theme_keywords)) %>%
-        ungroup() %>%
+        mutate(theme = assign_theme(gs_name)) %>%
         filter(!is.na(theme))
+    cat("[theme_v2] pathway counts per theme:\\n")
+    print(m_df_themed %>% distinct(gs_name, theme) %>%
+          count(theme, sort = TRUE))
+    cat(sprintf(
+        "[theme_v2] kept %d / %d GO:BP pathways (%.1f%%)\\n",
+        length(unique(m_df_themed$gs_name)),
+        length(unique(m_df$gs_name)),
+        100 * length(unique(m_df_themed$gs_name)) /
+              length(unique(m_df$gs_name))))
     saveRDS(m_df_themed, cache_file)
 }} else {{
     m_df_themed <- readRDS(cache_file)
@@ -742,7 +1088,7 @@ if (!file.exists(cache_file)) {{
 filtered_pathways_sr <- split(m_df_themed$gene_symbol, m_df_themed$gs_name)
 
 fgsea_ranked_groups <- function(ranked_df, keys, pathways, n_cores,
-                                minSize = 15) {{
+                                minSize = 15, nperm_simple = NULL) {{
     rl <- rle(keys)
     ends <- cumsum(rl$lengths)
     starts <- ends - rl$lengths + 1L
@@ -754,24 +1100,44 @@ fgsea_ranked_groups <- function(ranked_df, keys, pathways, n_cores,
         if (length(idx) < 100) return(NULL)
         ranks <- setNames(rank_vec[idx], gene_vec[idx])
         res <- tryCatch(
-            fgsea(pathways = pathways, stats = ranks, minSize = minSize),
+            if (is.null(nperm_simple)) {{
+                fgsea(pathways = pathways, stats = ranks,
+                      minSize = minSize)
+            }} else {{
+                fgseaSimple(pathways = pathways, stats = ranks,
+                            minSize = minSize, nperm = nperm_simple)
+            }},
             error = function(e) NULL)
-        if (is.null(res) || nrow(res) == 0) return(NULL)
-        data.frame(pathway = res$pathway, NES = res$NES,
-                   pvalue = res$pval,
-                   key = rl$values[i],
-                   stringsAsFactors = FALSE)
+        if (is.null(res) || nrow(res) == 0) {{
+            rm(ranks); gc(); return(NULL)
+        }}
+        out <- data.frame(pathway = res$pathway, NES = res$NES,
+                          pvalue = res$pval,
+                          key = rl$values[i],
+                          stringsAsFactors = FALSE)
+        rm(ranks, res); gc()
+        out
     }}
     results <- if (n_cores > 1)
         mclapply(seq_len(n_grp), worker, mc.cores = n_cores)
     else
         lapply(seq_len(n_grp), worker)
-    bind_rows(results)
+    valid <- vapply(results,
+                    function(x) is.null(x) || is.data.frame(x),
+                    logical(1))
+    if (!all(valid)) {{
+        warning(sprintf(
+            "fgsea_ranked_groups: %d/%d workers crashed",
+            sum(!valid), length(results)))
+    }}
+    bind_rows(results[valid])
 }}
 
-fgsea_perms <- function(perm_df, pathways, n_cores, minSize = 15) {{
+fgsea_perms <- function(perm_df, pathways, n_cores, minSize = 15,
+                        nperm_simple = 100) {{
     keys <- paste(perm_df$perm, perm_df$cell_type, sep = "___")
-    out <- fgsea_ranked_groups(perm_df, keys, pathways, n_cores, minSize)
+    out <- fgsea_ranked_groups(perm_df, keys, pathways, n_cores, minSize,
+                               nperm_simple = nperm_simple)
     if (nrow(out) == 0) return(out)
     parts <- do.call(rbind, strsplit(out$key, "___", fixed = TRUE))
     out$perm <- as.integer(parts[, 1L])
@@ -790,14 +1156,6 @@ fgsea_real <- function(ranked_df, pathways, n_cores, minSize = 15) {{
 }}
 ''')
 
-def sumrank_one_pw(gsea_frame, platforms):
-    renamed = gsea_frame.rename({
-        'pathway': 'gene', 'NES': 'logFC', 'pvalue': 'PValue'})
-    out = sumrank_one(renamed, platforms)
-    if out.height > 0:
-        out = out.rename({'gene': 'pathway'})
-    return out
-
 def prerank_for_fgsea(df, group_cols):
     return df\
         .with_columns(
@@ -808,18 +1166,23 @@ def prerank_for_fgsea(df, group_cols):
         .sort(group_cols + ['rank'],
               descending=[False] * len(group_cols) + [True])
 
+#endregion
+
+#region GSEA real fgsea #######################################################
+
 real_gsea_cache = f'{SUMRANK_GSEA_CACHE_DIR}/real_gsea.parquet'
+if IS_WORKER and WORKER_STAGE == 'gsea' and \
+        not os.path.exists(real_gsea_cache):
+    raise SystemExit(
+        f'[worker] {real_gsea_cache} missing; run driver first')
 if os.path.exists(real_gsea_cache):
     real_gsea = pl.read_parquet(real_gsea_cache)
     print(f'[sumrank_gsea] real fgsea cached: {real_gsea.height:,} rows')
 else:
-    pairs = de_results\
-        .select(['dataset', 'contrast'])\
-        .unique()\
-        .sort(['dataset', 'contrast'])\
-        .rows()
-    print(f'[sumrank_gsea] running real fgsea on {len(pairs)} '
-          f'dataset/contrast pairs', flush=True)
+    pairs = de_results.select(['dataset', 'contrast'])\
+        .unique().sort(['dataset', 'contrast']).rows()
+    print(f'[sumrank_gsea] running real fgsea on {len(pairs)} pairs',
+          flush=True)
     real_parts = []
     t_real = time.time()
     to_r(SUMRANK_GSEA_N_CORES, 'n_cores')
@@ -830,8 +1193,8 @@ else:
         n_cts = ranked['cell_type'].n_unique() if ranked.height > 0 else 0
         t0 = time.time()
         to_r(ranked, 'ranked_df')
-        r('real_gsea_sub <- fgsea_real(ranked_df, filtered_pathways_sr, '
-          'n_cores)')
+        r('real_gsea_sub <- fgsea_real(ranked_df, '
+          'filtered_pathways_sr, n_cores)')
         part = to_py('real_gsea_sub')
         dt = time.time() - t0
         if part is not None and part.height > 0:
@@ -847,183 +1210,158 @@ else:
     print(f'[sumrank_gsea] real fgsea: {real_gsea.height:,} rows cached '
           f'({(time.time() - t_real) / 60:.1f} min total)', flush=True)
 
-for contrast, platforms in SUMRANK_CONTRAST_PLATFORMS.items():
-    for name in platforms:
-        if name not in datasets:
-            continue
-        ds_contrasts = {f'{t}_vs_{c}' for t, c in datasets[name]['contrasts']}
-        if contrast not in ds_contrasts:
-            continue
-        gene_perm_path = f'{sumrank_cache_dir}/perm_{name}_{contrast}.parquet'
-        if not os.path.exists(gene_perm_path):
-            print(f'[sumrank_gsea] skip {name} {contrast}: gene perms '
-                  f'not cached')
-            continue
-        final_path = f'{SUMRANK_GSEA_CACHE_DIR}/fgsea_{name}_{contrast}.parquet'
-        if os.path.exists(final_path):
-            print(f'[sumrank_gsea] fgsea perm cached: {name} {contrast}')
-            continue
+#endregion
 
-        chunk_glob = (f'{SUMRANK_GSEA_CACHE_DIR}/'
-                      f'fgsea_{name}_{contrast}_chunk_*.parquet')
-        existing = chunk_map(chunk_glob)
+#region GSEA perms — submit & worker ##########################################
 
-        n_perms = int(pl.scan_parquet(gene_perm_path)\
-            .select(pl.col('perm').max())\
-            .collect()\
-            .item())
-        starts = list(range(0, n_perms, SUMRANK_GSEA_CHUNK))
-        print(f'[sumrank_gsea] {name} {contrast}: {n_perms} perms in '
-              f'{len(starts)} chunks of {SUMRANK_GSEA_CHUNK} '
-              f'({len(existing)} cached), n_cores={SUMRANK_GSEA_N_CORES}',
-              flush=True)
-        to_r(SUMRANK_GSEA_N_CORES, 'n_cores')
+# Driver: merge any ready pairs, then submit missing batches
+if not IS_WORKER:
+    for n, c in _sumrank_pairs():
+        if not os.path.exists(
+                f'{sumrank_cache_dir}/perm_{n}_{c}.parquet'):
+            continue
+        _merge_chunks_if_ready(
+            (n, c), 'fgsea', SUMRANK_GSEA_CACHE_DIR,
+            SUMRANK_GSEA_CHUNK, SUMRANK_N_PERM,
+            unique_cols=['perm', 'cell_type', 'pathway'])
+    active = _active_slurm_jobs()
+    # Only submit GSEA batches for pairs whose gene perm parquet exists
+    gsea_ready = [(n, c) for n, c in _sumrank_pairs()
+                  if os.path.exists(
+                      f'{sumrank_cache_dir}/perm_{n}_{c}.parquet')]
+    submitted, pending = _submit_missing_batches(
+        parquet_stage='fgsea', job_stage='gs', perm_job='gsea',
+        pairs=gsea_ready, cache_dir=SUMRANK_GSEA_CACHE_DIR,
+        batch_perms=SUMRANK_GSEA_PERM_BATCH,
+        chunk_size=SUMRANK_GSEA_CHUNK,
+        active_jobs=active)
+    if submitted:
+        print(f'[sumrank_gsea] submitted {len(submitted)} GSEA perm '
+              f'batches:')
+        for tag in submitted:
+            print(f'  {tag}')
+    elif pending:
+        print(f'[sumrank_gsea] {len(pending)} GSEA perm batches in flight')
+    else:
+        print('[sumrank_gsea] all GSEA perms cached')
 
-        chunks = []
-        t_pair = time.time()
-        for i, start in enumerate(starts, 1):
-            if start in existing:
-                chunks.append(pl.read_parquet(existing[start]))
-                print(f'[sumrank_gsea] {name} {contrast}: chunk '
-                      f'{i}/{len(starts)} (cached)', flush=True)
-                continue
-            end = min(start + SUMRANK_GSEA_CHUNK, n_perms)
-            ks = list(range(start + 1, end + 1))
-            sub = pl.scan_parquet(gene_perm_path)\
-                .filter(pl.col('perm').is_in(ks))\
-                .collect()
-            if sub.height == 0:
-                continue
-            ranked = prerank_for_fgsea(
-                sub.with_columns(pl.col('perm').cast(pl.Int64)),
-                ['perm', 'cell_type'])
-            t0 = time.time()
-            to_r(ranked, 'ranked_df')
-            r('chunk_df <- fgsea_perms(ranked_df, filtered_pathways_sr, '
-              'n_cores)')
-            chunk_df = to_py('chunk_df')
-            dt = time.time() - t0
-            if chunk_df is None or chunk_df.height == 0:
-                print(f'[sumrank_gsea] {name} {contrast}: chunk '
-                      f'{i}/{len(starts)} returned no rows in {dt:.0f}s',
-                      flush=True)
-                continue
-            chunk_path = (f'{SUMRANK_GSEA_CACHE_DIR}/'
-                          f'fgsea_{name}_{contrast}_chunk_{start}.parquet')
-            chunk_df.write_parquet(chunk_path)
-            chunks.append(chunk_df)
-            remaining = len(starts) - i
-            eta_min = dt * remaining / 60
+def run_gsea_worker(name, contrast, perm_start, perm_end):
+    # Compute GSEA perm chunks for one (platform, contrast, perm-range).
+    if name not in datasets:
+        return
+    ds_ctrs = {f'{t}_vs_{c}' for t, c in datasets[name]['contrasts']}
+    if contrast not in ds_ctrs:
+        return
+    gene_perm_path = (
+        f'{sumrank_cache_dir}/perm_{name}_{contrast}.parquet')
+    if not os.path.exists(gene_perm_path):
+        print(f'[sumrank_gsea] skip {name} {contrast}: '
+              f'gene perms not cached')
+        return
+    final_path = (
+        f'{SUMRANK_GSEA_CACHE_DIR}/fgsea_{name}_{contrast}.parquet')
+    if os.path.exists(final_path):
+        print(f'[sumrank_gsea] fgsea perm cached: {name} {contrast}')
+        return
+    chunk_glob = (f'{SUMRANK_GSEA_CACHE_DIR}/'
+                  f'fgsea_{name}_{contrast}_chunk_*.parquet')
+    existing = chunk_map(chunk_glob)
+    n_perms = int(pl.scan_parquet(gene_perm_path)
+                  .select(pl.col('perm').max()).collect().item())
+    lo, hi = perm_start, min(perm_end, n_perms)
+    starts = list(range(lo, hi, SUMRANK_GSEA_CHUNK))
+    range_label = f'{lo}:{hi}'
+    print(f'[sumrank_gsea] {name} {contrast} [{range_label}]: '
+          f'{len(starts)} chunks of {SUMRANK_GSEA_CHUNK} '
+          f'({sum(s in existing for s in starts)} cached), '
+          f'n_cores={SUMRANK_GSEA_N_CORES}', flush=True)
+    to_r(SUMRANK_GSEA_N_CORES, 'n_cores')
+    to_r(SUMRANK_GSEA_NPERM_SIMPLE, 'nperm_simple')
+    t_pair = time.time()
+    for i, start in enumerate(starts, 1):
+        if start in existing:
             print(f'[sumrank_gsea] {name} {contrast}: chunk '
-                  f'{i}/{len(starts)} done ({chunk_df["perm"].n_unique()} '
-                  f'perms, {chunk_df.height:,} rows, {dt:.0f}s; '
-                  f'eta {eta_min:.1f} min)', flush=True)
-
-        if not chunks:
-            print(f'[sumrank_gsea] WARN {name} {contrast}: no fgsea results')
+                  f'{i}/{len(starts)} (cached)', flush=True)
             continue
-        full = pl.concat(chunks).unique(
-            subset=['perm', 'cell_type', 'pathway'])
-        full.write_parquet(final_path)
-        for p in glob.glob(chunk_glob):
-            os.remove(p)
-        print(f'[sumrank_gsea] {name} {contrast}: saved {full.height:,} rows '
-              f'({(time.time() - t_pair) / 60:.1f} min total)')
-
-sumrank_gsea_final = []
-for contrast, platforms in SUMRANK_CONTRAST_PLATFORMS.items():
-    real_c = real_gsea.filter(pl.col('contrast') == contrast)
-    if real_c.height == 0:
-        continue
-    real = sumrank_one_pw(real_c, platforms)
-    if real.height == 0:
-        print(f'[sumrank_gsea] {contrast}: no cell types with >=2 platforms')
-        continue
-
-    perm_frames = {}
-    for plt in platforms:
-        p = f'{SUMRANK_GSEA_CACHE_DIR}/fgsea_{plt}_{contrast}.parquet'
-        if os.path.exists(p):
-            perm_frames[plt] = pl.read_parquet(p).with_columns(
-                pl.lit(plt).alias('dataset'))
-    if len(perm_frames) < 2:
-        print(f'[sumrank_gsea] {contrast}: skip calibration, <2 perm caches')
-        continue
-
-    for plt, pf in list(perm_frames.items()):
-        master_plt = real_c\
-            .filter(pl.col('dataset') == plt)\
-            .select(['cell_type', 'pathway'])\
-            .unique()
-        if master_plt.height == 0:
+        end = min(start + SUMRANK_GSEA_CHUNK, n_perms)
+        ks = list(range(start + 1, end + 1))
+        sub = pl.scan_parquet(gene_perm_path)\
+            .filter(pl.col('perm').is_in(ks)).collect()
+        if sub.height == 0:
             continue
-        perms_plt = pf.select('perm').unique()
-        expected = perms_plt.join(master_plt, how='cross')
-        pf_m = pf.join(master_plt, on=['cell_type', 'pathway'], how='inner')
-        filled = expected.join(
-            pf_m.select(['perm', 'cell_type', 'pathway', 'NES', 'pvalue']),
-            on=['perm', 'cell_type', 'pathway'], how='left')
-        filled = filled.with_columns(
-            pl.col('NES').fill_null(0.0),
-            pl.col('pvalue').fill_null(1.0),
-            pl.lit(plt).alias('dataset'))
-        perm_frames[plt] = filled
-
-    null_by_ct = defaultdict(list)
-    max_k = min(int(pf['perm'].max()) for pf in perm_frames.values())
-    t_null = time.time()
-    for k in range(1, max_k + 1):
-        dfs = [pf.filter(pl.col('perm') == k) for pf in perm_frames.values()]
-        dfs = [d for d in dfs if d.height > 0]
-        if len(dfs) < 2:
+        ranked = prerank_for_fgsea(
+            sub.with_columns(pl.col('perm').cast(pl.Int64)),
+            ['perm', 'cell_type'])
+        t0 = time.time()
+        to_r(ranked, 'ranked_df')
+        try:
+            r('chunk_df <- fgsea_perms(ranked_df, '
+              'filtered_pathways_sr, n_cores, '
+              'nperm_simple = nperm_simple)')
+            chunk_df = to_py('chunk_df')
+        except Exception as e:
+            dt = time.time() - t0
+            print(f'[sumrank_gsea] {name} {contrast}: chunk '
+                  f'{i}/{len(starts)} FAILED in {dt:.0f}s ({e})',
+                  flush=True)
+            r('rm(ranked_df); gc()')
             continue
-        sr_k = sumrank_one_pw(pl.concat(dfs, how='diagonal'), platforms)
-        if sr_k.height == 0:
+        dt = time.time() - t0
+        if chunk_df is None or chunk_df.height == 0:
+            print(f'[sumrank_gsea] {name} {contrast}: chunk '
+                  f'{i}/{len(starts)} returned 0 rows in {dt:.0f}s',
+                  flush=True)
             continue
-        for ct in sr_k['cell_type'].unique().to_list():
-            sub = sr_k.filter(pl.col('cell_type') == ct)
-            u = sub['nlp_up'].to_numpy()
-            d = sub['nlp_down'].to_numpy()
-            null_by_ct[ct].append(u[~np.isnan(u)])
-            null_by_ct[ct].append(d[~np.isnan(d)])
-        if k % 10 == 0 or k == max_k:
-            elapsed = time.time() - t_null
-            eta = (max_k - k) * elapsed / max(k, 1)
-            print(f'[sumrank_gsea] {contrast} null: {k}/{max_k} '
-                  f'({elapsed:.0f}s elapsed, eta {eta:.0f}s)', flush=True)
-    null_final = {
-        ct: np.sort(np.concatenate(arrs)) if arrs else np.array([])
-        for ct, arrs in null_by_ct.items()}
-    emp_up, emp_dn = calibrate_emp_p(real, null_final)
+        chunk_path = (
+            f'{SUMRANK_GSEA_CACHE_DIR}/'
+            f'fgsea_{name}_{contrast}_chunk_{start}.parquet')
+        chunk_df.write_parquet(chunk_path)
+        eta = dt * (len(starts) - i) / 60
+        print(f'[sumrank_gsea] {name} {contrast}: chunk '
+              f'{i}/{len(starts)} done '
+              f'({chunk_df["perm"].n_unique()} perms, '
+              f'{chunk_df.height:,} rows, {dt:.0f}s; '
+              f'eta {eta:.1f} min)', flush=True)
+    print(f'[sumrank_gsea] {name} {contrast} [{range_label}]: '
+          f'chunks written ({(time.time() - t_pair) / 60:.1f} min)',
+          flush=True)
 
-    sumrank_gsea_final.append(real.with_columns(
-        pl.lit(contrast).alias('contrast'),
-        pl.Series('emp_p_up', emp_up),
-        pl.Series('emp_p_down', emp_dn),
-        pl.Series('emp_fdr_up', bh_fdr(emp_up)),
-        pl.Series('emp_fdr_down', bh_fdr(emp_dn))))
+if IS_WORKER and WORKER_STAGE == 'gsea':
+    run_gsea_worker(WORKER_PLATFORM, WORKER_CONTRAST,
+                    WORKER_PERM_START, WORKER_PERM_END)
+    print(f'[worker] gsea perm job done for {WORKER_PLATFORM} '
+          f'{WORKER_CONTRAST}', flush=True)
+    sys.exit(0)
 
-sumrank_gsea_out = pl.concat(sumrank_gsea_final) if sumrank_gsea_final \
-    else pl.DataFrame()
-if sumrank_gsea_out.height > 0:
-    sumrank_gsea_out = sumrank_gsea_out.select([
-        'contrast', 'cell_type', 'pathway', 'D', 'sum_stat',
-        'nlp_up', 'nlp_down', 'emp_p_up', 'emp_p_down',
-        'emp_fdr_up', 'emp_fdr_down'])
-sumrank_gsea_out.write_csv(sumrank_gsea_path)
-
-for contrast in SUMRANK_CONTRAST_PLATFORMS:
-    if sumrank_gsea_out.height == 0:
-        break
-    sub = sumrank_gsea_out.filter(pl.col('contrast') == contrast)
-    if sub.height == 0:
-        continue
-    n_up = sub.filter(pl.col('emp_fdr_up') < 0.10).height
-    n_dn = sub.filter(pl.col('emp_fdr_down') < 0.10).height
-    n_ct = sub['cell_type'].n_unique()
-    n_pw = sub['pathway'].n_unique()
-    print(f'[sumrank_gsea] {contrast}: {n_ct} cell types, {n_pw:,} pathways, '
-          f'{n_up} up / {n_dn} down (emp_fdr<0.10)')
+# Driver: gate on all GSEA perm parquets being present
+if not IS_WORKER:
+    _gate_on_missing('fgsea', SUMRANK_GSEA_CACHE_DIR, 'sumrank_gsea')
 
 #endregion
 
+#region pathway-level sumrank meta ############################################
+
+def _gsea_post_process(out):
+    return out.select([
+        'contrast', 'cell_type', 'pathway', 'D', 'sum_stat',
+        'nlp_up', 'nlp_down', 'emp_p_up', 'emp_p_down',
+        'emp_fdr_up', 'emp_fdr_down'])
+
+# null_pool_vec produces NaN for platform-missing (cell_type, pathway)
+# pairs; D>=2 filter handles missingness exactly like the gene-level path
+# (no NES=0 backfill, which would have biased the null toward the center
+# for pathways occasionally filtered by fgseaSimple's minSize).
+sumrank_gsea_out = run_sumrank_meta(
+    output_path=sumrank_gsea_path,
+    cache_dir=SUMRANK_GSEA_CACHE_DIR,
+    parquet_stage='fgsea',
+    real_for_contrast=lambda c: real_gsea.filter(
+        pl.col('contrast') == c),
+    sumrank_fn=sumrank_one_pw,
+    item_col='pathway', fc_col='NES', p_col='pvalue',
+    post_process=_gsea_post_process,
+    log_prefix='[sumrank_gsea]')
+print_sumrank_summary(sumrank_gsea_out, item_col='pathway',
+                      log_prefix='[sumrank_gsea]')
+
+#endregion

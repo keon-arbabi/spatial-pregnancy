@@ -1,12 +1,20 @@
 #region imports and setup ######################################################
 
 import os
+import pickle
 import subprocess
+import time
 import warnings
+from collections import defaultdict
+from itertools import combinations, product
+from math import comb, factorial
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
 import numpy as np
 import polars as pl
 import scanpy as sc
-from pathlib import Path
+from scipy.stats import t as t_dist
 
 warnings.filterwarnings('ignore')
 
@@ -66,16 +74,14 @@ for name, cfg in datasets.items():
 
 if not os.path.exists(resource_dir):
     os.makedirs(gsmap_input, exist_ok=True)
-    url = 'https://yanglab.westlake.edu.cn/data/gsMap' \
-          '/gsMap_resource.tar.gz'
-    subprocess.run(
-        f'wget -q {url} -P {gsmap_input}',
-        shell=True, check=True)
-    subprocess.run(
-        f'tar -xzf {gsmap_input}/gsMap_resource.tar.gz'
-        f' -C {gsmap_input}',
-        shell=True, check=True)
-    os.remove(f'{gsmap_input}/gsMap_resource.tar.gz')
+    url = ('https://yanglab.westlake.edu.cn/data/gsMap'
+           '/gsMap_resource.tar.gz')
+    tarball = f'{gsmap_input}/gsMap_resource.tar.gz'
+    subprocess.run(f'wget -q {url} -P {gsmap_input}',
+                   shell=True, check=True)
+    subprocess.run(f'tar -xzf {tarball} -C {gsmap_input}',
+                   shell=True, check=True)
+    os.remove(tarball)
     print('downloaded gsMap resources')
 
 os.makedirs(gwas_formatted_dir, exist_ok=True)
@@ -83,8 +89,7 @@ for f in sorted(os.listdir(gwas_dir)):
     if not f.endswith('.sumstats.gz'):
         continue
     basename = f.replace('.sumstats.gz', '')
-    if os.path.exists(
-            f'{gwas_formatted_dir}/{basename}.sumstats.gz'):
+    if os.path.exists(f'{gwas_formatted_dir}/{basename}.sumstats.gz'):
         continue
     subprocess.run(
         f"python -m gsMap format_sumstats "
@@ -104,15 +109,13 @@ print(f'{len(all_traits)} GWAS traits')
 #region run gsmap ##############################################################
 
 def submit_slurm(cmd, *, job_name, log_file, depends=None, hours=24):
-    from tempfile import NamedTemporaryFile
-    cluster = os.environ.get('CLUSTER', '')
-    sbatch = '.sbatch' if cluster.startswith('trillium') else 'sbatch'
-    partition = 'compute' if cluster.startswith('trillium') else None
+    is_trillium = os.environ.get('CLUSTER', '').startswith('trillium')
+    sbatch = '.sbatch' if is_trillium else 'sbatch'
     lines = ['#!/bin/bash']
-    if partition is not None:
-        lines.append(f'#SBATCH -p {partition}')
+    if is_trillium:
+        lines.append('#SBATCH -p compute')
     lines.append('#SBATCH --account=rrg-shreejoy')
-    if not cluster.startswith('trillium'):
+    if not is_trillium:
         lines.append('#SBATCH -c 1')
     lines += [
         '#SBATCH -N 1',
@@ -163,11 +166,14 @@ for name in datasets:
 
     for cond in conditions:
         hdf5 = f'{gsmap_input}/{name}/ST/{cond}.h5ad'
-        ldsc_done = (Path(output) / cond / 'generate_ldscore' /
-                     f'{cond}_generate_ldscore.done').exists()
-        tag_for = lambda t: (
-            f'{ds_abbr.get(name, name[:2])}_'
-            f'{cond_abbr.get(cond, cond)}_{t}')
+        done_marker = (f'{output}/{cond}/generate_ldscore/'
+                       f'{cond}_generate_ldscore.done')
+        ldsc_done = os.path.exists(done_marker)
+
+        def tag_for(t):
+            return (f'{ds_abbr.get(name, name[:2])}_'
+                    f'{cond_abbr.get(cond, cond)}_{t}')
+
         done, queued, pending = [], [], []
         for t in all_traits:
             if os.path.exists(f'{output}/{cond}/cauchy_combination/'
@@ -182,8 +188,6 @@ for name in datasets:
         if not pending:
             continue
 
-        done_marker = (f'{output}/{cond}/generate_ldscore/'
-                       f'{cond}_generate_ldscore.done')
         def submit(trait, depends=None):
             cauchy = (f'{output}/{cond}/cauchy_combination/'
                       f'{cond}_{trait}.Cauchy.csv.gz')
@@ -224,13 +228,6 @@ for name in datasets:
 # Welch t on per-sample mean -log10(p) (sample-level inference, not per-cell).
 # Ranks within (dataset, trait), summed across datasets, Irwin-Hall analytical
 # p, label-permutation empirical p.
-
-import pickle
-import time
-from collections import defaultdict
-from itertools import combinations, product
-from math import comb, factorial
-from scipy.stats import t as t_dist
 
 META_CONTRAST_PLATFORMS = {
     'PREG_vs_CTRL':     ['slidetags', 'xenium'],
@@ -574,6 +571,7 @@ for contrast, platforms in META_CONTRAST_PLATFORMS.items():
               f'({n_perms} of {info["total_unique"]} unique combos)')
         null_by_ct = defaultdict(list)
         t0 = time.time()
+        step = max(n_perms // 10, 1)
         for k, perm_map in enumerate(perm_iter):
             perm_means = apply_perm_map(ds_means, perm_map)
             per_ds_k = []
@@ -588,7 +586,6 @@ for contrast, platforms in META_CONTRAST_PLATFORMS.items():
                 pl.concat(per_ds_k), platforms, contrast)
             if sr_k.height:
                 summarize_null_by_ct(sr_k, null_by_ct)
-            step = max(n_perms // 10, 1)
             if (k + 1) % step == 0 or k + 1 == n_perms:
                 el = time.time() - t0
                 print(f'[meta] {contrast}: perm {k+1}/{n_perms} '
