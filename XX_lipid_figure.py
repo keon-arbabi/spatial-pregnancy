@@ -519,8 +519,10 @@ for i, g in enumerate(ordered_genes):
         if pcts:
             pct_mat[i, j] = float(np.median(pcts))
 
-# baseline ApoE expression per panel sender (slide-tags only; used for the
-# annotation row above Panel C). mean log2(norm+1) Apoe across CTRL+PREG.
+# baseline ApoE expression per panel sender (slide-tags only). Used to
+# WEIGHT Panel C dotplot: multiply each (receptor, sender) effect by the
+# sender's baseline ApoE so that senders with low ligand availability
+# contribute less visible signal (downweights ligand-side echoes).
 baseline_apoe = {}
 if 'Apoe' in sp_expr['slidetags']:
     st_expr = sp_expr['slidetags']['Apoe']
@@ -535,6 +537,13 @@ baseline_vec = np.array([baseline_apoe[ct] for ct in ordered_cts])
 print(f'baseline ApoE per sender (slide-tags log2): '
       f'min={np.nanmin(baseline_vec):.2f} '
       f'max={np.nanmax(baseline_vec):.2f}')
+
+# Apply baseline weighting to the Panel C effect matrix (column-wise).
+# Zeros / missing baselines turn into zero (no visible signal). Sign preserved.
+_baseline_weights = np.where(np.isfinite(baseline_vec), baseline_vec, 0.0)
+apoe_eff_mat = apoe_eff_mat * _baseline_weights[np.newaxis, :]
+print(f'weighted Panel C eff range: '
+      f'[{np.nanmin(apoe_eff_mat):+.3f}, {np.nanmax(apoe_eff_mat):+.3f}]')
 
 de_pp_full = pl.read_csv(
     f'{working_dir}/output/themes/hits/de_per_platform.tsv', separator='\t')
@@ -710,10 +719,10 @@ ax_h_a_in = PATH_PITCH * n_rows
 ax_h_b_in = GENE_PITCH * n_g
 ax_h_c_in = REC_PITCH * n_rec
 # gap_in holds Panel A's rotated numeric x-tick labels + "Cell type" title.
-# gap_bc_in holds Panel B's labels + "Cell type" title + the baseline-ApoE
-# annotation strip that sits just above Panel C.
+# gap_bc_in holds Panel B's labels + "Cell type" title (baseline-ApoE strip
+# removed; baseline is now folded into Panel C as a multiplicative weight).
 gap_in = 0.50
-gap_bc_in = 0.80
+gap_bc_in = 0.55
 
 # gene-card column to the right of A+B; cards stacked vertically.
 # Layout per card (left-to-right): SP1 | SP2 | FOREST | LABELS (left-just)
@@ -942,63 +951,6 @@ fig.text(ax_x_mid_fig, c_title_y_in / fig_h,
          'Sender cell type', ha='center', va='top',
          fontsize=9.0, color='black')
 
-# ----- baseline ApoE annotation strip (above Panel C) -----
-# 1-row strip per sender cell type colored by slide-tags mean log2 ApoE
-# expression (CTRL+PREG combined). Gives the reader a per-column trust gauge
-# for Panel C: senders with low baseline are the ones where a uniform-down
-# LR signal is a ligand-side echo rather than receptor-specific biology.
-BASELINE_H_IN = 0.20
-baseline_bot_in = ax_c_top_in + 0.08
-baseline_top_in = baseline_bot_in + BASELINE_H_IN
-baseline_finite = baseline_vec[~np.isnan(baseline_vec)]
-baseline_norm = mpl.colors.Normalize(
-    vmin=float(baseline_finite.min()) if baseline_finite.size else 0.0,
-    vmax=float(baseline_finite.max()) if baseline_finite.size else 1.0)
-baseline_cmap = plt.get_cmap('viridis')
-
-ax_baseline = fig.add_axes([ax_left_in / fig_w, baseline_bot_in / fig_h,
-                            ax_w_in / fig_w, BASELINE_H_IN / fig_h])
-ax_baseline.set_xlim(-0.5, n_c - 0.5)
-ax_baseline.set_ylim(-0.5, 0.5)
-ax_baseline.set_xticks([]); ax_baseline.set_yticks([])
-for sp in ax_baseline.spines.values():
-    sp.set_linewidth(0.5)
-for j, ct in enumerate(ordered_cts):
-    val = baseline_apoe[ct]
-    if np.isnan(val):
-        color = '#DDDDDD'
-    else:
-        color = baseline_cmap(baseline_norm(val))
-    ax_baseline.add_patch(plt.Rectangle((j - 0.5, -0.5), 1, 1,
-                                         facecolor=color, edgecolor='none'))
-# class-group separators on the baseline strip
-for _, _, hi in class_spans[:-1]:
-    ax_baseline.axvline(hi + 0.5, color='white', lw=0.5, zorder=4)
-# y-axis label for the strip
-fig.text((ax_left_in - 0.05) / fig_w,
-         (baseline_bot_in + BASELINE_H_IN / 2) / fig_h,
-         'ApoE\nbaseline', ha='right', va='center', fontsize=7.5,
-         color='black', linespacing=1.05)
-
-# tiny vertical colorbar to the right of the baseline strip
-baseline_cbar_w_in = 0.05
-baseline_cbar_x_in = ax_left_in + ax_w_in + ANNO_GAP_IN
-ax_baseline_cbar = fig.add_axes([baseline_cbar_x_in / fig_w,
-                                  baseline_bot_in / fig_h,
-                                  baseline_cbar_w_in / fig_w,
-                                  BASELINE_H_IN / fig_h])
-cb_baseline = fig.colorbar(
-    mpl.cm.ScalarMappable(norm=baseline_norm, cmap=baseline_cmap),
-    cax=ax_baseline_cbar, orientation='vertical')
-cb_baseline.set_ticks([baseline_norm.vmin, baseline_norm.vmax])
-cb_baseline.set_ticklabels(
-    [f'{baseline_norm.vmin:.1f}', f'{baseline_norm.vmax:.1f}'])
-cb_baseline.ax.tick_params(labelsize=5.5, length=1.5, pad=1)
-fig.text((baseline_cbar_x_in + baseline_cbar_w_in + 0.18) / fig_w,
-         (baseline_bot_in + BASELINE_H_IN + 0.02) / fig_h,
-         r'log$_2$ ApoE', ha='left', va='bottom', fontsize=6.5,
-         color='#555555')
-
 # ----- band-color annotation strips (right of A + B) -----
 ANNO_X_IN = ax_left_in + ax_w_in + ANNO_GAP_IN
 
@@ -1101,7 +1053,7 @@ for s in ax_leg_b.spines.values():
     s.set_visible(False)
 
 # median logFC colorbar - thin vertical, centered at axes-x 0.95
-ax_leg_b.text(1.0, 0.97, 'logFC (median)', ha='right', va='top', fontsize=6.8)
+ax_leg_b.text(1.0, 1.02, 'logFC (median)', ha='right', va='top', fontsize=6.8)
 cbar_center_b_fig = (leg_left_in + CBAR_TARGET_X_AXES * leg_w_in) / fig_w
 cbar_b_x_fig = cbar_center_b_fig - CBAR_W_FIG / 2
 cbar_ax_b = fig.add_axes([cbar_b_x_fig,
@@ -1479,8 +1431,9 @@ for k, lev in enumerate([2, 10, 40]):
     ax_leg_c.text(0.85, y, f'{lev}', ha='right', va='center', fontsize=6.5)
 
 # colorbar: change in (ligand × receptor) product, preg − ctrl, averaged
-# across the above-floor receiver subclasses
-ax_leg_c.text(1.0, 0.45, r'$\Delta$LR',
+# across the above-floor receiver subclasses, then multiplied by the sender's
+# slide-tags baseline log2 ApoE (downweights low-ligand senders).
+ax_leg_c.text(1.0, 0.45, r'$\Delta$LR $\times$ baseline',
               ha='right', va='top', fontsize=6.8)
 cbar_center_c_fig = (leg_left_in + CBAR_TARGET_X_AXES * leg_w_in) / fig_w
 cbar_c_x_fig = cbar_center_c_fig - CBAR_W_FIG / 2
