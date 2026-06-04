@@ -84,8 +84,9 @@ for name, cfg in datasets.items():
 
 #region global proportions (crumblr + dream) ###################################
 
-gprops_path = f'{working_dir}/output/proximity_global_props.csv'
-gnorm_path = f'{working_dir}/output/proximity_global_norm_props.csv'
+gprops_path = f'{working_dir}/output/proximity/global_props.csv'
+gnorm_path = f'{working_dir}/output/proximity/global_norm_props.csv'
+os.makedirs(f'{working_dir}/output/proximity', exist_ok=True)
 
 def build_contrasts_block(contrasts, indent=8):
     sep = ',\n' + ' ' * indent
@@ -303,7 +304,9 @@ proximity_datasets = {
 
 spatial_stats_all = {}
 for name, cfg in proximity_datasets.items():
-    cache_path = f'{working_dir}/output/{name}/spatial_stats_null.pkl'
+    cache_path = (
+        f'{working_dir}/output/proximity/spatial_stats_null/{name}.pkl')
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     expected_n_b = adatas[name].obs[cell_type_col].nunique()
 
     spatial_stats = None
@@ -431,7 +434,7 @@ def pooled_contrast_fit(contrast_str):
     ''')
     return to_py('tt', format='pandas')
 
-diff_path = f'{working_dir}/output/proximity_local_diff.csv'
+diff_path = f'{working_dir}/output/proximity/local_diff.csv'
 
 if os.path.exists(diff_path):
     local_tt = pd.read_csv(diff_path)
@@ -502,7 +505,7 @@ else:
 SUMRANK_N_PERM = 1000
 SUMRANK_N_CORES = min(50, os.cpu_count() or 1)
 SUMRANK_PLATFORMS = {'PREG_vs_CTRL': ['merfish', 'xenium']}
-sumrank_cache_dir = f'{working_dir}/output/proximity_sumrank_cache'
+sumrank_cache_dir = f'{working_dir}/output/proximity/perms'
 os.makedirs(sumrank_cache_dir, exist_ok=True)
 
 def irwin_hall_cdf(x, n):
@@ -637,7 +640,7 @@ def run_permutations(name, contrast, treat_ctrl, n_perm):
           f'{dt / 60:.1f} min)', flush=True)
     return df
 
-sumrank_path = f'{working_dir}/output/proximity_local_sumrank.csv'
+sumrank_path = f'{working_dir}/output/proximity/local_sumrank.csv'
 
 if os.path.exists(sumrank_path):
     sumrank_out = pd.read_csv(sumrank_path)

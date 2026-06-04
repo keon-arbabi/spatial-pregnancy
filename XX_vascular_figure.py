@@ -1,21 +1,27 @@
 import os
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import scanpy as sc
-from pycirclize import Circos
+import scipy.sparse as sps_sparse
+from scipy.spatial import cKDTree
+from scipy.stats import rankdata
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from pycirclize import Circos
+
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 400
 
 working_dir = '/home/karbabi/spatial-pregnancy'
-out_dir = f'{working_dir}/figures/lipid'
+out_dir = f'{working_dir}/figures/vascular'
 os.makedirs(out_dir, exist_ok=True)
 
 cmap = plt.get_cmap('seismic')
@@ -23,7 +29,6 @@ cmap = plt.get_cmap('seismic')
 # --- helpers -----------------------------------------------------------------
 
 def pretty_ceil(v):
-    """Round v up to a 'nice' number (0.1 step for v>=1, 0.01 for v>=0.01)."""
     if v == 0: return 1.0
     if v >= 1: return float(np.ceil(v * 10) / 10)
     if v >= 0.01: return float(np.ceil(v * 100) / 100)
@@ -41,7 +46,6 @@ def numeric_prefix(ct):
     return int(m.group(1)) if m else 9999
 
 def spans(labels):
-    """Contiguous runs: list of (label, start_idx, end_idx)."""
     out, prev, start = [], labels[0], 0
     for k, lab in enumerate(labels[1:], 1):
         if lab != prev:
@@ -51,51 +55,82 @@ def spans(labels):
     return out
 
 # =============================================================================
-# Panel A: GSEA pathway selection
+# Panel A: GSEA pathway selection (4 bands, 12 pathways)
 # =============================================================================
 PATHWAY_BANDS = [
-    ('Membrane lipid', [
-        'GOBP_MEMBRANE_LIPID_METABOLIC_PROCESS',
-        'GOBP_MEMBRANE_LIPID_BIOSYNTHETIC_PROCESS',
-        'GOBP_LIPID_TRANSLOCATION',
+    ('Angiogenic sprouting', [
+        'GOBP_VASCULATURE_DEVELOPMENT',
+        'GOBP_SPROUTING_ANGIOGENESIS',
+        'GOBP_VASCULOGENESIS',
     ]),
-    ('Sphingolipid', [
-        'GOBP_SPHINGOLIPID_METABOLIC_PROCESS',
-        'GOBP_CERAMIDE_METABOLIC_PROCESS',
+    ('VEGF axis', [
+        'GOBP_CELLULAR_RESPONSE_TO_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_STIMULUS',
+        'GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_SIGNALING_PATHWAY',
+        'GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_PRODUCTION',
     ]),
-    ('Fatty acid catabolism', [
-        'GOBP_FATTY_ACID_CATABOLIC_PROCESS',
-        'GOBP_FATTY_ACID_BETA_OXIDATION',
+    ('Endothelial dynamics', [
+        'GOBP_ENDOTHELIAL_CELL_PROLIFERATION',
+        'GOBP_ENDOTHELIAL_CELL_MIGRATION',
+        'GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_MIGRATION',
     ]),
-    ('Cholesterol & carriers', [
-        'GOBP_REGULATION_OF_LIPID_LOCALIZATION',
-        'GOBP_LIPOPROTEIN_METABOLIC_PROCESS',
-        'GOBP_STEROID_BIOSYNTHETIC_PROCESS',
+    ('Barrier & ECM', [
+        'GOBP_ESTABLISHMENT_OF_ENDOTHELIAL_BARRIER',
+        'GOBP_TIGHT_JUNCTION_ORGANIZATION',
+        'GOBP_COLLAGEN_BIOSYNTHETIC_PROCESS',
     ]),
 ]
 ordered_pathways = [p for _, ps in PATHWAY_BANDS for p in ps]
 pathway_band = {p: b for b, ps in PATHWAY_BANDS for p in ps}
 
 PATHWAY_LABELS = {
-    'GOBP_MEMBRANE_LIPID_METABOLIC_PROCESS':       'membrane lipid metabolism',
-    'GOBP_MEMBRANE_LIPID_BIOSYNTHETIC_PROCESS':    'membrane lipid biosynthesis',
-    'GOBP_LIPID_TRANSLOCATION':                    'lipid translocation',
-    'GOBP_SPHINGOLIPID_METABOLIC_PROCESS':         'sphingolipid metabolism',
-    'GOBP_CERAMIDE_METABOLIC_PROCESS':             'ceramide metabolism',
-    'GOBP_FATTY_ACID_CATABOLIC_PROCESS':           'fatty acid catabolism',
-    'GOBP_FATTY_ACID_BETA_OXIDATION':              'fatty acid β-oxidation',
-    'GOBP_REGULATION_OF_LIPID_LOCALIZATION':       'lipid localization regulation',
-    'GOBP_LIPOPROTEIN_METABOLIC_PROCESS':          'lipoprotein metabolism',
-    'GOBP_STEROID_BIOSYNTHETIC_PROCESS':           'steroid biosynthesis',
+    'GOBP_VASCULATURE_DEVELOPMENT':                    'vasculature development',
+    'GOBP_SPROUTING_ANGIOGENESIS':                     'sprouting angiogenesis',
+    'GOBP_VASCULOGENESIS':                             'vasculogenesis',
+    'GOBP_CELLULAR_RESPONSE_TO_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_STIMULUS':
+                                                       'response to VEGF',
+    'GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_SIGNALING_PATHWAY':
+                                                       'VEGF signaling',
+    'GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_PRODUCTION':
+                                                       'VEGF production',
+    'GOBP_ENDOTHELIAL_CELL_PROLIFERATION':             'endothelial proliferation',
+    'GOBP_ENDOTHELIAL_CELL_MIGRATION':                 'endothelial migration',
+    'GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_MIGRATION':    'blood-vessel EC migration',
+    'GOBP_ESTABLISHMENT_OF_ENDOTHELIAL_BARRIER':       'endothelial barrier',
+    'GOBP_TIGHT_JUNCTION_ORGANIZATION':                'tight junction organization',
+    'GOBP_COLLAGEN_BIOSYNTHETIC_PROCESS':              'collagen biosynthesis',
 }
 
-# Okabe-Ito (colorblind-safe). Shared between Panel A and B.
+# Okabe-Ito (colorblind-safe) -- shared between Panel A and Panel B.
 BAND_COLORS = {
-    'Membrane lipid':          '#E69F00',
-    'Sphingolipid':            '#CC79A7',
-    'Fatty acid catabolism':   '#009E73',
-    'Cholesterol & carriers':  '#0072B2',
+    'Angiogenic sprouting':  '#0072B2',
+    'VEGF axis':             '#E69F00',
+    'Endothelial dynamics':  '#009E73',
+    'Barrier & ECM':         '#CC79A7',
 }
+
+# =============================================================================
+# Panel B: curated gene bands (same 4-band structure as Panel A)
+# =============================================================================
+GENE_BANDS = [
+    # Tip/stalk specification + pericyte sprouting recruitment.
+    ('Angiogenic sprouting', [
+        'Notch1', 'Notch3', 'Dll4', 'Hey1', 'Angpt2', 'Cspg4',
+    ]),
+    # Paracrine ligand sources + endothelial VEGFR axis.
+    ('VEGF axis', [
+        'Vegfa', 'Vegfc', 'Kdr', 'Flt1', 'Nrp1',
+    ]),
+    # EC + mural proliferation, activation, vessel-wall identity.
+    ('Endothelial dynamics', [
+        'Rgcc', 'Id1', 'Klf4', 'Eng', 'Acvrl1', 'Cdh5', 'Pecam1', 'Pdgfrb',
+    ]),
+    # BBB function + matrix remodeling + leukocyte adhesion.
+    ('Barrier & ECM', [
+        'Mfsd2a', 'Slc2a1', 'Tjp1', 'Itgb1', 'Itgav', 'Col4a1', 'Icam1',
+    ]),
+]
+ordered_genes = [g for _, gs in GENE_BANDS for g in gs]
+gene_band = {g: b for b, gs in GENE_BANDS for g in gs}
 
 # =============================================================================
 # Load GSEA + collapse direction
@@ -116,17 +151,17 @@ real_nes = (pl.read_parquet(f'{working_dir}/output/gsea/perms/real_gsea.parquet'
     .filter(pl.col('contrast') == 'PREG_vs_CTRL'))
 
 # =============================================================================
-# Cell-type selection: >=2 curated-pathway hits OR allowlisted
+# Cell-type selection: NN-only (neurons excluded -- their DOWN signal on
+# vascular pathways is ambient-RNA noise, not biology)
 # =============================================================================
-# 327 Oligo + 334 Microglia: IHC anchors despite low pathway-hit count.
-# 323 Ependymal: CSF-interface, high baseline ApoE in slide-tags.
-# 333 Endo NN: BBB lipid trafficking (just below GSEA threshold but 6 DE hits).
-# 119 SI-MA-LPO-LHA: only hypothalamic Glut with adequate coverage.
-ct_allowlist = {'334 Microglia NN', '327 Oligo NN', '323 Ependymal NN',
-                '333 Endo NN', '119 SI-MA-LPO-LHA Skor1 Glut'}
+ct_allowlist = {
+    '318 Astro-NT NN', '319 Astro-TE NN', '323 Ependymal NN',
+    '326 OPC NN', '327 Oligo NN', '334 Microglia NN', '335 BAM NN',
+}
 
-lipid = gsea.filter(pl.col('pathway').is_in(ordered_pathways))
-ct_counts = (lipid.group_by('cell_type')
+vasc = gsea.filter(pl.col('pathway').is_in(ordered_pathways)
+                   & pl.col('cell_type').str.contains(' NN'))
+ct_counts = (vasc.group_by('cell_type')
                   .agg(pl.len().alias('n'))
                   .filter(pl.col('n') >= 2)
                   .sort('n', descending=True))
@@ -141,10 +176,10 @@ if missing:
         pl.DataFrame({'cell_type': sorted(missing),
                       'n': [0] * len(missing)},
                      schema={'cell_type': pl.Utf8, 'n': pl.UInt32})])
-lipid = lipid.filter(pl.col('cell_type').is_in(keep_cts))
-lipid_all = gsea_all.filter(pl.col('pathway').is_in(ordered_pathways) &
-                            pl.col('cell_type').is_in(keep_cts))
-print(f'Panel A: sig hits={lipid.height} all hits={lipid_all.height} '
+vasc = vasc.filter(pl.col('cell_type').is_in(keep_cts))
+vasc_all = gsea_all.filter(pl.col('pathway').is_in(ordered_pathways) &
+                           pl.col('cell_type').is_in(keep_cts))
+print(f'Panel A: sig hits={vasc.height} all hits={vasc_all.height} '
       f'cell_types={len(keep_cts)}')
 
 CORTICAL_GABA = ['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Sncg', 'Pax6']
@@ -156,8 +191,6 @@ def assign_class(ct):
         return 'GABAergic\nCortex'
     return 'GABAergic\nSubcortex'
 
-# Class order follows ABCA numeric prefix: Glut (001-119) -> GABA (40-90)
-# -> Non-neuronal (300+).
 CLASS_ORDER = ['Glutamatergic',
                'GABAergic\nCortex', 'GABAergic\nSubcortex',
                'Non-neuronal']
@@ -187,7 +220,7 @@ sig_mat_a = np.zeros((n_rows, n_cols), dtype=bool)
 
 ri = {p: i for i, p in enumerate(ordered_pathways)}
 ci = {c: j for j, c in enumerate(ordered_cts)}
-for r in lipid_all.iter_rows(named=True):
+for r in vasc_all.iter_rows(named=True):
     i, j = ri[r['pathway']], ci[r['cell_type']]
     if np.isnan(nlp_mat[i, j]) or r['nlp'] > nlp_mat[i, j]:
         nlp_mat[i, j] = r['nlp']
@@ -214,28 +247,8 @@ class_spans = spans([ct_class[c] for c in ordered_cts])
 band_spans = spans([pathway_band[p] for p in ordered_pathways])
 
 # =============================================================================
-# Panel B: curated gene bands (DE dotplot)
+# Panel B: load DE data (sumrank for sig + D, per-platform for logFC + pct)
 # =============================================================================
-GENE_BANDS = [
-    ('Membrane lipid', [
-        'Lpin1', 'Tecr', 'Agpat4', 'Dgat1', 'Pisd',
-    ]),
-    ('Sphingolipid', [
-        'Cers4', 'Cers5', 'Cers6', 'St6galnac5', 'Hexa', 'Glb1',
-    ]),
-    ('Fatty acid catabolism', [
-        'Cpt1a', 'Ivd', 'Echs1', 'Acaa2', 'Decr1', 'Acox1', 'Hacl1',
-    ]),
-    # DOWN sub-arm (apolipoproteins + mevalonate + LDLR brake) on top,
-    # UP sub-arm (uptake + raft + efflux + lipase + TF + BBB) below.
-    ('Cholesterol & carriers', [
-        'Apoe', 'Clu', 'Fabp7', 'Hmgcs1', 'Hmgcr', 'Idi1', 'Sqle', 'Pcsk9',
-        'Sort1', 'Sorl1', 'Cd81', 'Abca1', 'Lpl', 'Srebf1', 'Mfsd2a',
-    ]),
-]
-ordered_genes = [g for _, gs in GENE_BANDS for g in gs]
-gene_band = {g: b for b, gs in GENE_BANDS for g in gs}
-
 de_sr_all = (pl.read_csv(f'{working_dir}/output/de/sumrank_results.csv')
     .filter((pl.col('contrast') == 'PREG_vs_CTRL') &
             (pl.col('D') >= 2) &
@@ -245,9 +258,25 @@ de_sr_all = (pl.read_csv(f'{working_dir}/output/de/sumrank_results.csv')
             .then(pl.lit('up')).otherwise(pl.lit('down')).alias('direction'),
         pl.max_horizontal(pl.col('nlp_up'), pl.col('nlp_down')).alias('nlp'),
         pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
-            .then(pl.col('emp_p_up')).otherwise(pl.col('emp_p_down'))
-            .alias('emp_p')))
+            .then(pl.col('emp_p_up')).otherwise(pl.col('emp_p_down')).alias('emp_p')))
 de_sr = de_sr_all.filter(pl.col('emp_p') <= 0.05)
+
+# Card forests use the same 5% ref_pct filter as Panel B, so low-expression
+# (ambient-prone) hits are not shown (e.g., Pecam1 in mural cells at ~2%).
+_de_sr_card_full = (pl.read_csv(f'{working_dir}/output/de/sumrank_results.csv')
+    .filter((pl.col('contrast') == 'PREG_vs_CTRL') & (pl.col('D') >= 2)
+            & (pl.col('ref_pct_detected') >= 5.0))
+    .with_columns(
+        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
+            .then(pl.lit('up')).otherwise(pl.lit('down')).alias('direction'),
+        pl.max_horizontal(pl.col('nlp_up'), pl.col('nlp_down')).alias('nlp'),
+        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
+            .then(pl.col('emp_p_up')).otherwise(pl.col('emp_p_down')).alias('emp_p')))
+de_sr_card = _de_sr_card_full.filter(pl.col('emp_p') <= 0.05)
+# D lookup independent of significance: any (gene, ct) with D>=2 testability
+# gets its D so forced context cells still display a meta diamond.
+d_lookup_card = {(r['gene'], r['cell_type']): r['D']
+                 for r in _de_sr_card_full.iter_rows(named=True)}
 de_sr_panel = de_sr.filter(
     pl.col('cell_type').is_in(keep_cts) &
     pl.col('gene').is_in(ordered_genes))
@@ -256,13 +285,6 @@ de_sr_all_panel = de_sr_all.filter(
     pl.col('gene').is_in(ordered_genes))
 d_lookup_b = {(r['gene'], r['cell_type']): r['D']
               for r in de_sr_all_panel.iter_rows(named=True)}
-# Cards reuse the same D>=2 & 5% ref_pct filter as Panel B; pull D for any
-# testable (gene, ct) so forced-context cells still show a meta diamond even
-# when not significant (matches XX_vascular_figure.py).
-d_lookup_card = {(r['gene'], r['cell_type']): r['D']
-                 for r in de_sr_all.iter_rows(named=True)}
-print(f'Panel B curated genes: {len(ordered_genes)} across '
-      f'{len(GENE_BANDS)} bands')
 
 de_pp = (pl.read_csv(f'{working_dir}/output/de/de_results.csv')
     .filter(pl.col('contrast') == 'PREG_vs_CTRL')
@@ -298,123 +320,6 @@ gene_band_spans = spans([gene_band[g] for g in ordered_genes])
 print(f'Panel B genes={n_g} D>=2 cells={int((d_mat_b >= 2).sum())} '
       f'sig_cells={int(sig_mat_b.sum())}')
 
-# =============================================================================
-# Panel D: curated lipid LR chord data (LIANA)
-# =============================================================================
-CHORD_THEMES = ['Apoe', 'Pcsk9', 'Pltp', 'Reln']
-# Apoe pathway absorbs Lpl (both deliver lipoprotein remnants to LRP1).
-CHORD_THEME_LIGANDS = {
-    'Apoe':  ['Apoe', 'Lpl'],
-    'Pcsk9': ['Pcsk9'],
-    'Pltp':  ['Pltp'],
-    'Reln':  ['Reln'],
-}
-CHORD_THEME_TITLES = {
-    'Apoe':  'ApoE / Lpl pathway',
-    'Pcsk9': 'Pcsk9 pathway',
-    'Pltp':  'Pltp pathway',
-    'Reln':  'Reln pathway',
-}
-
-CANONICAL_LR_PAIRS = set()
-for _r in ['Lrp1', 'Lrp2', 'Lrp4', 'Lrp8', 'Vldlr', 'Ldlr',
-           'Sort1', 'Sorl1', 'Trem2', 'Abca1']:
-    CANONICAL_LR_PAIRS.add(('Apoe', _r))
-CANONICAL_LR_PAIRS.add(('Lpl', 'Lrp1'))
-for _r in ['Lrp1', 'Lrp2']:
-    CANONICAL_LR_PAIRS.add(('Clu', _r))
-    CANONICAL_LR_PAIRS.add(('Apod', _r))
-CANONICAL_LR_PAIRS.add(('Reln', 'Vldlr'))
-CANONICAL_LR_PAIRS.add(('Reln', 'Lrp8'))
-for _r in ['Ldlr', 'Lrp1', 'Lrp8', 'Sort1', 'Vldlr', 'Cd81', 'Aplp2']:
-    CANONICAL_LR_PAIRS.add(('Pcsk9', _r))
-CANONICAL_LR_PAIRS.add(('Pltp', 'Abca1'))
-for _L in ['Sphk1', 'Sphk2']:
-    for _R in ['S1pr1', 'S1pr2', 'S1pr3', 'S1pr4', 'S1pr5']:
-        CANONICAL_LR_PAIRS.add((_L, _R))
-for _r in ['Slc22a17', 'Lrp2']:
-    CANONICAL_LR_PAIRS.add(('Lcn2', _r))
-CANONICAL_LR_PAIRS.add(('A2m', 'Lrp1'))
-
-_chord_ligs = list({p[0] for p in CANONICAL_LR_PAIRS})
-_chord_recs = list({p[1] for p in CANONICAL_LR_PAIRS})
-
-_liana = (pl.scan_csv(f'{working_dir}/output/liana/inflow_diff.csv')
-    .filter(pl.col('contrast') == 'PREG_vs_CTRL')
-    .filter(pl.col('ligand_complex').is_in(_chord_ligs) &
-            pl.col('receptor_complex').is_in(_chord_recs))
-    .filter(pl.col('source').is_in(ordered_cts) &
-            pl.col('target').is_in(ordered_cts))
-    .collect())
-_liana = _liana.filter(
-    pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
-        lambda s: (s['ligand_complex'], s['receptor_complex'])
-                  in CANONICAL_LR_PAIRS,
-        return_dtype=pl.Boolean))
-
-_keys = ['source', 'target', 'ligand_complex', 'receptor_complex']
-_wide = (_liana.group_by(_keys + ['dataset'])
-        .agg(pl.col('lr_mean_diff').first())
-        .pivot(on='dataset', index=_keys, values='lr_mean_diff')
-        .rename({'slidetags': 'diff_st', 'xenium': 'diff_xn'}))
-
-_nonz = _liana.filter(pl.col('lr_mean_diff') != 0)
-_med_xn = float(_nonz.filter(pl.col('dataset') == 'xenium')['lr_mean_diff']
-                .abs().median())
-_med_st = float(_nonz.filter(pl.col('dataset') == 'slidetags')['lr_mean_diff']
-                .abs().median())
-
-# (a) cross-platform: both nonzero, same sign, magnitude >= per-platform median
-_xp = (_wide.filter(pl.col('diff_st').is_not_null()
-                    & pl.col('diff_xn').is_not_null()
-                    & (pl.col('diff_st') != 0)
-                    & (pl.col('diff_xn') != 0)
-                    & (pl.col('diff_st').sign() == pl.col('diff_xn').sign())
-                    & (pl.col('diff_st').abs() >= _med_st)
-                    & (pl.col('diff_xn').abs() >= _med_xn))
-      .with_columns(((pl.col('diff_st') + pl.col('diff_xn')) / 2)
-                    .alias('meta_diff'))
-      .select(['source', 'target', 'ligand_complex', 'receptor_complex',
-               'meta_diff']))
-
-# (b) slidetags-only pairs (e.g., Apoe-* missing from Xenium): top-10% |diff|
-_xp_pairs = (_wide.filter(pl.col('diff_st').is_not_null()
-                          & pl.col('diff_xn').is_not_null())
-             .select(['ligand_complex', 'receptor_complex']).unique())
-_xp_pair_set = {(r['ligand_complex'], r['receptor_complex'])
-                for r in _xp_pairs.iter_rows(named=True)}
-_st_only_pairs = CANONICAL_LR_PAIRS - _xp_pair_set
-
-_st = (_liana.filter((pl.col('dataset') == 'slidetags')
-                      & (pl.col('lr_mean_diff') != 0))
-       .filter(pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
-           lambda s: (s['ligand_complex'], s['receptor_complex'])
-                     in _st_only_pairs,
-           return_dtype=pl.Boolean)))
-_st_thr = float(_st['lr_mean_diff'].abs().quantile(0.90))
-_st = (_st.filter(pl.col('lr_mean_diff').abs() >= _st_thr)
-       .rename({'lr_mean_diff': 'meta_diff'})
-       .select(['source', 'target', 'ligand_complex', 'receptor_complex',
-                'meta_diff']))
-
-chord_edges = pl.concat([_xp, _st]).with_columns(
-    (pl.col('source') == pl.col('target')).alias('is_self'))
-print(f'Chord curated edges: {chord_edges.height} '
-      f'(UP={chord_edges.filter(pl.col("meta_diff") > 0).height}, '
-      f'DOWN={chord_edges.filter(pl.col("meta_diff") < 0).height})')
-
-# Drop self-edges (autocrine; clutters chord arcs)
-chord_edges_intercell = chord_edges.filter(~pl.col('is_self'))
-
-def theme_chord_edges(theme):
-    return (chord_edges_intercell
-            .filter(pl.col('ligand_complex')
-                    .is_in(CHORD_THEME_LIGANDS[theme]))
-            .group_by(['source', 'target'])
-            .agg(pl.col('meta_diff').sum().alias('signed_sum'),
-                 pl.col('meta_diff').abs().sum().alias('mag'),
-                 pl.len().alias('n_lr')))
-
 # ABCA subclass colors
 _cj = pd.read_csv('/home/karbabi/single-cell/ABC/metadata/cells_joined.csv',
                   usecols=['subclass', 'subclass_color']).drop_duplicates()
@@ -423,41 +328,10 @@ SUBCLASS_COLORS = {k.replace('_', '/'): v for k, v in
                             _cj['subclass_color'])).items()}
 SUBCLASS_COLORS['Unlabelled'] = '#d3d3d3'
 
-CHORD_CLASS_COLORS = {
-    'NN':   '#7570b3',
-    'Glut': '#d95f02',
-    'GABA': '#1b9e77',
-}
-CHORD_CLASS_ORDER = ['NN', 'Glut', 'GABA']
-CHORD_CLASS_LABELS = {'NN': 'Non-neuronal',
-                      'Glut': 'Glutamatergic',
-                      'GABA': 'GABAergic'}
-CHORD_COLOR_UP   = '#b2182b'
-CHORD_COLOR_DOWN = '#2166ac'
-
-def chord_class(ct):
-    if 'NN' in ct:   return 'NN'
-    if 'Glut' in ct: return 'Glut'
-    return 'GABA'
-
-def chord_num_label(ct):
-    m = re.match(r'^(\d+)', ct)
-    return m.group(1) if m else ct
-
-# Sectors grouped by class so chord arcs cluster within class.
-chord_cells_ordered = sorted(
-    ordered_cts,
-    key=lambda c: (CHORD_CLASS_ORDER.index(chord_class(c)),
-                   numeric_prefix(c)))
-# Legend uses pure ABCA numeric order.
-chord_cells_legend_ordered = sorted(ordered_cts, key=numeric_prefix)
-
 # =============================================================================
-# Gene cards: load spatial + per-cell DE
+# Gene cards: load spatial + per-cell expression for the 5 anchor genes
 # =============================================================================
-# Lpin1/Glb1/Ivd (per non-Cholesterol band) + Apoe/Hmgcr/Idi1 (Chol DOWN)
-# + Mfsd2a (Chol UP). Idi1 is the only D=3 gene -> 3 spatial plots.
-CARD_GENES = ['Lpin1', 'Glb1', 'Ivd', 'Apoe', 'Hmgcr', 'Idi1', 'Mfsd2a']
+CARD_GENES = ['Notch1', 'Vegfa', 'Flt1', 'Rgcc', 'Pecam1', 'Slc2a1']
 PLATFORMS = ['slidetags', 'merfish', 'xenium']
 PLATFORM_COLORS = {
     'slidetags': '#1C6CC6',
@@ -541,6 +415,7 @@ for ds in PLATFORMS:
     print(f'  {ds}: loaded coords ({sum(keep_mask):,} cells) '
           f'+ genes {[g for g in CARD_GENES if sp_in[ds][g]]}')
 
+# Replace approximate ref_pct_detected with actual % nonzero from h5ad
 pct_mat = np.full((n_g, n_cols), np.nan)
 for i, g in enumerate(ordered_genes):
     for j, ct in enumerate(ordered_cts):
@@ -571,8 +446,8 @@ def stars_for(p):
     return ''
 
 def build_card(gene, ctx_cells=()):
-    sr_hits = de_sr.filter((pl.col('gene') == gene) &
-                           pl.col('cell_type').is_in(keep_cts))
+    sr_hits = de_sr_card.filter((pl.col('gene') == gene) &
+                                pl.col('cell_type').is_in(keep_cts))
     cts_in = list(sr_hits['cell_type'].to_list())
     for ct in ctx_cells:
         if ct in keep_cts and ct not in cts_in:
@@ -598,7 +473,7 @@ def build_card(gene, ctx_cells=()):
             ep, D = sr['emp_p'], int(sr['D'])
             stars = stars_for(ep)
         else:
-            # Forced context cell: pull D from the unfiltered sumrank so a
+            # Forced context cell: pull D from unfiltered sumrank so a
             # D>=2 testable but non-sig row still shows the meta diamond.
             ep = np.nan
             D = int(d_lookup_card.get((gene, ct), 0))
@@ -610,7 +485,6 @@ def build_card(gene, ctx_cells=()):
                              numeric_prefix(r['cell_type'])))
     cts = [r['cell_type'] for r in rows]
 
-    # Include every platform that has the gene (D=2 -> 2 plots, D=3 -> 3).
     sp_pair = [p for p in ('xenium', 'merfish', 'slidetags')
                if sp_in[p].get(gene, False)]
 
@@ -633,36 +507,344 @@ def build_card(gene, ctx_cells=()):
     return dict(cell_types=cts, rows=rows, sp_pair=sp_pair,
                 sp_data=sp_data, sp_vranges=sp_vranges)
 
-# Apoe gets OPC + Microglia (IHC anchors) as forced context.
+# Context cells: force-include even if not sig.
+# Notch1: Endo expresses Notch1 broadly; useful anchor row.
+# Vegfa: NO force -- the forest must honestly show only the source cells
+# (OPC + VLMC) so it matches the spatial pattern (which is dominated by the
+# OPC source).
+# Slc2a1: Endo as the cell whose BBB transport is being modulated.
 card_ctx = {g: [] for g in CARD_GENES}
-card_ctx['Apoe'] = ['326 OPC NN', '334 Microglia NN']
+card_ctx['Notch1'] = ['333 Endo NN']
+card_ctx['Slc2a1'] = ['333 Endo NN']
 cards = {g: build_card(g, card_ctx[g]) for g in CARD_GENES}
 MAX_SP_N = max(len(c['sp_pair']) for c in cards.values())
-
-# Apoe has 13 raw hits; with 7 cards the card height fits ~5 rows.
-APOE_MAX_ROWS = 5
-if len(cards['Apoe']['rows']) > APOE_MAX_ROWS:
-    rows = cards['Apoe']['rows']
-    forced = set(card_ctx['Apoe'])
-    keep = [r for r in rows if r['cell_type'] in forced]
-    others = [r for r in rows if r['cell_type'] not in forced]
-    others.sort(key=lambda r: r['emp_p'] if not np.isnan(r['emp_p']) else 9)
-    keep += others[:APOE_MAX_ROWS - len(keep)]
-    keep.sort(key=lambda r: (class_rank(r['cell_type']),
-                             numeric_prefix(r['cell_type'])))
-    cards['Apoe']['rows'] = keep
-    cards['Apoe']['cell_types'] = [r['cell_type'] for r in keep]
-
 for g, c in cards.items():
     print(f'card {g}: {len(c["cell_types"])} cells, sp_pair={c["sp_pair"]}')
 
 # =============================================================================
-# Figure layout
+# Cell-state data: UCell per slidetags niche cell + per-neuron env_score
+# (slidetags only -- sweep showed xenium effect sizes are 2-3x smaller and
+# do not survive per-sample t-tests; slidetags has all 26 vascular genes
+# present, full transcriptome (32k), 3v3 CTRL/PREG samples)
+# =============================================================================
+CS_PLATFORM = 'slidetags'
+# All 4 vascular niche cells: VLMC + Peri + SMC + Endo
+CS_FOCAL_CELLS = ['330 VLMC NN', '331 Peri NN', '332 SMC NN', '333 Endo NN']
+CS_KNN_K = 10
+CS_CHUNK_SIZE = 20000
+# 26 vascular genes = flatten Panel B GENE_BANDS
+CS_VASCULAR_GENES = ordered_genes  # defined above
+
+cs_dir = f'{working_dir}/output/cell_state'
+os.makedirs(cs_dir, exist_ok=True)
+CS_UCELL_PQ = f'{cs_dir}/ucell_scores_slidetags.parquet'
+CS_ENV_PQ   = f'{cs_dir}/neuron_env_vasc4_slidetags.parquet'
+
+
+def _ucell_chunk(X_chunk, gene_set_idx, n_total):
+    n_set = len(gene_set_idx)
+    dense = X_chunk.toarray() if sps_sparse.issparse(X_chunk) \
+        else np.asarray(X_chunk)
+    # UCell convention: rank 1 = HIGHEST expression -> rank negative values
+    ranks = rankdata(-dense, axis=1, method='average').astype(np.float32)
+    u_sum = ranks[:, gene_set_idx].sum(axis=1)
+    u_stat = u_sum - n_set * (n_set + 1) / 2.0
+    denom = float(n_set * (n_total - n_set))
+    return (1.0 - u_stat / denom).astype(np.float32)
+
+
+def load_cell_state():
+    """Load or compute slidetags UCell + per-neuron env_score parquets."""
+    if os.path.exists(CS_UCELL_PQ) and os.path.exists(CS_ENV_PQ):
+        print(f'  [cell-state] cached -> {CS_UCELL_PQ}')
+        return pl.read_parquet(CS_UCELL_PQ), pl.read_parquet(CS_ENV_PQ)
+
+    a = sc.read_h5ad(
+        f'{working_dir}/output/{CS_PLATFORM}/03_adata_query_{CS_PLATFORM}.h5ad',
+        backed='r')
+    if 'gene_symbol' in a.var.columns:
+        var_names = a.var['gene_symbol'].astype(str).to_list()
+    else:
+        var_names = list(a.var_names)
+    name_to_idx = {n: i for i, n in enumerate(var_names)}
+    gene_idx = np.array([name_to_idx[g] for g in CS_VASCULAR_GENES
+                         if g in name_to_idx], dtype=np.int64)
+    print(f'  [cell-state] {len(gene_idx)}/{len(CS_VASCULAR_GENES)} '
+          f'vascular genes present in {CS_PLATFORM} (N={len(var_names)})')
+
+    obs = a.obs
+    keep_niche = obs['subclass'].isin(ordered_cts).values \
+        & (obs['condition'].values != 'POSTPART')
+    cell_idx = np.where(keep_niche)[0]
+    n_keep = len(cell_idx)
+    print(f'  [cell-state] scoring {n_keep:,} niche cells')
+
+    ucell = np.full(n_keep, np.nan, dtype=np.float32)
+    n_total = len(var_names)
+    for start in range(0, n_keep, CS_CHUNK_SIZE):
+        end = min(start + CS_CHUNK_SIZE, n_keep)
+        ucell[start:end] = _ucell_chunk(
+            a.X[cell_idx[start:end], :], gene_idx, n_total)
+
+    obs_keep = obs.iloc[cell_idx]
+    ucell_df = pl.DataFrame({
+        'cell_id':   obs_keep.index.astype(str).to_numpy(),
+        'subclass':  obs_keep['subclass'].astype(str).to_numpy(),
+        'condition': obs_keep['condition'].astype(str).to_numpy(),
+        'sample':    obs_keep['sample'].astype(str).to_numpy(),
+        'x_affine':  obs_keep['x_affine'].astype(np.float32).to_numpy(),
+        'y_affine':  obs_keep['y_affine'].astype(np.float32).to_numpy(),
+        'ucell':     ucell,
+    })
+
+    # Neuron env_score: kNN over Endo + Peri only (the focal cells)
+    obs_all = a.obs.copy()
+    obs_all = obs_all[obs_all['condition'] != 'POSTPART']
+    obs_all['is_neuron'] = obs_all['subclass'].apply(
+        lambda s: ('Glut' in s) or ('Gaba' in s) or ('IMN' in s))
+    ucell_pd = ucell_df.select(['cell_id', 'ucell']).to_pandas()
+    ucell_pd['cell_id'] = ucell_pd['cell_id'].astype(str)
+
+    rows_out = []
+    for sample in sorted(obs_all['sample'].unique()):
+        smp = obs_all[obs_all['sample'] == sample]
+        focal_smp = smp[smp['subclass'].isin(CS_FOCAL_CELLS)].copy()
+        focal_smp['cell_id_str'] = focal_smp.index.astype(str)
+        focal_smp = focal_smp.merge(ucell_pd, left_on='cell_id_str',
+                                    right_on='cell_id', how='left')
+        focal_smp = focal_smp.dropna(subset=['ucell'])
+        if len(focal_smp) < CS_KNN_K:
+            print(f'  [cell-state] sample {sample}: '
+                  f'only {len(focal_smp)} focal cells -- skip')
+            continue
+        tree = cKDTree(focal_smp[['x_affine', 'y_affine']].to_numpy(
+            dtype=np.float64))
+        focal_ucell = focal_smp['ucell'].to_numpy(dtype=np.float32)
+        neurons = smp[smp['is_neuron']]
+        if len(neurons) == 0:
+            continue
+        dists, idxs = tree.query(neurons[['x_affine', 'y_affine']].to_numpy(
+            dtype=np.float64), k=CS_KNN_K, workers=-1)
+        env_score = focal_ucell[idxs].mean(axis=1)
+        rows_out.append(pd.DataFrame({
+            'cell_id':   neurons.index.astype(str).to_numpy(),
+            'subclass':  neurons['subclass'].astype(str).to_numpy(),
+            'condition': neurons['condition'].astype(str).to_numpy(),
+            'sample':    sample,
+            'env_score': env_score.astype(np.float32),
+            'dist_kth':  dists[:, -1].astype(np.float32),
+        }))
+        print(f'  [cell-state] sample {sample}: {len(neurons):,} neurons')
+
+    a.file.close()
+
+    env_pd = pd.concat(rows_out, ignore_index=True)
+    env_pd.to_parquet(CS_ENV_PQ, index=False)
+    ucell_df.write_parquet(CS_UCELL_PQ)
+    env_df = pl.read_parquet(CS_ENV_PQ)
+    print(f'  [cell-state] wrote {CS_UCELL_PQ}, {CS_ENV_PQ}')
+    return ucell_df, env_df
+
+
+cs_ucell, cs_env = load_cell_state()
+print(f'cell-state: ucell rows={cs_ucell.height:,}, env rows={cs_env.height:,}')
+
+
+# Top neuron subclasses (drives the chord-row neuron pool)
+def _compute_top_neurons(env_df, n_top=10, min_per_sample=20):
+    rows = []
+    for sub in sorted(set(env_df['subclass'].to_list())):
+        sdf = env_df.filter(pl.col('subclass') == sub)
+        c_smp = (sdf.filter(pl.col('condition') == 'CTRL')
+                 .group_by('sample').agg(
+                     pl.col('env_score').mean().alias('m'),
+                     pl.len().alias('n')))
+        p_smp = (sdf.filter(pl.col('condition') == 'PREG')
+                 .group_by('sample').agg(
+                     pl.col('env_score').mean().alias('m'),
+                     pl.len().alias('n')))
+        c_smp = c_smp.filter(pl.col('n') >= min_per_sample)
+        p_smp = p_smp.filter(pl.col('n') >= min_per_sample)
+        if c_smp.height < 2 or p_smp.height < 2:
+            continue
+        cv = c_smp['m'].to_numpy()
+        pv = p_smp['m'].to_numpy()
+        rows.append(dict(subclass=sub,
+                          mean_ctrl=float(cv.mean()),
+                          mean_preg=float(pv.mean()),
+                          mean_diff=float(pv.mean() - cv.mean())))
+    df = pd.DataFrame(rows)
+    if not len(df):
+        return df
+    return (df.assign(abs_d=df['mean_diff'].abs())
+              .sort_values('abs_d', ascending=False).head(n_top)
+              .assign(num=lambda x: x['subclass'].map(numeric_prefix))
+              .sort_values('num').reset_index(drop=True))
+
+
+top_neuron_df = _compute_top_neurons(cs_env, n_top=10)
+top_neurons = top_neuron_df['subclass'].tolist() if len(top_neuron_df) else []
+print(f'Top neuron subclasses ({len(top_neurons)}): {top_neurons}')
+
+# =============================================================================
+# Chord-plot themes (LIANA L-R, niche + top-10 affected neurons)
+# =============================================================================
+CHORD_THEMES = ['Notch', 'VEGF', 'Ang2_Cxcl12']
+CHORD_THEME_LIGANDS = {
+    'Notch':       ['Dll4', 'Jag1', 'Jag2'],
+    'VEGF':        ['Vegfa', 'Vegfb', 'Vegfc'],
+    'Ang2_Cxcl12': ['Angpt2', 'Cxcl12'],
+}
+CHORD_THEME_TITLES = {
+    'Notch':       'Notch',
+    'VEGF':        'VEGF',
+    'Ang2_Cxcl12': 'Angpt2 / Cxcl12',
+}
+
+CANONICAL_LR_PAIRS = set()
+# Notch tip-stalk axis
+for _l in ['Dll4']:
+    for _r in ['Notch1', 'Notch3', 'Notch4']:
+        CANONICAL_LR_PAIRS.add((_l, _r))
+for _l in ['Jag1', 'Jag2']:
+    for _r in ['Notch1', 'Notch3']:
+        CANONICAL_LR_PAIRS.add((_l, _r))
+# VEGF paracrine + co-receptors
+for _r in ['Kdr', 'Flt1', 'Nrp1', 'Nrp2']:
+    CANONICAL_LR_PAIRS.add(('Vegfa', _r))
+CANONICAL_LR_PAIRS.add(('Vegfb', 'Flt1'))
+for _r in ['Flt4', 'Kdr', 'Nrp2']:
+    CANONICAL_LR_PAIRS.add(('Vegfc', _r))
+# Ang2 / Cxcl12 destabilizer + chemoattract
+for _r in ['Tek', 'Tie1']:
+    CANONICAL_LR_PAIRS.add(('Angpt2', _r))
+for _r in ['Cxcr4', 'Ackr3']:
+    CANONICAL_LR_PAIRS.add(('Cxcl12', _r))
+
+_chord_ligs = list({p[0] for p in CANONICAL_LR_PAIRS})
+_chord_recs = list({p[1] for p in CANONICAL_LR_PAIRS})
+
+# Cell pool for the chord: 11 niche cells + top-10 affected neurons
+chord_cell_set = list(dict.fromkeys(list(ordered_cts) + list(top_neurons)))
+print(f'Chord cell pool: {len(chord_cell_set)} '
+      f'({len(ordered_cts)} niche + {len(top_neurons)} neurons)')
+
+_liana = (pl.scan_csv(f'{working_dir}/output/liana/inflow_diff.csv')
+    .filter(pl.col('contrast') == 'PREG_vs_CTRL')
+    .filter(pl.col('ligand_complex').is_in(_chord_ligs) &
+            pl.col('receptor_complex').is_in(_chord_recs))
+    .filter(pl.col('source').is_in(chord_cell_set) &
+            pl.col('target').is_in(chord_cell_set))
+    .collect())
+_liana = _liana.filter(
+    pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
+        lambda s: (s['ligand_complex'], s['receptor_complex'])
+                  in CANONICAL_LR_PAIRS,
+        return_dtype=pl.Boolean))
+
+_keys = ['source', 'target', 'ligand_complex', 'receptor_complex']
+_wide = (_liana.group_by(_keys + ['dataset'])
+        .agg(pl.col('lr_mean_diff').first())
+        .pivot(on='dataset', index=_keys, values='lr_mean_diff')
+        .rename({'slidetags': 'diff_st', 'xenium': 'diff_xn'}))
+
+_nonz = _liana.filter(pl.col('lr_mean_diff') != 0)
+_med_xn = float(_nonz.filter(pl.col('dataset') == 'xenium')['lr_mean_diff']
+                .abs().median())
+_med_st = float(_nonz.filter(pl.col('dataset') == 'slidetags')['lr_mean_diff']
+                .abs().median())
+
+# cross-platform: both nonzero, same sign, magnitude >= per-platform median
+_xp = (_wide.filter(pl.col('diff_st').is_not_null()
+                    & pl.col('diff_xn').is_not_null()
+                    & (pl.col('diff_st') != 0)
+                    & (pl.col('diff_xn') != 0)
+                    & (pl.col('diff_st').sign() == pl.col('diff_xn').sign())
+                    & (pl.col('diff_st').abs() >= _med_st)
+                    & (pl.col('diff_xn').abs() >= _med_xn))
+      .with_columns(((pl.col('diff_st') + pl.col('diff_xn')) / 2)
+                    .alias('meta_diff'))
+      .select(['source', 'target', 'ligand_complex', 'receptor_complex',
+               'meta_diff']))
+
+# fallback for slidetags-only pairs (top-10% |diff|)
+_xp_pairs = (_wide.filter(pl.col('diff_st').is_not_null()
+                          & pl.col('diff_xn').is_not_null())
+             .select(['ligand_complex', 'receptor_complex']).unique())
+_xp_pair_set = {(r['ligand_complex'], r['receptor_complex'])
+                for r in _xp_pairs.iter_rows(named=True)}
+_st_only_pairs = CANONICAL_LR_PAIRS - _xp_pair_set
+
+_st = (_liana.filter((pl.col('dataset') == 'slidetags')
+                      & (pl.col('lr_mean_diff') != 0))
+       .filter(pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
+           lambda s: (s['ligand_complex'], s['receptor_complex'])
+                     in _st_only_pairs,
+           return_dtype=pl.Boolean)))
+_st_thr = (float(_st['lr_mean_diff'].abs().quantile(0.90))
+           if _st.height else 0.0)
+_st = (_st.filter(pl.col('lr_mean_diff').abs() >= _st_thr)
+       .rename({'lr_mean_diff': 'meta_diff'})
+       .select(['source', 'target', 'ligand_complex', 'receptor_complex',
+                'meta_diff']))
+
+chord_edges = pl.concat([_xp, _st]).with_columns(
+    (pl.col('source') == pl.col('target')).alias('is_self'))
+print(f'Chord curated edges: {chord_edges.height} '
+      f'(UP={chord_edges.filter(pl.col("meta_diff") > 0).height}, '
+      f'DOWN={chord_edges.filter(pl.col("meta_diff") < 0).height})')
+
+# Drop self-edges (autocrine; clutters chord arcs); keep cell-cell only
+chord_edges_intercell = chord_edges.filter(~pl.col('is_self'))
+
+
+def theme_chord_edges(theme):
+    return (chord_edges_intercell
+            .filter(pl.col('ligand_complex')
+                    .is_in(CHORD_THEME_LIGANDS[theme]))
+            .group_by(['source', 'target'])
+            .agg(pl.col('meta_diff').sum().alias('signed_sum'),
+                 pl.col('meta_diff').abs().sum().alias('mag'),
+                 pl.len().alias('n_lr')))
+
+
+# Chord colors / class helpers
+CHORD_COLOR_UP   = '#b2182b'
+CHORD_COLOR_DOWN = '#2166ac'
+CHORD_CLASS_COLORS = {
+    'NN':   '#7570b3',
+    'Glut': '#d95f02',
+    'GABA': '#1b9e77',
+}
+CHORD_CLASS_ORDER = ['NN', 'Glut', 'GABA']
+CHORD_CLASS_LABELS = {'NN': 'Non-neuronal',
+                      'Glut': 'Glutamatergic',
+                      'GABA': 'GABAergic'}
+
+
+def chord_class(ct):
+    if 'NN' in ct:   return 'NN'
+    if 'Glut' in ct: return 'Glut'
+    return 'GABA'
+
+
+def chord_num_label(ct):
+    m = re.match(r'^(\d+)', ct)
+    return m.group(1) if m else ct
+
+
+# Sectors grouped by class so chord arcs cluster within class
+chord_cells_ordered = sorted(
+    chord_cell_set,
+    key=lambda c: (CHORD_CLASS_ORDER.index(chord_class(c)),
+                   numeric_prefix(c)))
+
+# =============================================================================
+# Layout
 # =============================================================================
 NES_VMAX = quant_vmax(nes_mat)
 LFC_VMAX = quant_vmax(lfc_mat[d_mat_b >= 2])
-print(f'cmap vmax (10/90 quantile): NES={NES_VMAX:.2f}  '
-      f'logFC={LFC_VMAX:.2f}')
+print(f'cmap vmax: NES={NES_VMAX:.2f}  logFC={LFC_VMAX:.2f}')
 
 NLP_MIN, NLP_MAX = 1.30, 5.0
 SIZE_MIN, SIZE_MAX = 16.0, 80.0
@@ -680,11 +862,16 @@ def pct_to_size(p):
     p = float(np.clip(p, 0, 100))
     return SIZE_MIN + (p / 100.0) * (SIZE_MAX - SIZE_MIN)
 
-# Main panel column
-LABEL_MARGIN_IN = 1.55
+# Geometry mirrors lipid figure: legend in LEFT fig-pad region (x=0.45..1.30),
+# y-tick labels in LABEL_MARGIN region (x=1.15..2.70), axes start at x=2.70.
 LEFT_FIG_PAD_IN = 1.15
+LABEL_MARGIN_IN = 1.55
 ax_left_in = LEFT_FIG_PAD_IN + LABEL_MARGIN_IN
 ax_w_in = 0.20 * n_cols
+PATH_PITCH = 0.21
+GENE_PITCH = 0.155
+ax_h_a_in = PATH_PITCH * n_rows
+ax_h_b_in = GENE_PITCH * n_g
 
 leg_left_in = 0.45
 leg_w_in = 0.85
@@ -693,15 +880,16 @@ leg_w_in = 0.85
 SWATCH_W_IN = 0.09
 SWATCH_H_IN = 0.07
 
-PATH_PITCH = 0.21
-GENE_PITCH = 0.155
-ax_h_a_in = PATH_PITCH * n_rows
-ax_h_b_in = GENE_PITCH * n_g
-gap_in = 0.50           # holds Panel A's rotated x-tick labels + title
-chord_gap_in = 1.00
-
-# Gene-card column
 ANNO_W_IN, ANNO_GAP_IN = 0.07, 0.03
+COL_ANNO_H_IN = ANNO_W_IN
+COL_ANNO_GAP_IN = 0.02
+
+top_margin_in = 0.85
+# bot_margin_in just needs to fit Panel B's rotated x-tick labels.
+bot_margin_in = 0.85
+gap_in = 0.50          # Panel A col-anno strip lives here
+
+# Gene-card column (right of Panel A/B)
 N_CARDS = len(CARD_GENES)
 CARD_GAP_IN = 0.10
 CARD_TITLE_H_IN = 0.30
@@ -716,42 +904,81 @@ FOREST_LABEL_GAP_IN = 0.05
 LABEL_W_IN = 0.95
 CARD_W_IN = (SP_W_IN + SP_GAP_IN + SP_W_IN + SP_FOREST_GAP_IN
              + FOREST_W_IN + FOREST_LABEL_GAP_IN + LABEL_W_IN)
-# Widest card (D=3) extends right by (SP_W + SP_GAP) per extra platform.
 CARD_W_MAX_IN = CARD_W_IN + max(0, MAX_SP_N - 2) * (SP_W_IN + SP_GAP_IN)
 CARD_FOREST_ROW_H = 0.13
 CARD_FOREST_MIN_H = 0.42
 cards_left_in = ax_left_in + ax_w_in + ANNO_GAP_IN + ANNO_W_IN + 0.35
 
-top_margin_in = 0.85
-bot_margin_in = 2.15
-card_total_h_in = content_h_in + CARD_TITLE_H_IN
-cards_h_in = (N_CARDS * card_total_h_in
-              + (N_CARDS - 1) * CARD_GAP_IN)
-
-# Forest legend column (right of cards)
+# Forest-legend column (right of cards)
 FLEG_GAP_IN = 0.12
 FLEG_EXTRA_RIGHT_IN = 0.20
 FLEG_COL_W_IN = 1.10
 
-# Chord row (Panel D)
-CHORD_PANEL_GAP_IN = 0.45
-CHORD_ROW_GAP_IN = 0.30
-CHORD_TITLE_H_IN = 0.40
-chord_panel_w_in = (ax_w_in - CHORD_PANEL_GAP_IN) / 2
+# Chord row constants (directly below Panel B). Span from leftmost dotplot
+# (ax_left_in) to the right edge of the widest forest box.
+CHORD_PANEL_GAP_IN  = 0.30
+CHORD_TITLE_H_IN    = 0.30
+CHORD_BOT_PAD_IN    = 0.02   # chord sits very close to figure bottom
+B_TO_CHORD_GAP_IN   = 0.45   # gap below Panel B's rotated x-tick labels
+_chord_span_in = (
+    (cards_left_in + MAX_SP_N * SP_W_IN + (MAX_SP_N - 1) * SP_GAP_IN
+     + SP_FOREST_GAP_IN + FOREST_W_IN) - ax_left_in)
+chord_panel_w_in = (_chord_span_in - 2 * CHORD_PANEL_GAP_IN) / 3
 chord_panel_h_in = chord_panel_w_in * 0.85
-CHORD_ROW_H_IN = (2 * chord_panel_h_in + 2 * CHORD_TITLE_H_IN
-                  + CHORD_ROW_GAP_IN + 0.20)
+CHORD_ROW_H_IN   = chord_panel_h_in + CHORD_TITLE_H_IN
 
-fig_h = (top_margin_in + ax_h_a_in + gap_in + ax_h_b_in + chord_gap_in
-         + CHORD_ROW_H_IN + bot_margin_in)
+# Right edge of the chord row / widest forest box (imaging panel aligns here).
+chord_right_in = ax_left_in + _chord_span_in
+
+# Imaging block (bottom): stacked CD31 rows (left) + box plots (right);
+# right edge aligned to the gene-card forest plots.
+img_dir = f'{working_dir}/output/vascular_imaging'
+img_df = pd.read_csv(f'{img_dir}/imaging_metrics.csv')
+img_stats = pd.read_csv(f'{img_dir}/imaging_stats.csv').set_index('metric')
+img_meta = pd.read_csv(f'{img_dir}/montage_meta.csv', keep_default_na=False)
+img_samples = (img_meta.sort_values(['condition', 'mouse'])
+               .reset_index(drop=True))
+COND_ORDER = ['Nulliparous', 'Pregnant']
+COND_COLORS = {'Nulliparous': '#7209b7', 'Pregnant': '#b5179e'}
+MOUSE_MARKERS = {1: 'o', 2: 's', 3: '^', 4: 'D', 5: 'v'}
+IMG_NCOL = max((img_samples.condition == c).sum() for c in COND_ORDER)
+
+IMG_BOT_PAD_IN      = 0.42
+IMG_TO_CHORD_GAP_IN = 0.55
+IMG_YLAB_IN         = 0.30
+IMG_CD31_GAP_IN     = 0.07
+IMG_ROW_GAP_IN      = 0.10
+IMG_BOX_GAP_IN      = 0.50
+IMG_BOX_LAB_IN      = 0.50
+IMG_BOX_W_IN        = 1.00
+IMG_BOX_VGAP_IN     = 0.24
+IMG_BOX_XLAB_IN     = 0.30
+
 fig_w = (cards_left_in + CARD_W_MAX_IN + FLEG_GAP_IN + FLEG_EXTRA_RIGHT_IN
          + FLEG_COL_W_IN + 0.10)
 
-chord_row_bot_in = bot_margin_in
+img_panel_w_in = chord_right_in - ax_left_in
+img_cd31_in = ((img_panel_w_in - IMG_YLAB_IN
+                - (IMG_NCOL - 1) * IMG_CD31_GAP_IN - IMG_BOX_GAP_IN
+                - IMG_BOX_LAB_IN - IMG_BOX_W_IN) / IMG_NCOL)
+img_stack_h_in = 2 * img_cd31_in + IMG_ROW_GAP_IN
+IMG_ROW_H_IN = IMG_BOX_XLAB_IN + img_stack_h_in
+
+# Positions (bottom-up)
+img_stack_bot_in = IMG_BOT_PAD_IN + IMG_BOX_XLAB_IN
+img_stack_top_in = img_stack_bot_in + img_stack_h_in
+img_row_top_in = img_stack_top_in
+chord_row_bot_in = img_stack_top_in + IMG_TO_CHORD_GAP_IN
+chord_panel_bot_in = chord_row_bot_in
 chord_row_top_in = chord_row_bot_in + CHORD_ROW_H_IN
-ax_b_bot_in = chord_row_top_in + chord_gap_in
-ax_a_bot_in = ax_b_bot_in + ax_h_b_in + gap_in
+ax_b_bot_in = chord_row_top_in + B_TO_CHORD_GAP_IN + bot_margin_in
+ax_b_top_in = ax_b_bot_in + ax_h_b_in
+ax_a_bot_in = ax_b_top_in + gap_in
 ax_a_top_in = ax_a_bot_in + ax_h_a_in
+
+fig_h = (top_margin_in + ax_h_a_in + gap_in + ax_h_b_in + bot_margin_in
+         + B_TO_CHORD_GAP_IN + CHORD_ROW_H_IN
+         + IMG_TO_CHORD_GAP_IN + IMG_ROW_H_IN + IMG_BOT_PAD_IN)
 
 fig = plt.figure(figsize=(fig_w, fig_h))
 ax_a = fig.add_axes([ax_left_in / fig_w, ax_a_bot_in / fig_h,
@@ -797,7 +1024,6 @@ for _, _, hi in band_spans[:-1]:
 ax_a.set_xlim(-0.5, n_cols - 0.5)
 ax_a.set_ylim(n_rows - 0.5, -0.5)
 prefix_labels = [f'{numeric_prefix(ct):03d}' for ct in ordered_cts]
-# x-ticks/labels live on the subclass column annotation strip below ax_a
 ax_a.tick_params(axis='x', bottom=False, labelbottom=False)
 ax_a.set_yticks(range(n_rows))
 ax_a.set_yticklabels([PATHWAY_LABELS.get(p, p) for p in ordered_pathways],
@@ -817,7 +1043,7 @@ for cls, lo, hi in class_spans:
               linespacing=1.05)
 
 # =============================================================================
-# Panel B: DE dotplot (color = signed logFC, size = % nonzero)
+# Panel B: DE dotplot (color = signed logFC, size = % expressed)
 # =============================================================================
 ax_b.set_facecolor('white')
 xs_b, ys_b, sizes_b, colors_b, edges_b, lws_b = [], [], [], [], [], []
@@ -856,7 +1082,6 @@ for _, _, hi in gene_band_spans[:-1]:
 
 ax_b.set_xlim(-0.5, n_cols - 0.5)
 ax_b.set_ylim(n_g - 0.5, -0.5)
-# Panel B: x-ticks/labels moved to col-anno strip below
 ax_b.tick_params(axis='x', bottom=False, labelbottom=False)
 ax_b.set_yticks(range(n_g))
 ax_b.set_yticklabels(ordered_genes, fontsize=7.5, fontstyle='italic')
@@ -868,12 +1093,9 @@ for sp in ('top', 'right', 'left', 'bottom'):
     ax_b.spines[sp].set_linewidth(0.9)
 
 # =============================================================================
-# Column annotation strips (subclass colors) below A and B; x-ticks emanate
-# from the strip bottom edge. Strip height matches band-anno thickness.
+# Column annotation strips (subclass colors). Panel A: prefix labels only.
+# Panel B: full subclass names (rotated).
 # =============================================================================
-COL_ANNO_H_IN = ANNO_W_IN
-COL_ANNO_GAP_IN = 0.02
-
 def _draw_col_anno(panel_bot_in, ticklabels, ticklabel_fs=7.5):
     bot = panel_bot_in - COL_ANNO_GAP_IN - COL_ANNO_H_IN
     ax = fig.add_axes([ax_left_in / fig_w, bot / fig_h,
@@ -929,9 +1151,10 @@ for i, g in enumerate(ordered_genes):
         facecolor=BAND_COLORS[gene_band[g]], edgecolor='none'))
 
 # =============================================================================
-# Dotplot legends: LEG_A (panel A) / LEG_B (panel B) / LEG_S (shared)
+# Legends: LEG_A (Panel A) / LEG_B (Panel B) / LEG_S (shared) / TLEG (bands).
+# Stacked in LEFT fig-pad region, right-justified, vertical thin NES/logFC
+# colorbars hugging the right edge.
 # =============================================================================
-ax_b_top_in = ax_b_bot_in + ax_h_b_in
 CBAR_W_FIG = 0.005
 CBAR_TARGET_X_AXES = 0.95
 cbar_x_fig = ((leg_left_in + CBAR_TARGET_X_AXES * leg_w_in) / fig_w
@@ -950,6 +1173,8 @@ def _make_leg_axes(bot_in, h_in):
         s.set_visible(False)
     return ax
 
+# Anchor: LEG_A sits at TOP of Panel B (visually aligned with the gap
+# between A and B, like the lipid figure).
 LEG_A_TOP_IN = ax_b_top_in
 LEG_A_H_IN = 8 * GENE_PITCH
 LEG_A_BOT_IN = LEG_A_TOP_IN - LEG_A_H_IN
@@ -983,7 +1208,7 @@ cb_a = fig.colorbar(mpl.cm.ScalarMappable(norm=norm_nes, cmap=cmap),
                     cax=cbar_ax_a, orientation='vertical')
 cb_a.set_ticks([-NES_VMAX, 0, NES_VMAX])
 cb_a.ax.yaxis.tick_left()
-cb_a.ax.tick_params(labelsize=6.0, length=2, pad=1)
+cb_a.ax.tick_params(labelsize=6.5, length=2, pad=1)
 cbar_ax_a.set_zorder(110)
 
 # LEG_B: logFC colorbar + Percent expressed sizes (DE)
@@ -999,7 +1224,7 @@ cb_b = fig.colorbar(mpl.cm.ScalarMappable(norm=norm_lfc, cmap=cmap),
                     cax=cbar_ax_b, orientation='vertical')
 cb_b.set_ticks([-LFC_VMAX, 0, LFC_VMAX])
 cb_b.ax.yaxis.tick_left()
-cb_b.ax.tick_params(labelsize=6.0, length=2, pad=1)
+cb_b.ax.tick_params(labelsize=6.5, length=2, pad=1)
 cbar_ax_b.set_zorder(110)
 
 ax_leg_b.text(1.0, 0.45, 'DE\nPercent expressed',
@@ -1011,7 +1236,7 @@ for k, lev in enumerate([10, 50, 90]):
     ax_leg_b.text(0.85, y, f'{lev}%',
                   ha='right', va='center', fontsize=6.5)
 
-# LEG_S: shared D + Significance (applies to both panels)
+# LEG_S: shared D + Significance
 ax_leg_s = _make_leg_axes(LEG_S_BOT_IN, LEG_S_H_IN)
 ax_leg_s.text(1.0, 0.95, 'DE/GSEA\nCross-platform',
               ha='right', va='top', fontsize=6.8, linespacing=1.0)
@@ -1030,6 +1255,25 @@ ax_leg_s.scatter([0.95], [0.19], s=SIG_DOT_SIZE, c='white',
                  edgecolors='none', linewidths=0)
 ax_leg_s.text(0.85, 0.19, r'emp $p \leq 0.05$',
               ha='right', va='center', fontsize=6.5)
+
+# TLEG: band-color theme legend (with title)
+TLEG_TOP_IN = LEG_S_BOT_IN - 1 * GENE_PITCH
+TLEG_H_IN = 8 * GENE_PITCH
+TLEG_BOT_IN = TLEG_TOP_IN - TLEG_H_IN
+ax_tleg = _make_leg_axes(TLEG_BOT_IN, TLEG_H_IN)
+ax_tleg.text(0.95, 0.97, 'DE/GSEA\nTheme', ha='right', va='top',
+             fontsize=6.8, linespacing=1.0)
+band_names = [b for b, _ in GENE_BANDS]
+y_top, y_bot = 0.60, 0.10
+y_step = (y_top - y_bot) / (len(band_names) - 1)
+bw, bh = SWATCH_W_IN / leg_w_in, SWATCH_H_IN / TLEG_H_IN
+for i, band in enumerate(band_names):
+    y = y_top - i * y_step
+    ax_tleg.add_patch(plt.Rectangle((0.95 - bw, y - bh / 2), bw, bh,
+                                    facecolor=BAND_COLORS[band],
+                                    edgecolor='none'))
+    ax_tleg.text(0.95 - bw - 0.03, y, band, ha='right', va='center',
+                 fontsize=6.5, color='black')
 
 # =============================================================================
 # Gene cards (right column)
@@ -1085,6 +1329,7 @@ def draw_forest(axf, gd, show_xlabel=False):
         sp.set_linewidth(0.5)
 
 cards_top_in = ax_a_top_in + CARD_TITLE_H_IN
+card_total_h_in = content_h_in + CARD_TITLE_H_IN
 for i, g in enumerate(CARD_GENES):
     gd = cards[g]
     card_top_in = cards_top_in - i * (card_total_h_in + CARD_GAP_IN)
@@ -1096,7 +1341,6 @@ for i, g in enumerate(CARD_GENES):
              ha='left', va='top', fontsize=TITLE_FS,
              fontstyle='italic')
 
-    # Spatial maps (LEFT side of card). D=3 cards extend right; forest shifts.
     n_sp = len(gd['sp_pair'])
     sp_bot_in = content_bot_in
     for si in range(n_sp):
@@ -1114,7 +1358,6 @@ for i, g in enumerate(CARD_GENES):
             continue
         vmin_sp, vmax_sp = gd['sp_vranges'][si]
         order = np.argsort(sd['expr'])
-        # Slide-tags is much sparser than xenium/merfish; scale dot size to match.
         n_total_ds = len(sp_coords[ds]['x'])
         sp_size = 250.0 / np.sqrt(n_total_ds)
         ax_sp.scatter(sd['x'][order], sd['y'][order],
@@ -1189,8 +1432,6 @@ sections = [
         ('star', 3, r'***  emp$\,p\leq 0.001$'),
     ]),
 ]
-# Inch-based spacing -> axes fraction so the layout is constant regardless
-# of the dynamic axes height. Values reproduce the original (flegv=1.95in) layout.
 header_h = 0.075 * 1.95 / flegv_h_in
 item_h = 0.060 * 1.95 / flegv_h_in
 section_gap = 0.050 * 1.95 / flegv_h_in
@@ -1220,25 +1461,19 @@ for header, items in sections:
     y -= section_gap
 
 # =============================================================================
-# Panel D: chord row (4 per-LR-theme panels + stacked legend)
+# Chord row: 3 LR themes (Notch / VEGF / Ang2+Cxcl12), polar pycirclize plots
 # =============================================================================
 chord_panels_left_in = ax_left_in
-chord_panel_bot_row1 = chord_row_bot_in - 0.20
-chord_panel_bot_row0 = (chord_panel_bot_row1 + chord_panel_h_in
-                        + CHORD_ROW_GAP_IN + CHORD_TITLE_H_IN)
-
 chord_theme_axes = {}
 for i, theme in enumerate(CHORD_THEMES):
-    row = i // 2
-    col = i % 2
-    px_left_in = chord_panels_left_in + col * (chord_panel_w_in
-                                                + CHORD_PANEL_GAP_IN)
-    py_bot_in = chord_panel_bot_row0 if row == 0 else chord_panel_bot_row1
-    ax = fig.add_axes([px_left_in / fig_w, py_bot_in / fig_h,
+    px_left_in = (chord_panels_left_in
+                  + i * (chord_panel_w_in + CHORD_PANEL_GAP_IN))
+    ax = fig.add_axes([px_left_in / fig_w, chord_panel_bot_in / fig_h,
                        chord_panel_w_in / fig_w,
                        chord_panel_h_in / fig_h],
                       projection='polar')
     chord_theme_axes[theme] = ax
+
 
 def draw_theme_chord(ax, theme):
     df = theme_chord_edges(theme)
@@ -1248,14 +1483,16 @@ def draw_theme_chord(ax, theme):
         return df
     df = df.sort('mag', descending=True).head(40)
 
-    sec_size = {c: 0.0 for c in ordered_cts}
+    sec_size = {c: 0.0 for c in chord_cell_set}
     for r in df.iter_rows(named=True):
-        sec_size[r['source']] += r['mag']
-        sec_size[r['target']] += r['mag']
+        sec_size[r['source']] = sec_size.get(r['source'], 0.0) + r['mag']
+        sec_size[r['target']] = sec_size.get(r['target'], 0.0) + r['mag']
     max_sz = max(sec_size.values()) if any(sec_size.values()) else 1.0
     floor = max_sz * 0.05
-    sector_dict = {c: max(sec_size[c], floor) for c in chord_cells_ordered}
+    sector_dict = {c: max(sec_size.get(c, 0.0), floor)
+                   for c in chord_cells_ordered}
 
+    # Gap between sectors: larger when crossing class boundaries
     space_per = []
     for k, c in enumerate(chord_cells_ordered):
         if k == 0:
@@ -1274,8 +1511,8 @@ def draw_theme_chord(ax, theme):
                     orientation='vertical')
 
     max_mag = float(df['mag'].max())
-    src_off = {c: 0.0 for c in ordered_cts}
-    tgt_off = {c: 0.0 for c in ordered_cts}
+    src_off = {c: 0.0 for c in chord_cell_set}
+    tgt_off = {c: 0.0 for c in chord_cell_set}
     for r in df.sort('mag', descending=False).iter_rows(named=True):
         s, t, w = r['source'], r['target'], r['mag']
         col = CHORD_COLOR_UP if r['signed_sum'] > 0 else CHORD_COLOR_DOWN
@@ -1289,6 +1526,7 @@ def draw_theme_chord(ax, theme):
                     arrow_length_ratio=0.05, allow_twist=True)
     circos.plotfig(ax=ax)
 
+    # Outer class arc (NN / Glut / GABA)
     class_groups = {}
     for sector in circos.sectors:
         class_groups.setdefault(chord_class(sector.name), []).append(sector)
@@ -1304,33 +1542,33 @@ def draw_theme_chord(ax, theme):
                align='center', zorder=0.5)
     return df
 
+
 for theme, ax in chord_theme_axes.items():
     draw_theme_chord(ax, theme)
 
-# Titles offset 0.35" above polar axis to clear chord cell-prefix labels at r=106.
+# Theme titles above each chord
 fig.canvas.draw()
-_title_offset_frac = 0.35 / fig_h
+_title_offset_frac = 0.30 / fig_h
 for theme, ax in chord_theme_axes.items():
     bbox = ax.get_position()
     fig.text((bbox.x0 + bbox.x1) / 2,
              bbox.y1 + _title_offset_frac,
              CHORD_THEME_TITLES[theme], ha='center', va='bottom',
-             fontsize=9.0)
+             fontsize=8.5)
 
-# Chord y-axis title (left of the chord grid, vertical)
-_chord_grid_cy = (chord_panel_bot_row1
-                  + chord_panel_bot_row0 + chord_panel_h_in) / 2
-fig.text((ax_left_in - 0.34) / fig_w, _chord_grid_cy / fig_h,
+# Chord y-axis title (left of the leftmost chord, vertical)
+fig.text((ax_left_in - 0.34) / fig_w,
+         (chord_panel_bot_in + chord_panel_h_in / 2) / fig_h,
          'Spatial cell-cell\ncommunication (meta)', rotation=90,
          ha='center', va='center', fontsize=9.0)
 
-# Chord legend: single column in the LEFT legend pad alongside the chord
-# grid, right-justified. Direction + Cell class + Subclass stacked.
-scleg_cells = chord_cells_legend_ordered
+# Chord legend: single column in the LEFT legend stack (below TLEG),
+# right-justified. Direction + Cell class + Subclass stacked.
+scleg_cells = sorted(chord_cell_set, key=numeric_prefix)
 CLEG_HDR_IN, CLEG_ROW_IN, CLEG_GAPV_IN = 0.27, 0.108, 0.07
 CHORD_LEG_H_IN = (3 * CLEG_HDR_IN + (5 + len(scleg_cells)) * CLEG_ROW_IN
                   + 2 * CLEG_GAPV_IN + 0.06)
-CHORD_LEG_TOP_IN = chord_row_top_in
+CHORD_LEG_TOP_IN = TLEG_BOT_IN - GENE_PITCH
 CHORD_LEG_BOT_IN = CHORD_LEG_TOP_IN - CHORD_LEG_H_IN
 ax_clegL = _make_leg_axes(CHORD_LEG_BOT_IN, CHORD_LEG_H_IN)
 _sw_w = SWATCH_W_IN / leg_w_in
@@ -1374,28 +1612,131 @@ for ct in scleg_cells:
     y -= _d(CLEG_ROW_IN)
 
 # =============================================================================
-# TLEG: band-color theme legend (below LEG_S, with title)
+# Imaging block: stacked CD31 rows (Nulliparous top, Pregnant bottom) on the
+# left + morphometric box plots on the right. From XX_vascular_imaging.py.
 # =============================================================================
-TLEG_TOP_IN = LEG_S_BOT_IN - 1 * GENE_PITCH
-TLEG_H_IN = 8 * GENE_PITCH
-TLEG_BOT_IN = TLEG_TOP_IN - TLEG_H_IN
-ax_tleg = _make_leg_axes(TLEG_BOT_IN, TLEG_H_IN)
-ax_tleg.text(0.95, 0.97, 'DE/GSEA\nTheme', ha='right', va='top',
-             fontsize=6.8, linespacing=1.0)
-band_names = [b for b, _ in GENE_BANDS]
-y_top, y_bot = 0.60, 0.10
-y_step = (y_top - y_bot) / (len(band_names) - 1)
-bw, bh = SWATCH_W_IN / leg_w_in, SWATCH_H_IN / TLEG_H_IN
-for i, band in enumerate(band_names):
-    y = y_top - i * y_step
-    ax_tleg.add_patch(plt.Rectangle((0.95 - bw, y - bh / 2), bw, bh,
-                                    facecolor=BAND_COLORS[band],
-                                    edgecolor='none'))
-    ax_tleg.text(0.95 - bw - 0.03, y, band, ha='right', va='center',
-                 fontsize=6.5, color='black')
+img_block_left_in = ax_left_in + IMG_YLAB_IN
+for ci, cond in enumerate(COND_ORDER):
+    rows = img_samples[img_samples.condition == cond].reset_index(drop=True)
+    cell_bot_in = (img_stack_top_in - (ci + 1) * img_cd31_in
+                   - ci * IMG_ROW_GAP_IN)
+    for j in range(len(rows)):
+        srow = rows.iloc[j]
+        x_in = img_block_left_in + j * (img_cd31_in + IMG_CD31_GAP_IN)
+        axc = fig.add_axes([x_in / fig_w, cell_bot_in / fig_h,
+                            img_cd31_in / fig_w, img_cd31_in / fig_h])
+        arr = plt.imread(f'{img_dir}/cd31_{srow["prefix"]}.png')
+        if arr.ndim == 3:
+            arr = arr[..., 0]
+        rgb = np.zeros(arr.shape + (3,), dtype=float)
+        rgb[..., 1] = arr
+        axc.imshow(rgb, aspect='auto', interpolation='nearest')
+        axc.set_xticks([]); axc.set_yticks([]); axc.set_facecolor('black')
+        for s in axc.spines.values():
+            s.set_color('#999999'); s.set_linewidth(0.5)
+        axc.text(0.04, 0.95, f'M{int(srow["mouse"])}', transform=axc.transAxes,
+                 ha='left', va='top', color='white', fontsize=7.0)
+        if j == 0:
+            bar = 100.0 / float(srow['fov_um'])
+            axc.plot([0.05, 0.05 + bar], [0.08, 0.08], color='white', lw=1.6,
+                     transform=axc.transAxes, solid_capstyle='butt')
+            axc.text(0.05, 0.11, '100 µm', color='white', fontsize=5.5,
+                     ha='left', va='bottom', transform=axc.transAxes)
+    fig.text((ax_left_in + IMG_YLAB_IN * 0.40) / fig_w,
+             (cell_bot_in + img_cd31_in / 2) / fig_h, cond,
+             rotation=90, ha='center', va='center', fontsize=8.5, color='black')
+
+# Image y-axis title (outer, left of the condition labels, vertical)
+fig.text((ax_left_in - 0.34) / fig_w,
+         (img_stack_bot_in + img_stack_h_in / 2) / fig_h,
+         'Vascular imaging (CD31)', rotation=90,
+         ha='center', va='center', fontsize=9.0)
+
+box_left_in = (img_block_left_in + IMG_NCOL * img_cd31_in
+               + (IMG_NCOL - 1) * IMG_CD31_GAP_IN + IMG_BOX_GAP_IN
+               + IMG_BOX_LAB_IN)
+box_h_in = (img_stack_h_in - IMG_BOX_VGAP_IN) / 2
+QUANT_METRICS = [
+    ('junctions_per_mm_vessel', 'Junction density\n(per mm vessel)'),
+    ('mean_vessel_diameter_um', 'Vessel diameter (µm)'),
+]
+
+
+def draw_box(ax, metric, label, show_x):
+    ax.set_facecolor('white')
+    data = [img_df[img_df.condition == c][metric].dropna().to_numpy()
+            for c in COND_ORDER]
+    ylo = min(d.min() for d in data); yhi = max(d.max() for d in data)
+    yr = yhi - ylo if yhi > ylo else 1.0
+    bp = ax.boxplot(data, positions=[0, 1], widths=0.5, patch_artist=True,
+                    showfliers=False, medianprops=dict(color='black', lw=1.1),
+                    whiskerprops=dict(color='#555555', lw=0.8),
+                    capprops=dict(color='#555555', lw=0.8),
+                    boxprops=dict(lw=0.8), zorder=2)
+    for patch, c in zip(bp['boxes'], COND_ORDER):
+        patch.set_facecolor(COND_COLORS[c]); patch.set_alpha(0.20)
+        patch.set_edgecolor(COND_COLORS[c])
+    for xi, c in enumerate(COND_ORDER):
+        sub = img_df[img_df.condition == c].reset_index(drop=True)
+        v = sub[metric].to_numpy()
+        xs = xi + np.linspace(-0.18, 0.18, len(v))
+        for k in range(len(v)):
+            ax.scatter(xs[k], v[k], s=14, c=COND_COLORS[c],
+                       marker=MOUSE_MARKERS.get(int(sub.loc[k, 'mouse']), 'o'),
+                       edgecolors='white', linewidths=0.3, alpha=0.95, zorder=4)
+        for mouse, g in sub.groupby('mouse'):
+            ax.scatter(xi, g[metric].mean(), s=46, c=COND_COLORS[c],
+                       marker=MOUSE_MARKERS.get(int(mouse), 'o'),
+                       edgecolors='black', linewidths=0.6, zorder=5)
+    yb = yhi + 0.10 * yr
+    ax.plot([0, 0, 1, 1], [yb, yb + 0.04 * yr, yb + 0.04 * yr, yb],
+            color='black', lw=0.8, zorder=6)
+    p = float(img_stats.loc[metric, 'p_roi'])
+    ax.text(0.5, yb + 0.06 * yr, f'p = {p:.2f}', ha='center', va='bottom',
+            fontsize=6.6)
+    ax.set_xlim(-0.6, 1.6); ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Null', 'Preg'] if show_x else [], fontsize=7.0)
+    ax.set_ylim(ylo - 0.10 * yr, yb + 0.18 * yr)
+    ax.set_ylabel(label, fontsize=7.2, labelpad=2, linespacing=1.0)
+    ax.tick_params(axis='both', labelsize=6.8, length=3, width=0.8,
+                   direction='out')
+    for s in ('top', 'right'):
+        ax.spines[s].set_visible(False)
+    for s in ('left', 'bottom'):
+        ax.spines[s].set_linewidth(0.8)
+
+
+for qi, (met, lab) in enumerate(QUANT_METRICS):
+    box_bot = img_stack_bot_in + (1 - qi) * (box_h_in + IMG_BOX_VGAP_IN)
+    axb = fig.add_axes([box_left_in / fig_w, box_bot / fig_h,
+                        IMG_BOX_W_IN / fig_w, box_h_in / fig_h])
+    draw_box(axb, met, lab, show_x=(qi == 1))
+
+axml = fig.add_axes([img_block_left_in / fig_w, 0.07 / fig_h,
+                     (IMG_NCOL * img_cd31_in
+                      + (IMG_NCOL - 1) * IMG_CD31_GAP_IN) / fig_w,
+                     0.24 / fig_h])
+axml.set_xlim(0, 1); axml.set_ylim(0, 1)
+axml.set_xticks([]); axml.set_yticks([])
+for s in axml.spines.values():
+    s.set_visible(False)
+axml.text(0.0, 0.5, 'Mouse:', ha='left', va='center', fontsize=7.0)
+mx = 0.105
+for mnum, mk in [(1, 'o'), (2, 's'), (3, '^')]:
+    axml.scatter(mx, 0.5, s=24, c='#555555', marker=mk, edgecolors='none')
+    axml.text(mx + 0.014, 0.5, str(mnum), ha='left', va='center', fontsize=7.0)
+    mx += 0.058
+mx += 0.03
+axml.scatter(mx, 0.5, s=14, c='#555555', marker='o', edgecolors='white',
+             linewidths=0.3)
+axml.text(mx + 0.016, 0.5, 'ROI', ha='left', va='center', fontsize=7.0)
+mx += 0.10
+axml.scatter(mx, 0.5, s=46, c='#555555', marker='o', edgecolors='black',
+             linewidths=0.6)
+axml.text(mx + 0.016, 0.5, 'mouse mean', ha='left', va='center', fontsize=7.0)
 
 for ext in ('png', 'svg'):
-    fig.savefig(f'{out_dir}/lipid_combined.{ext}',
+    fig.savefig(f'{out_dir}/vascular_combined.{ext}',
                 bbox_inches='tight', facecolor='white')
 plt.close(fig)
-print(f'wrote {out_dir}/lipid_combined.png and .svg')
+print(f'wrote {out_dir}/vascular_combined.png and .svg')

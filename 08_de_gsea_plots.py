@@ -31,7 +31,7 @@ UP_COLOR = seismic_cmap(0.9)
 DN_COLOR = seismic_cmap(0.1)
 
 sr_meta = pl.read_csv(
-    f'{working_dir}/output/sumrank_results{de_suffix}.csv')
+    f'{working_dir}/output/de/sumrank_results{de_suffix}.csv')
 
 # major class label for cell-type ordering
 def get_type(ct):
@@ -260,9 +260,9 @@ def vrange_pctl(arr, lo=5, hi=95):
 
 # load DE + meta tables
 sr_cand = pl.read_csv(
-    f'{working_dir}/output/sumrank_results{de_suffix}.csv')
+    f'{working_dir}/output/de/sumrank_results{de_suffix}.csv')
 de_full = pl.read_csv(
-    f'{working_dir}/output/de_results{de_suffix}.csv')
+    f'{working_dir}/output/de/de_results{de_suffix}.csv')
 
 # load spatial adatas (xenium + merfish + slidetags)
 sp_adatas = {}

@@ -23,6 +23,7 @@ plt.rcParams['figure.dpi'] = 400
 
 working_dir = 'spatial-pregnancy'
 out_dir = f'{working_dir}/output'
+gsmap_dir = f'{out_dir}/gsmap'
 fig_dir = f'{working_dir}/figures/gsmap'
 os.makedirs(fig_dir, exist_ok=True)
 FDR = 0.10
@@ -91,10 +92,10 @@ def _wrap_ct(ct):
 
 #region load tables ############################################################
 
-cauchy = pl.read_csv(f'{out_dir}/gsmap_cauchy_fdr.csv')
-per_ds = pl.read_csv(f'{out_dir}/gsmap_per_dataset.csv')
-meta = pl.read_csv(f'{out_dir}/gsmap_meta.csv')
-means = pl.read_parquet(f'{out_dir}/gsmap_sample_means.parquet')
+cauchy = pl.read_csv(f'{gsmap_dir}/cauchy_fdr.csv')
+per_ds = pl.read_csv(f'{gsmap_dir}/per_dataset.csv')
+meta = pl.read_csv(f'{gsmap_dir}/meta.csv')
+means = pl.read_parquet(f'{gsmap_dir}/sample_means.parquet')
 print(f'cauchy: {cauchy.height}  per_ds: {per_ds.height}  '
       f'meta: {meta.height}  means: {means.height}')
 
@@ -519,7 +520,7 @@ def _load_adata(dataset):
 def plot_spatial(trait='MDD', condition='PREG'):
     panels = {}
     for ds in ('slidetags', 'xenium'):
-        path = (f'{out_dir}/{ds}/gsmap/{condition}/spatial_ldsc/'
+        path = (f'{gsmap_dir}/{ds}/{condition}/spatial_ldsc/'
                 f'{condition}_{trait}.csv.gz')
         if not os.path.exists(path):
             panels[ds] = None; continue
@@ -585,7 +586,7 @@ def _load_percell_scores(trait, cts):
             obs.reset_index().rename(columns={
                 'index': 'spot', cell_type_col: 'cell_type'}))
         for cond in sorted(obs['condition'].unique()):
-            path = (f'{out_dir}/{ds}/gsmap/{cond}/spatial_ldsc/'
+            path = (f'{gsmap_dir}/{ds}/{cond}/spatial_ldsc/'
                     f'{cond}_{trait}.csv.gz')
             if not os.path.exists(path):
                 continue

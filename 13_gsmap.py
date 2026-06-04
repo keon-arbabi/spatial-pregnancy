@@ -146,7 +146,7 @@ def submit_slurm(cmd, *, job_name, log_file, depends=None, hours=24):
         os.unlink(script_path)
     return out.split(';')[0]
 
-log_dir = f'{working_dir}/output/gsmap_logs'
+log_dir = f'{working_dir}/output/gsmap/logs'
 os.makedirs(log_dir, exist_ok=True)
 ds_abbr = {'slidetags': 'sl', 'xenium': 'xe'}
 cond_abbr = {'CTRL': 'C', 'PREG': 'P', 'POSTPART': 'PP'}
@@ -161,7 +161,7 @@ print(f'{len(active)} active jobs')
 
 for name in datasets:
     conditions = sorted(adatas[name].obs['condition'].unique())
-    output = f'{working_dir}/output/{name}/gsmap'
+    output = f'{working_dir}/output/gsmap/{name}'
     os.makedirs(output, exist_ok=True)
 
     for cond in conditions:
@@ -240,8 +240,8 @@ META_PERM_CAP = 10000           # exhaustive if total combos <= this, else rando
 META_SEED = 12345
 META_FDR = FDR_THRESHOLD
 
-meta_out = f'{working_dir}/output'
-meta_perm_dir = f'{meta_out}/gsmap_meta_perms'
+meta_out = f'{working_dir}/output/gsmap'
+meta_perm_dir = f'{meta_out}/perms'
 os.makedirs(meta_perm_dir, exist_ok=True)
 
 def bh_fdr(p):
@@ -280,7 +280,7 @@ def load_ldsc_long(name, adata):
     obs_pl = pl.from_pandas(
         obs.reset_index().rename(columns={
             'index': 'spot', cell_type_col: 'cell_type'}))
-    base = f'{meta_out}/{name}/gsmap'
+    base = f'{meta_out}/{name}'
     frames = []
     for cond in sorted(obs['condition'].unique()):
         d = Path(base) / cond / 'spatial_ldsc'
@@ -498,7 +498,7 @@ def summarize_null_by_ct(sr_k, null_by_ct):
 # ---- main pipeline ----------------------------------------------------------
 
 # 1. per-cell scores -> per-sample means (cached)
-means_cache = f'{meta_out}/gsmap_sample_means.parquet'
+means_cache = f'{meta_out}/sample_means.parquet'
 if os.path.exists(means_cache):
     means = pl.read_parquet(means_cache)
     print(f'[meta] sample means cached: {means.height:,} rows')
@@ -536,7 +536,7 @@ if per_ds_frames:
     per_dataset = pl.concat(per_ds_frames)
     per_dataset = per_dataset.with_columns(
         pl.Series('fdr', bh_fdr(per_dataset['p'].to_numpy())))
-    per_dataset.write_csv(f'{meta_out}/gsmap_per_dataset.csv')
+    per_dataset.write_csv(f'{meta_out}/per_dataset.csv')
 else:
     per_dataset = pl.DataFrame()
 
@@ -628,7 +628,7 @@ if meta_frames:
         if c not in ('contrast', 'trait', 'cell_type')})
     meta = meta.join(
         beta_wide, on=['contrast', 'trait', 'cell_type'], how='left')
-    meta.write_csv(f'{meta_out}/gsmap_meta.csv')
+    meta.write_csv(f'{meta_out}/meta.csv')
 else:
     meta = pl.DataFrame()
 
@@ -636,7 +636,7 @@ else:
 #    Scope: FDR across (trait x cell-type) within each (dataset, condition).
 cauchy_frames = []
 for name in datasets:
-    base = f'{meta_out}/{name}/gsmap'
+    base = f'{meta_out}/{name}'
     for cond in sorted(adatas[name].obs['condition'].unique()):
         d = Path(base) / cond / 'cauchy_combination'
         if not d.is_dir():
@@ -667,7 +667,7 @@ for name in datasets:
         print(f'[meta] cauchy {name} {cond}: {df.height} tests, '
               f'{n_sig} FDR<{META_FDR}')
 if cauchy_frames:
-    pl.concat(cauchy_frames).write_csv(f'{meta_out}/gsmap_cauchy_fdr.csv')
+    pl.concat(cauchy_frames).write_csv(f'{meta_out}/cauchy_fdr.csv')
 
 # 5. summary
 for contrast in META_CONTRAST_PLATFORMS:

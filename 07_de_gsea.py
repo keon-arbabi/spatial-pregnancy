@@ -106,16 +106,15 @@ SUMRANK_GSEA_NPERM_SIMPLE = 100
 PERM_SEED_BASE = 12345
 MIN_N_CELLS_EXPR = 10
 
-sumrank_cache_dir = f'{working_dir}/output/sumrank_cache{de_suffix}'
+sumrank_cache_dir = f'{working_dir}/output/de/perms{de_suffix}'
 SUMRANK_GSEA_CACHE_DIR = \
-    f'{working_dir}/output/sumrank_gsea_cache{de_suffix}'
-PERM_LOG_DIR = f'{working_dir}/output/perm_logs'
-de_path = f'{working_dir}/output/de_results{de_suffix}.csv'
-sumrank_path = f'{working_dir}/output/sumrank_results{de_suffix}.csv'
+    f'{working_dir}/output/gsea/perms{de_suffix}'
+PERM_LOG_DIR = f'{working_dir}/output/de/perm_logs'
+de_path = f'{working_dir}/output/de/de_results{de_suffix}.csv'
+sumrank_path = f'{working_dir}/output/de/sumrank_results{de_suffix}.csv'
 sumrank_gsea_path = \
-    f'{working_dir}/output/sumrank_gsea_results{de_suffix}.csv'
-for d in (sumrank_cache_dir, SUMRANK_GSEA_CACHE_DIR, PERM_LOG_DIR,
-          f'{working_dir}/output'):
+    f'{working_dir}/output/gsea/sumrank_gsea_results{de_suffix}.csv'
+for d in (sumrank_cache_dir, SUMRANK_GSEA_CACHE_DIR, PERM_LOG_DIR):
     os.makedirs(d, exist_ok=True)
 
 # Worker mode: restrict datasets to its one target (platform, contrast)
@@ -267,7 +266,7 @@ def _gate_on_missing(parquet_stage, cache_dir, label):
 
 #region adatas & reference pct detected #######################################
 
-pct_file = f'{working_dir}/output/ref_pct_detected{de_suffix}.pkl'
+pct_file = f'{working_dir}/output/de/ref_pct_detected{de_suffix}.pkl'
 if not os.path.exists(pct_file):
     ref = sc.read_h5ad(os.path.expanduser(
         '~/single-cell/ABC/zeng_combined_10Xv3.h5ad'))
@@ -364,7 +363,7 @@ def n_cells_mask(name, contrast, thresh=MIN_N_CELLS_EXPR):
     # (cell_type, gene) pairs with >=thresh cells expressing in each real
     # condition of the contrast; applied to real and perm DE alike
     treat, base = contrast.split('_vs_')
-    path = f'{working_dir}/output/n_cells_expr_{name}{de_suffix}.parquet'
+    path = f'{working_dir}/output/de/n_cells_expr_{name}{de_suffix}.parquet'
     if not os.path.exists(path):
         compute_n_cells_expr(adatas[name], cell_type_col).write_parquet(path)
     long = pl.read_parquet(path)\
@@ -379,7 +378,7 @@ def n_cells_mask(name, contrast, thresh=MIN_N_CELLS_EXPR):
         .select(['cell_type', 'gene'])
 
 def load_n_cells_long(name):
-    path = f'{working_dir}/output/n_cells_expr_{name}{de_suffix}.parquet'
+    path = f'{working_dir}/output/de/n_cells_expr_{name}{de_suffix}.parquet'
     if not os.path.exists(path):
         compute_n_cells_expr(adatas[name], cell_type_col).write_parquet(path)
     return pl.read_parquet(path).with_columns(pl.lit(name).alias('dataset'))
@@ -460,7 +459,7 @@ if not real_cached:
     de_results = add_n_cells_contrast(de_results, n_long)
     de_results.write_csv(de_path)
     de_results.filter(pl.col('FDR') < 0.10)\
-        .write_csv(f'{working_dir}/output/de_results_sig{de_suffix}.csv')
+        .write_csv(f'{working_dir}/output/de/de_results_sig{de_suffix}.csv')
 else:
     de_results = pl.read_csv(de_path)
     print(f'[de] cached: {de_results.height:,} rows, '
@@ -1088,7 +1087,8 @@ if (!file.exists(cache_file)) {{
 filtered_pathways_sr <- split(m_df_themed$gene_symbol, m_df_themed$gs_name)
 
 fgsea_ranked_groups <- function(ranked_df, keys, pathways, n_cores,
-                                minSize = 15, nperm_simple = NULL) {{
+                                minSize = 15, nperm_simple = NULL,
+                                with_leading_edge = FALSE) {{
     rl <- rle(keys)
     ends <- cumsum(rl$lengths)
     starts <- ends - rl$lengths + 1L
@@ -1115,6 +1115,12 @@ fgsea_ranked_groups <- function(ranked_df, keys, pathways, n_cores,
                           pvalue = res$pval,
                           key = rl$values[i],
                           stringsAsFactors = FALSE)
+        if (with_leading_edge && !is.null(res$leadingEdge)) {{
+            out$leading_edge <- vapply(
+                res$leadingEdge,
+                function(g) paste(g, collapse = ","),
+                character(1))
+        }}
         rm(ranks, res); gc()
         out
     }}
@@ -1148,7 +1154,8 @@ fgsea_perms <- function(perm_df, pathways, n_cores, minSize = 15,
 
 fgsea_real <- function(ranked_df, pathways, n_cores, minSize = 15) {{
     out <- fgsea_ranked_groups(ranked_df, ranked_df$cell_type,
-                               pathways, n_cores, minSize)
+                               pathways, n_cores, minSize,
+                               with_leading_edge = TRUE)
     if (nrow(out) == 0) return(out)
     out$cell_type <- out$key
     out$key <- NULL
@@ -1342,10 +1349,19 @@ if not IS_WORKER:
 #region pathway-level sumrank meta ############################################
 
 def _gsea_post_process(out):
+    le = real_gsea.select([
+        'contrast', 'cell_type', 'pathway', 'dataset', 'leading_edge'])\
+        .pivot(values='leading_edge', on='dataset',
+               index=['contrast', 'cell_type', 'pathway'])
+    le_cols = [c for c in le.columns
+               if c not in ('contrast', 'cell_type', 'pathway')]
+    le = le.rename({c: f'leading_edge_{c}' for c in le_cols})
+    out = out.join(le, on=['contrast', 'cell_type', 'pathway'], how='left')
     return out.select([
         'contrast', 'cell_type', 'pathway', 'D', 'sum_stat',
         'nlp_up', 'nlp_down', 'emp_p_up', 'emp_p_down',
-        'emp_fdr_up', 'emp_fdr_down'])
+        'emp_fdr_up', 'emp_fdr_down',
+        *sorted(f'leading_edge_{c}' for c in le_cols)])
 
 # null_pool_vec produces NaN for platform-missing (cell_type, pathway)
 # pairs; D>=2 filter handles missingness exactly like the gene-level path

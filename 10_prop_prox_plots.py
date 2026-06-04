@@ -51,9 +51,9 @@ plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 300
 os.makedirs(f'{working_dir}/figures/proximity', exist_ok=True)
 
-local_tt = pd.read_csv(f'{working_dir}/output/proximity_local_diff.csv')
-global_tt = pd.read_csv(f'{working_dir}/output/proximity_global_props.csv')
-sumrank_tt = pd.read_csv(f'{working_dir}/output/proximity_local_sumrank.csv')
+local_tt = pd.read_csv(f'{working_dir}/output/proximity/local_diff.csv')
+global_tt = pd.read_csv(f'{working_dir}/output/proximity/global_props.csv')
+sumrank_tt = pd.read_csv(f'{working_dir}/output/proximity/local_sumrank.csv')
 
 #endregion
 
