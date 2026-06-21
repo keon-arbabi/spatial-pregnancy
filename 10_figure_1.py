@@ -335,7 +335,8 @@ def build_figure():
     x_dot = x_cbar + T_VCBAR_W                          # dotplot left edge
     x_bar1 = x_dot + dot_w + 0.14                       # condition bar
     x_bar2 = x_bar1 + T_BAR_W + 0.06                    # platform bar
-    x_grp = x_bar2 + T_BAR_W + 0.14                    # group titles
+    x_cbar2 = x_bar2 + T_BAR_W + 0.08                   # 2nd subclass color bar
+    x_grp = x_cbar2 + T_VCBAR_W + 0.14                  # group titles
     x_dend = x_grp + T_GRP_W + 0.14                    # dendrogram (right)
     lx_in = x_dend + T_VDEND_W + 0.30                   # legends left edge
     W = lx_in + 1.85
@@ -470,6 +471,12 @@ def build_figure():
     ax.tick_params(axis='x', length=2, pad=2, top=False, labeltop=False,
                    bottom=True, labelbottom=True)
     ax.set_yticks([])
+    sax = ax.secondary_xaxis('top')                    # repeat gene labels on top
+    sax.set_xticks(range(n_gene))
+    sax.set_xticklabels(shared_markers, rotation=45, ha='left',
+                        rotation_mode='anchor', fontsize=FS_GENE)
+    sax.tick_params(length=2, pad=2)
+    sax.spines['top'].set_visible(False)
     for i, s in enumerate(sub_order):                  # row labels left of cbar
         fig.text((x_cbar - 0.04) / W, 1 - (dot_top + (i + 0.5) * T_CELL) / H,
                  s, ha='right', va='center', fontsize=FS_CTLAB)
@@ -480,11 +487,13 @@ def build_figure():
                   color_threshold=0, above_threshold_color='#555555')
     axd.set_ylim(10 * n_sub, 0); axd.set_xticks([]); axd.set_yticks([])
 
-    # vertical subclass color bar
-    axc = bare(fig.add_axes(rect(x_cbar, dot_top, T_VCBAR_W, dot_h)))
-    axc.set_xlim(0, 1); axc.set_ylim(n_sub - 0.5, -0.5)
-    for i, c in enumerate(sub_colors):
-        axc.add_patch(Rectangle((0, i - 0.5), 1, 1, facecolor=c, lw=0))
+    # vertical subclass color bars (left of dotplot and right of platform bar)
+    def cbar(x):
+        axc = bare(fig.add_axes(rect(x, dot_top, T_VCBAR_W, dot_h)))
+        axc.set_xlim(0, 1); axc.set_ylim(n_sub - 0.5, -0.5)
+        for i, c in enumerate(sub_colors):
+            axc.add_patch(Rectangle((0, i - 0.5), 1, 1, facecolor=c, lw=0))
+    cbar(x_cbar); cbar(x_cbar2)
 
     # horizontal stacked bars (right), per cell-type row; categories are
     # labelled directly under each bar in their theme colours (no legend)

@@ -1,57 +1,20 @@
+"""Lipid metabolism figure: Panel A (GSEA dotplot) + Panel B (DE dotplot)
++ gene cards + a 4-theme LIANA chord grid (2x2). Neurons + glia.
+Orchestrates the shared building blocks in figure_common.py.
+"""
 import os
-import re
 
-import numpy as np
-import pandas as pd
-import polars as pl
-import scanpy as sc
-from pycirclize import Circos
-
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 
-plt.rcParams['svg.fonttype'] = 'none'
-plt.rcParams['font.family'] = 'DejaVu Sans'
-plt.rcParams['figure.dpi'] = 400
+import figure_common as fc
 
+fc.setup_style()
 working_dir = '/home/karbabi/spatial-pregnancy'
 out_dir = f'{working_dir}/figures/lipid'
 os.makedirs(out_dir, exist_ok=True)
 
-cmap = plt.get_cmap('seismic')
-
-# --- helpers -----------------------------------------------------------------
-
-def pretty_ceil(v):
-    """Round v up to a 'nice' number (0.1 step for v>=1, 0.01 for v>=0.01)."""
-    if v == 0: return 1.0
-    if v >= 1: return float(np.ceil(v * 10) / 10)
-    if v >= 0.01: return float(np.ceil(v * 100) / 100)
-    return float(np.ceil(v * 1000) / 1000)
-
-def quant_vmax(arr, q_lo=0.05, q_hi=0.95):
-    flat = np.asarray(arr, dtype=float)
-    flat = flat[np.isfinite(flat)]
-    if flat.size == 0: return 1.0
-    q1, q2 = np.quantile(flat, [q_lo, q_hi])
-    return pretty_ceil(max(abs(q1), abs(q2)))
-
-def numeric_prefix(ct):
-    m = re.match(r'^(\d+)', ct)
-    return int(m.group(1)) if m else 9999
-
-def spans(labels):
-    """Contiguous runs: list of (label, start_idx, end_idx)."""
-    out, prev, start = [], labels[0], 0
-    for k, lab in enumerate(labels[1:], 1):
-        if lab != prev:
-            out.append((prev, start, k - 1))
-            prev, start = lab, k
-    out.append((prev, start, len(labels) - 1))
-    return out
-
 # =============================================================================
-# Panel A: GSEA pathway selection
+# Config: pathways (4 bands), genes (4 bands), cells, cards, chord themes
 # =============================================================================
 PATHWAY_BANDS = [
     ('Membrane lipid', [
@@ -77,145 +40,25 @@ ordered_pathways = [p for _, ps in PATHWAY_BANDS for p in ps]
 pathway_band = {p: b for b, ps in PATHWAY_BANDS for p in ps}
 
 PATHWAY_LABELS = {
-    'GOBP_MEMBRANE_LIPID_METABOLIC_PROCESS':       'membrane lipid metabolism',
-    'GOBP_MEMBRANE_LIPID_BIOSYNTHETIC_PROCESS':    'membrane lipid biosynthesis',
-    'GOBP_LIPID_TRANSLOCATION':                    'lipid translocation',
-    'GOBP_SPHINGOLIPID_METABOLIC_PROCESS':         'sphingolipid metabolism',
-    'GOBP_CERAMIDE_METABOLIC_PROCESS':             'ceramide metabolism',
-    'GOBP_FATTY_ACID_CATABOLIC_PROCESS':           'fatty acid catabolism',
-    'GOBP_FATTY_ACID_BETA_OXIDATION':              'fatty acid β-oxidation',
-    'GOBP_REGULATION_OF_LIPID_LOCALIZATION':       'lipid localization regulation',
-    'GOBP_LIPOPROTEIN_METABOLIC_PROCESS':          'lipoprotein metabolism',
-    'GOBP_STEROID_BIOSYNTHETIC_PROCESS':           'steroid biosynthesis',
+    'GOBP_MEMBRANE_LIPID_METABOLIC_PROCESS':    'membrane lipid metabolism',
+    'GOBP_MEMBRANE_LIPID_BIOSYNTHETIC_PROCESS': 'membrane lipid biosynthesis',
+    'GOBP_LIPID_TRANSLOCATION':                 'lipid translocation',
+    'GOBP_SPHINGOLIPID_METABOLIC_PROCESS':      'sphingolipid metabolism',
+    'GOBP_CERAMIDE_METABOLIC_PROCESS':          'ceramide metabolism',
+    'GOBP_FATTY_ACID_CATABOLIC_PROCESS':        'fatty acid catabolism',
+    'GOBP_FATTY_ACID_BETA_OXIDATION':           'fatty acid β-oxidation',
+    'GOBP_REGULATION_OF_LIPID_LOCALIZATION':    'lipid localization regulation',
+    'GOBP_LIPOPROTEIN_METABOLIC_PROCESS':       'lipoprotein metabolism',
+    'GOBP_STEROID_BIOSYNTHETIC_PROCESS':        'steroid biosynthesis',
 }
 
-# Okabe-Ito (colorblind-safe). Shared between Panel A and B.
 BAND_COLORS = {
-    'Membrane lipid':          '#E69F00',
-    'Sphingolipid':            '#CC79A7',
-    'Fatty acid catabolism':   '#009E73',
-    'Cholesterol & carriers':  '#0072B2',
+    'Membrane lipid':         '#E69F00',
+    'Sphingolipid':           '#CC79A7',
+    'Fatty acid catabolism':  '#009E73',
+    'Cholesterol & carriers': '#0072B2',
 }
 
-# =============================================================================
-# Load GSEA + collapse direction
-# =============================================================================
-gsea_all = (pl.read_csv(f'{working_dir}/output/gsea/sumrank_gsea_results.csv')
-    .filter((pl.col('contrast') == 'PREG_vs_CTRL') & (pl.col('D') >= 2))
-    .with_columns(
-        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
-            .then(pl.lit('up')).otherwise(pl.lit('down')).alias('direction'),
-        pl.max_horizontal(pl.col('nlp_up'), pl.col('nlp_down')).alias('nlp'),
-        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
-            .then(pl.col('emp_p_up')).otherwise(pl.col('emp_p_down'))
-            .alias('emp_p')))
-gsea = gsea_all.filter(pl.col('emp_p') <= 0.05)
-print(f'GSEA D>=2: {gsea_all.height}; sig (emp_p<=0.05): {gsea.height}')
-
-real_nes = (pl.read_parquet(f'{working_dir}/output/gsea/perms/real_gsea.parquet')
-    .filter(pl.col('contrast') == 'PREG_vs_CTRL'))
-
-# =============================================================================
-# Cell-type selection: >=2 curated-pathway hits OR allowlisted
-# =============================================================================
-# 327 Oligo + 334 Microglia: IHC anchors despite low pathway-hit count.
-# 323 Ependymal: CSF-interface, high baseline ApoE in slide-tags.
-# 333 Endo NN: BBB lipid trafficking (just below GSEA threshold but 6 DE hits).
-# 119 SI-MA-LPO-LHA: only hypothalamic Glut with adequate coverage.
-ct_allowlist = {'334 Microglia NN', '327 Oligo NN', '323 Ependymal NN',
-                '333 Endo NN', '119 SI-MA-LPO-LHA Skor1 Glut'}
-
-lipid = gsea.filter(pl.col('pathway').is_in(ordered_pathways))
-ct_counts = (lipid.group_by('cell_type')
-                  .agg(pl.len().alias('n'))
-                  .filter(pl.col('n') >= 2)
-                  .sort('n', descending=True))
-keep_cts = set(ct_counts['cell_type'].to_list()) | ct_allowlist
-ct_counts = (gsea.filter(pl.col('pathway').is_in(ordered_pathways) &
-                         pl.col('cell_type').is_in(keep_cts))
-             .group_by('cell_type').agg(pl.len().alias('n')))
-missing = keep_cts - set(ct_counts['cell_type'].to_list())
-if missing:
-    ct_counts = pl.concat([
-        ct_counts,
-        pl.DataFrame({'cell_type': sorted(missing),
-                      'n': [0] * len(missing)},
-                     schema={'cell_type': pl.Utf8, 'n': pl.UInt32})])
-lipid = lipid.filter(pl.col('cell_type').is_in(keep_cts))
-lipid_all = gsea_all.filter(pl.col('pathway').is_in(ordered_pathways) &
-                            pl.col('cell_type').is_in(keep_cts))
-print(f'Panel A: sig hits={lipid.height} all hits={lipid_all.height} '
-      f'cell_types={len(keep_cts)}')
-
-CORTICAL_GABA = ['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Sncg', 'Pax6']
-
-def assign_class(ct):
-    if 'NN' in ct:   return 'Non-neuronal'
-    if 'Glut' in ct: return 'Glutamatergic'
-    if any(t in ct for t in CORTICAL_GABA):
-        return 'GABAergic\nCortex'
-    return 'GABAergic\nSubcortex'
-
-# Class order follows ABCA numeric prefix: Glut (001-119) -> GABA (40-90)
-# -> Non-neuronal (300+).
-CLASS_ORDER = ['Glutamatergic',
-               'GABAergic\nCortex', 'GABAergic\nSubcortex',
-               'Non-neuronal']
-
-ct_table = (ct_counts
-    .with_columns(
-        pl.col('cell_type').map_elements(assign_class,
-                                          return_dtype=pl.Utf8).alias('class'),
-        pl.col('cell_type').map_elements(numeric_prefix,
-                                          return_dtype=pl.Int32).alias('num'))
-    .with_columns(
-        pl.col('class').replace_strict(
-            {c: i for i, c in enumerate(CLASS_ORDER)}).alias('class_rank'))
-    .sort(['class_rank', 'num']))
-ordered_cts = ct_table['cell_type'].to_list()
-ct_class = dict(zip(ct_table['cell_type'].to_list(),
-                    ct_table['class'].to_list()))
-
-# =============================================================================
-# Panel A matrices
-# =============================================================================
-n_rows, n_cols = len(ordered_pathways), len(ordered_cts)
-nlp_mat = np.full((n_rows, n_cols), np.nan)
-nes_mat = np.full((n_rows, n_cols), np.nan)
-d_mat = np.zeros((n_rows, n_cols), dtype=int)
-sig_mat_a = np.zeros((n_rows, n_cols), dtype=bool)
-
-ri = {p: i for i, p in enumerate(ordered_pathways)}
-ci = {c: j for j, c in enumerate(ordered_cts)}
-for r in lipid_all.iter_rows(named=True):
-    i, j = ri[r['pathway']], ci[r['cell_type']]
-    if np.isnan(nlp_mat[i, j]) or r['nlp'] > nlp_mat[i, j]:
-        nlp_mat[i, j] = r['nlp']
-        d_mat[i, j] = r['D']
-        sig_mat_a[i, j] = r['emp_p'] <= 0.05
-
-nes_agg = (real_nes
-    .filter(pl.col('pathway').is_in(ordered_pathways) &
-            pl.col('cell_type').is_in(keep_cts))
-    .group_by(['pathway', 'cell_type'])
-    .agg(pl.col('NES').median().alias('NES_med')))
-nes_lookup = {(r['pathway'], r['cell_type']): r['NES_med']
-              for r in nes_agg.iter_rows(named=True)}
-for i, p in enumerate(ordered_pathways):
-    for j, ct in enumerate(ordered_cts):
-        if not np.isnan(nlp_mat[i, j]):
-            v = nes_lookup.get((p, ct))
-            if v is not None:
-                nes_mat[i, j] = v
-print(f'Panel A occupied: {int(np.sum(~np.isnan(nlp_mat)))}/{n_rows * n_cols}; '
-      f'sig: {int(sig_mat_a.sum())}; D=3: {int((d_mat == 3).sum())}')
-
-class_spans = spans([ct_class[c] for c in ordered_cts])
-band_spans = spans([pathway_band[p] for p in ordered_pathways])
-
-# =============================================================================
-# Panel B: curated gene bands (DE dotplot)
-# =============================================================================
 GENE_BANDS = [
     ('Membrane lipid', [
         'Lpin1', 'Tecr', 'Agpat4', 'Dgat1', 'Pisd',
@@ -226,8 +69,6 @@ GENE_BANDS = [
     ('Fatty acid catabolism', [
         'Cpt1a', 'Ivd', 'Echs1', 'Acaa2', 'Decr1', 'Acox1', 'Hacl1',
     ]),
-    # DOWN sub-arm (apolipoproteins + mevalonate + LDLR brake) on top,
-    # UP sub-arm (uptake + raft + efflux + lipase + TF + BBB) below.
     ('Cholesterol & carriers', [
         'Apoe', 'Clu', 'Fabp7', 'Hmgcs1', 'Hmgcr', 'Idi1', 'Sqle', 'Pcsk9',
         'Sort1', 'Sorl1', 'Cd81', 'Abca1', 'Lpl', 'Srebf1', 'Mfsd2a',
@@ -236,89 +77,33 @@ GENE_BANDS = [
 ordered_genes = [g for _, gs in GENE_BANDS for g in gs]
 gene_band = {g: b for b, gs in GENE_BANDS for g in gs}
 
-de_sr_all = (pl.read_csv(f'{working_dir}/output/de/sumrank_results.csv')
-    .filter((pl.col('contrast') == 'PREG_vs_CTRL') &
-            (pl.col('D') >= 2) &
-            (pl.col('ref_pct_detected') >= 5.0))
-    .with_columns(
-        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
-            .then(pl.lit('up')).otherwise(pl.lit('down')).alias('direction'),
-        pl.max_horizontal(pl.col('nlp_up'), pl.col('nlp_down')).alias('nlp'),
-        pl.when(pl.col('nlp_up') >= pl.col('nlp_down'))
-            .then(pl.col('emp_p_up')).otherwise(pl.col('emp_p_down'))
-            .alias('emp_p')))
-de_sr = de_sr_all.filter(pl.col('emp_p') <= 0.05)
-de_sr_panel = de_sr.filter(
-    pl.col('cell_type').is_in(keep_cts) &
-    pl.col('gene').is_in(ordered_genes))
-de_sr_all_panel = de_sr_all.filter(
-    pl.col('cell_type').is_in(keep_cts) &
-    pl.col('gene').is_in(ordered_genes))
-d_lookup_b = {(r['gene'], r['cell_type']): r['D']
-              for r in de_sr_all_panel.iter_rows(named=True)}
-# Cards reuse the same D>=2 & 5% ref_pct filter as Panel B; pull D for any
-# testable (gene, ct) so forced-context cells still show a meta diamond even
-# when not significant (matches XX_vascular_figure.py).
-d_lookup_card = {(r['gene'], r['cell_type']): r['D']
-                 for r in de_sr_all.iter_rows(named=True)}
-print(f'Panel B curated genes: {len(ordered_genes)} across '
-      f'{len(GENE_BANDS)} bands')
+ct_allowlist = {'334 Microglia NN', '327 Oligo NN', '323 Ependymal NN',
+                '333 Endo NN', '119 SI-MA-LPO-LHA Skor1 Glut'}
+CORTICAL_GABA = ['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Sncg', 'Pax6']
 
-de_pp = (pl.read_csv(f'{working_dir}/output/de/de_results.csv')
-    .filter(pl.col('contrast') == 'PREG_vs_CTRL')
-    .select(['gene', 'cell_type', 'dataset', 'logFC', 'SE', 'LCI', 'UCI',
-             'AveExpr', 'PValue', 'FDR', 'ref_pct_detected',
-             'n_cells_treat', 'n_cells_base']))
-de_pp_panel = (de_pp
-    .filter(pl.col('cell_type').is_in(keep_cts) &
-            pl.col('gene').is_in(ordered_genes) &
-            pl.col('logFC').is_not_null())
-    .group_by(['gene', 'cell_type'])
-    .agg(pl.col('logFC').median().alias('meta_lfc'),
-         pl.len().alias('n_pf')))
-meta_lookup = {(r['gene'], r['cell_type']):
-               (r['meta_lfc'], r['n_pf'])
-               for r in de_pp_panel.iter_rows(named=True)}
-sig_set = {(r['gene'], r['cell_type'])
-           for r in de_sr_panel.iter_rows(named=True)}
 
-n_g = len(ordered_genes)
-lfc_mat = np.full((n_g, n_cols), np.nan)
-ndet_mat = np.zeros((n_g, n_cols), dtype=int)
-sig_mat_b = np.zeros((n_g, n_cols), dtype=bool)
-d_mat_b = np.zeros((n_g, n_cols), dtype=int)
-for i, g in enumerate(ordered_genes):
-    for j, ct in enumerate(ordered_cts):
-        lfc, n = meta_lookup.get((g, ct), (np.nan, 0))
-        lfc_mat[i, j] = lfc
-        ndet_mat[i, j] = n
-        sig_mat_b[i, j] = (g, ct) in sig_set
-        d_mat_b[i, j] = d_lookup_b.get((g, ct), 0)
-gene_band_spans = spans([gene_band[g] for g in ordered_genes])
-print(f'Panel B genes={n_g} D>=2 cells={int((d_mat_b >= 2).sum())} '
-      f'sig_cells={int(sig_mat_b.sum())}')
+def assign_class(ct):
+    if 'NN' in ct: return 'Non-neuronal'
+    if 'Glut' in ct: return 'Glutamatergic'
+    if any(t in ct for t in CORTICAL_GABA): return 'GABAergic\nCortex'
+    return 'GABAergic\nSubcortex'
 
-# =============================================================================
-# Panel D: curated lipid LR chord data (LIANA)
-# =============================================================================
+
+CLASS_ORDER = ['Glutamatergic', 'GABAergic\nCortex', 'GABAergic\nSubcortex',
+               'Non-neuronal']
+
+CARD_GENES = ['Lpin1', 'Glb1', 'Ivd', 'Apoe', 'Hmgcr', 'Idi1', 'Mfsd2a']
+card_ctx = {'Apoe': ['326 OPC NN', '334 Microglia NN']}
+max_rows_map = {'Apoe': 5}
+
 CHORD_THEMES = ['Apoe', 'Pcsk9', 'Pltp', 'Reln']
-# Apoe pathway absorbs Lpl (both deliver lipoprotein remnants to LRP1).
-CHORD_THEME_LIGANDS = {
-    'Apoe':  ['Apoe', 'Lpl'],
-    'Pcsk9': ['Pcsk9'],
-    'Pltp':  ['Pltp'],
-    'Reln':  ['Reln'],
-}
-CHORD_THEME_TITLES = {
-    'Apoe':  'ApoE / Lpl pathway',
-    'Pcsk9': 'Pcsk9 pathway',
-    'Pltp':  'Pltp pathway',
-    'Reln':  'Reln pathway',
-}
-
+CHORD_THEME_LIGANDS = {'Apoe': ['Apoe', 'Lpl'], 'Pcsk9': ['Pcsk9'],
+                       'Pltp': ['Pltp'], 'Reln': ['Reln']}
+CHORD_THEME_TITLES = {'Apoe': 'ApoE / Lpl pathway', 'Pcsk9': 'Pcsk9 pathway',
+                      'Pltp': 'Pltp pathway', 'Reln': 'Reln pathway'}
 CANONICAL_LR_PAIRS = set()
-for _r in ['Lrp1', 'Lrp2', 'Lrp4', 'Lrp8', 'Vldlr', 'Ldlr',
-           'Sort1', 'Sorl1', 'Trem2', 'Abca1']:
+for _r in ['Lrp1', 'Lrp2', 'Lrp4', 'Lrp8', 'Vldlr', 'Ldlr', 'Sort1',
+           'Sorl1', 'Trem2', 'Abca1']:
     CANONICAL_LR_PAIRS.add(('Apoe', _r))
 CANONICAL_LR_PAIRS.add(('Lpl', 'Lrp1'))
 for _r in ['Lrp1', 'Lrp2']:
@@ -329,1073 +114,89 @@ CANONICAL_LR_PAIRS.add(('Reln', 'Lrp8'))
 for _r in ['Ldlr', 'Lrp1', 'Lrp8', 'Sort1', 'Vldlr', 'Cd81', 'Aplp2']:
     CANONICAL_LR_PAIRS.add(('Pcsk9', _r))
 CANONICAL_LR_PAIRS.add(('Pltp', 'Abca1'))
-for _L in ['Sphk1', 'Sphk2']:
-    for _R in ['S1pr1', 'S1pr2', 'S1pr3', 'S1pr4', 'S1pr5']:
-        CANONICAL_LR_PAIRS.add((_L, _R))
+for _l in ['Sphk1', 'Sphk2']:
+    for _r in ['S1pr1', 'S1pr2', 'S1pr3', 'S1pr4', 'S1pr5']:
+        CANONICAL_LR_PAIRS.add((_l, _r))
 for _r in ['Slc22a17', 'Lrp2']:
     CANONICAL_LR_PAIRS.add(('Lcn2', _r))
 CANONICAL_LR_PAIRS.add(('A2m', 'Lrp1'))
 
-_chord_ligs = list({p[0] for p in CANONICAL_LR_PAIRS})
-_chord_recs = list({p[1] for p in CANONICAL_LR_PAIRS})
+# =============================================================================
+# Data + matrices + chord
+# =============================================================================
+gsea_all, gsea, real_nes = fc.load_gsea(working_dir)
+de_sr_all, de_sr, de_pp = fc.load_de(working_dir)
+subclass_colors = fc.load_subclass_colors()
 
-_liana = (pl.scan_csv(f'{working_dir}/output/liana/inflow_diff.csv')
-    .filter(pl.col('contrast') == 'PREG_vs_CTRL')
-    .filter(pl.col('ligand_complex').is_in(_chord_ligs) &
-            pl.col('receptor_complex').is_in(_chord_recs))
-    .filter(pl.col('source').is_in(ordered_cts) &
-            pl.col('target').is_in(ordered_cts))
-    .collect())
-_liana = _liana.filter(
-    pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
-        lambda s: (s['ligand_complex'], s['receptor_complex'])
-                  in CANONICAL_LR_PAIRS,
-        return_dtype=pl.Boolean))
+ordered_cts, ct_class = fc.select_cell_types(
+    gsea, ordered_pathways, ct_allowlist, assign_class, CLASS_ORDER,
+    min_hits=2)
 
-_keys = ['source', 'target', 'ligand_complex', 'receptor_complex']
-_wide = (_liana.group_by(_keys + ['dataset'])
-        .agg(pl.col('lr_mean_diff').first())
-        .pivot(on='dataset', index=_keys, values='lr_mean_diff')
-        .rename({'slidetags': 'diff_st', 'xenium': 'diff_xn'}))
-
-_nonz = _liana.filter(pl.col('lr_mean_diff') != 0)
-_med_xn = float(_nonz.filter(pl.col('dataset') == 'xenium')['lr_mean_diff']
-                .abs().median())
-_med_st = float(_nonz.filter(pl.col('dataset') == 'slidetags')['lr_mean_diff']
-                .abs().median())
-
-# (a) cross-platform: both nonzero, same sign, magnitude >= per-platform median
-_xp = (_wide.filter(pl.col('diff_st').is_not_null()
-                    & pl.col('diff_xn').is_not_null()
-                    & (pl.col('diff_st') != 0)
-                    & (pl.col('diff_xn') != 0)
-                    & (pl.col('diff_st').sign() == pl.col('diff_xn').sign())
-                    & (pl.col('diff_st').abs() >= _med_st)
-                    & (pl.col('diff_xn').abs() >= _med_xn))
-      .with_columns(((pl.col('diff_st') + pl.col('diff_xn')) / 2)
-                    .alias('meta_diff'))
-      .select(['source', 'target', 'ligand_complex', 'receptor_complex',
-               'meta_diff']))
-
-# (b) slidetags-only pairs (e.g., Apoe-* missing from Xenium): top-10% |diff|
-_xp_pairs = (_wide.filter(pl.col('diff_st').is_not_null()
-                          & pl.col('diff_xn').is_not_null())
-             .select(['ligand_complex', 'receptor_complex']).unique())
-_xp_pair_set = {(r['ligand_complex'], r['receptor_complex'])
-                for r in _xp_pairs.iter_rows(named=True)}
-_st_only_pairs = CANONICAL_LR_PAIRS - _xp_pair_set
-
-_st = (_liana.filter((pl.col('dataset') == 'slidetags')
-                      & (pl.col('lr_mean_diff') != 0))
-       .filter(pl.struct(['ligand_complex', 'receptor_complex']).map_elements(
-           lambda s: (s['ligand_complex'], s['receptor_complex'])
-                     in _st_only_pairs,
-           return_dtype=pl.Boolean)))
-_st_thr = float(_st['lr_mean_diff'].abs().quantile(0.90))
-_st = (_st.filter(pl.col('lr_mean_diff').abs() >= _st_thr)
-       .rename({'lr_mean_diff': 'meta_diff'})
-       .select(['source', 'target', 'ligand_complex', 'receptor_complex',
-                'meta_diff']))
-
-chord_edges = pl.concat([_xp, _st]).with_columns(
-    (pl.col('source') == pl.col('target')).alias('is_self'))
-print(f'Chord curated edges: {chord_edges.height} '
-      f'(UP={chord_edges.filter(pl.col("meta_diff") > 0).height}, '
-      f'DOWN={chord_edges.filter(pl.col("meta_diff") < 0).height})')
-
-# Drop self-edges (autocrine; clutters chord arcs)
-chord_edges_intercell = chord_edges.filter(~pl.col('is_self'))
-
-def theme_chord_edges(theme):
-    return (chord_edges_intercell
-            .filter(pl.col('ligand_complex')
-                    .is_in(CHORD_THEME_LIGANDS[theme]))
-            .group_by(['source', 'target'])
-            .agg(pl.col('meta_diff').sum().alias('signed_sum'),
-                 pl.col('meta_diff').abs().sum().alias('mag'),
-                 pl.len().alias('n_lr')))
-
-# ABCA subclass colors
-_cj = pd.read_csv('/home/karbabi/single-cell/ABC/metadata/cells_joined.csv',
-                  usecols=['subclass', 'subclass_color']).drop_duplicates()
-SUBCLASS_COLORS = {k.replace('_', '/'): v for k, v in
-                   dict(zip(_cj['subclass'].str.replace('/', '_'),
-                            _cj['subclass_color'])).items()}
-SUBCLASS_COLORS['Unlabelled'] = '#d3d3d3'
-
-CHORD_CLASS_COLORS = {
-    'NN':   '#7570b3',
-    'Glut': '#d95f02',
-    'GABA': '#1b9e77',
-}
-CHORD_CLASS_ORDER = ['NN', 'Glut', 'GABA']
-CHORD_CLASS_LABELS = {'NN': 'Non-neuronal',
-                      'Glut': 'Glutamatergic',
-                      'GABA': 'GABAergic'}
-CHORD_COLOR_UP   = '#b2182b'
-CHORD_COLOR_DOWN = '#2166ac'
-
-def chord_class(ct):
-    if 'NN' in ct:   return 'NN'
-    if 'Glut' in ct: return 'Glut'
-    return 'GABA'
-
-def chord_num_label(ct):
-    m = re.match(r'^(\d+)', ct)
-    return m.group(1) if m else ct
-
-# Sectors grouped by class so chord arcs cluster within class.
-chord_cells_ordered = sorted(
-    ordered_cts,
-    key=lambda c: (CHORD_CLASS_ORDER.index(chord_class(c)),
-                   numeric_prefix(c)))
-# Legend uses pure ABCA numeric order.
-chord_cells_legend_ordered = sorted(ordered_cts, key=numeric_prefix)
+nlp_mat, nes_mat, d_mat, sig_mat_a = fc.gsea_matrices(
+    gsea_all, real_nes, ordered_pathways, ordered_cts)
+sp_coords, sp_expr, sp_in, pct = fc.load_spatial(
+    working_dir, CARD_GENES, ordered_genes, ordered_cts)
+lfc_mat, pct_mat, sig_mat_b, d_mat_b = fc.de_matrices(
+    de_sr, de_sr_all, de_pp, ordered_genes, ordered_cts, pct)
+cards, max_sp_n = fc.build_cards(
+    CARD_GENES, card_ctx, max_rows_map, de_sr, de_sr_all, de_pp,
+    ordered_cts, sp_in, sp_coords, sp_expr)
+chord_cell_set, chord_edges = fc.build_chord(
+    f'{working_dir}/output/liana/inflow_diff.csv',
+    CANONICAL_LR_PAIRS, CHORD_THEME_LIGANDS, k_neurons=10)
 
 # =============================================================================
-# Gene cards: load spatial + per-cell DE
+# Layout: chord grid (2x2) below Panel B
 # =============================================================================
-# Lpin1/Glb1/Ivd (per non-Cholesterol band) + Apoe/Hmgcr/Idi1 (Chol DOWN)
-# + Mfsd2a (Chol UP). Idi1 is the only D=3 gene -> 3 spatial plots.
-CARD_GENES = ['Lpin1', 'Glb1', 'Ivd', 'Apoe', 'Hmgcr', 'Idi1', 'Mfsd2a']
-PLATFORMS = ['slidetags', 'merfish', 'xenium']
-PLATFORM_COLORS = {
-    'slidetags': '#1C6CC6',
-    'merfish':   '#E8A628',
-    'xenium':    '#2F7F2E',
-}
-D_COLORS = {2: '#888888', 3: '#000000'}
-PLATFORM_LABELS = {'xenium': 'Xenium', 'merfish': 'MERFISH',
-                   'slidetags': 'Slide-tags'}
-
-sp_coords = {}
-sp_expr = {}
-sp_in = {}
-pct_nonzero_lists = {(g, ct): [] for g in ordered_genes for ct in ordered_cts}
-for ds in PLATFORMS:
-    a = sc.read_h5ad(
-        f'{working_dir}/output/{ds}/03_adata_query_{ds}.h5ad', backed='r')
-    var_names = (a.var['gene_symbol'].astype(str).to_list()
-                 if 'gene_symbol' in a.var.columns else list(a.var_names))
-    keep_mask = (a.obs['sample'].values != 'CTRL_3') \
-        if ds == 'xenium' else np.ones(a.n_obs, dtype=bool)
-
-    obs_subset = a.obs.loc[keep_mask, ['x_ffd', 'y_ffd',
-                                       'condition', 'subclass']]
-    xv = obs_subset['x_ffd'].values.astype(float)
-    yv = obs_subset['y_ffd'].values.astype(float)
-    fov_half = max(np.ptp(xv), np.ptp(yv)) / 2 * 1.05
-    cell_types_kept = obs_subset['subclass'].values.astype(str)
-    sp_coords[ds] = dict(
-        x=xv, y=yv,
-        cond=obs_subset['condition'].values.astype(str),
-        cell_type=cell_types_kept,
-        midline=(xv.min() + xv.max()) / 2,
-        fov_cx=(xv.min() + xv.max()) / 2,
-        fov_cy=(yv.min() + yv.max()) / 2,
-        fov_half=fov_half)
-    ct_masks = {ct: (cell_types_kept == ct) for ct in ordered_cts}
-
-    sp_expr[ds] = {}
-    sp_in[ds] = {}
-    name_to_idx = {n: i for i, n in enumerate(var_names)}
-    print(f'  {ds}: computing per-cell totals (chunked)...')
-    n_obs = a.n_obs
-    totals = np.zeros(n_obs, dtype=np.float64)
-    chunk = 20000
-    for start in range(0, n_obs, chunk):
-        end = min(start + chunk, n_obs)
-        block = a.X[start:end]
-        if hasattr(block, 'toarray'):
-            block = block.toarray()
-        totals[start:end] = np.asarray(block).sum(axis=1)
-    totals = np.where(totals > 0, totals, 1.0)
-    for g in CARD_GENES:
-        if g in name_to_idx:
-            col = a.X[:, name_to_idx[g]]
-            arr = np.asarray(col.toarray()).flatten() \
-                if hasattr(col, 'toarray') else np.asarray(col).flatten()
-            norm = arr / totals * 1e4
-            sp_expr[ds][g] = np.log2(norm[keep_mask] + 1)
-            sp_in[ds][g] = True
-        else:
-            sp_in[ds][g] = False
-
-    for g in ordered_genes:
-        if g not in name_to_idx:
-            continue
-        col = a.X[:, name_to_idx[g]]
-        arr = np.asarray(col.toarray()).flatten() \
-            if hasattr(col, 'toarray') else np.asarray(col).flatten()
-        arr = arr[keep_mask]
-        nonzero = arr > 0
-        for ct, ct_mask in ct_masks.items():
-            n_total = int(ct_mask.sum())
-            if n_total == 0:
-                continue
-            pct = float(nonzero[ct_mask].sum()) / n_total * 100.0
-            pct_nonzero_lists[(g, ct)].append(pct)
-
-    a.file.close()
-    del a
-    print(f'  {ds}: loaded coords ({sum(keep_mask):,} cells) '
-          f'+ genes {[g for g in CARD_GENES if sp_in[ds][g]]}')
-
-pct_mat = np.full((n_g, n_cols), np.nan)
-for i, g in enumerate(ordered_genes):
-    for j, ct in enumerate(ordered_cts):
-        pcts = pct_nonzero_lists.get((g, ct), [])
-        if pcts:
-            pct_mat[i, j] = float(np.median(pcts))
-
-de_pp_full = de_pp
-
-def short_ct(ct):
-    parts = ct.split(' ')
-    if len(parts) <= 3: return ct
-    return f'{parts[0]} {parts[1]} {parts[-1]}'
-
-def class_rank(ct):
-    if 'Glut' in ct: return 0
-    if 'NN' in ct:   return 2
-    return 1
-
-def pctl_range(arr, lo=5, hi=95):
-    if len(arr) == 0: return 0.0, 1.0
-    return float(np.percentile(arr, lo)), float(np.percentile(arr, hi))
-
-def stars_for(p):
-    if p < 0.001: return '***'
-    if p < 0.01:  return '**'
-    if p < 0.05:  return '*'
-    return ''
-
-def build_card(gene, ctx_cells=()):
-    sr_hits = de_sr.filter((pl.col('gene') == gene) &
-                           pl.col('cell_type').is_in(keep_cts))
-    cts_in = list(sr_hits['cell_type'].to_list())
-    for ct in ctx_cells:
-        if ct in keep_cts and ct not in cts_in:
-            cts_in.append(ct)
-
-    rows = []
-    for ct in cts_in:
-        plat_d = {p: dict(lfc=np.nan, lci=np.nan, uci=np.nan)
-                  for p in PLATFORMS}
-        ppr = de_pp_full.filter(
-            (pl.col('gene') == gene) & (pl.col('cell_type') == ct))
-        for r in ppr.iter_rows(named=True):
-            if r['dataset'] in plat_d:
-                plat_d[r['dataset']] = dict(
-                    lfc=r['logFC'], lci=r['LCI'], uci=r['UCI'])
-        valid = [plat_d[p]['lfc'] for p in PLATFORMS
-                 if not np.isnan(plat_d[p]['lfc'])]
-        meta_lfc = float(np.median(valid)) if valid else np.nan
-
-        srr = sr_hits.filter(pl.col('cell_type') == ct)
-        if srr.height:
-            sr = srr.to_dicts()[0]
-            ep, D = sr['emp_p'], int(sr['D'])
-            stars = stars_for(ep)
-        else:
-            # Forced context cell: pull D from the unfiltered sumrank so a
-            # D>=2 testable but non-sig row still shows the meta diamond.
-            ep = np.nan
-            D = int(d_lookup_card.get((gene, ct), 0))
-            stars = ''
-        rows.append(dict(cell_type=ct, plat=plat_d, D=D,
-                         meta_lfc=meta_lfc, emp_p=ep, stars=stars))
-
-    rows.sort(key=lambda r: (class_rank(r['cell_type']),
-                             numeric_prefix(r['cell_type'])))
-    cts = [r['cell_type'] for r in rows]
-
-    # Include every platform that has the gene (D=2 -> 2 plots, D=3 -> 3).
-    sp_pair = [p for p in ('xenium', 'merfish', 'slidetags')
-               if sp_in[p].get(gene, False)]
-
-    sp_data, sp_vranges = [], []
-    ct_set = set(cts)
-    for ds in sp_pair:
-        c = sp_coords[ds]
-        expr = sp_expr[ds][gene]
-        ct_mask = np.isin(c['cell_type'], list(ct_set))
-        cond_mask = ((c['cond'] == 'CTRL') & (c['x'] < c['midline'])) | \
-                    ((c['cond'] == 'PREG') & (c['x'] >= c['midline']))
-        mask = ct_mask & cond_mask
-        sd = dict(x=c['x'][mask], y=c['y'][mask], expr=expr[mask],
-                  midline=c['midline'], fov_cx=c['fov_cx'],
-                  fov_cy=c['fov_cy'], fov_half=c['fov_half'])
-        sp_data.append(sd)
-        nz = sd['expr'][sd['expr'] > 0]
-        sp_vranges.append(pctl_range(nz))
-
-    return dict(cell_types=cts, rows=rows, sp_pair=sp_pair,
-                sp_data=sp_data, sp_vranges=sp_vranges)
-
-# Apoe gets OPC + Microglia (IHC anchors) as forced context.
-card_ctx = {g: [] for g in CARD_GENES}
-card_ctx['Apoe'] = ['326 OPC NN', '334 Microglia NN']
-cards = {g: build_card(g, card_ctx[g]) for g in CARD_GENES}
-MAX_SP_N = max(len(c['sp_pair']) for c in cards.values())
-
-# Apoe has 13 raw hits; with 7 cards the card height fits ~5 rows.
-APOE_MAX_ROWS = 5
-if len(cards['Apoe']['rows']) > APOE_MAX_ROWS:
-    rows = cards['Apoe']['rows']
-    forced = set(card_ctx['Apoe'])
-    keep = [r for r in rows if r['cell_type'] in forced]
-    others = [r for r in rows if r['cell_type'] not in forced]
-    others.sort(key=lambda r: r['emp_p'] if not np.isnan(r['emp_p']) else 9)
-    keep += others[:APOE_MAX_ROWS - len(keep)]
-    keep.sort(key=lambda r: (class_rank(r['cell_type']),
-                             numeric_prefix(r['cell_type'])))
-    cards['Apoe']['rows'] = keep
-    cards['Apoe']['cell_types'] = [r['cell_type'] for r in keep]
-
-for g, c in cards.items():
-    print(f'card {g}: {len(c["cell_types"])} cells, sp_pair={c["sp_pair"]}')
-
-# =============================================================================
-# Figure layout
-# =============================================================================
-NES_VMAX = quant_vmax(nes_mat)
-LFC_VMAX = quant_vmax(lfc_mat[d_mat_b >= 2])
-print(f'cmap vmax (10/90 quantile): NES={NES_VMAX:.2f}  '
-      f'logFC={LFC_VMAX:.2f}')
-
-NLP_MIN, NLP_MAX = 1.30, 5.0
-SIZE_MIN, SIZE_MAX = 16.0, 80.0
-SIZE_MAX_A = 140.0
-SIG_DOT_SIZE = 4.0
-norm_nes = mpl.colors.Normalize(vmin=-NES_VMAX, vmax=NES_VMAX)
-norm_lfc = mpl.colors.Normalize(vmin=-LFC_VMAX, vmax=LFC_VMAX)
-
-def nlp_to_size(x):
-    x = np.clip(x, NLP_MIN, NLP_MAX)
-    f = (x - NLP_MIN) / (NLP_MAX - NLP_MIN)
-    return SIZE_MIN + f * (SIZE_MAX_A - SIZE_MIN)
-
-def pct_to_size(p):
-    p = float(np.clip(p, 0, 100))
-    return SIZE_MIN + (p / 100.0) * (SIZE_MAX - SIZE_MIN)
-
-# Main panel column
-LABEL_MARGIN_IN = 1.55
-LEFT_FIG_PAD_IN = 1.15
-ax_left_in = LEFT_FIG_PAD_IN + LABEL_MARGIN_IN
-ax_w_in = 0.20 * n_cols
-
-leg_left_in = 0.45
-leg_w_in = 0.85
-
-# Uniform colored-box (swatch) size shared by all legends, in inches.
-SWATCH_W_IN = 0.09
-SWATCH_H_IN = 0.07
-
-PATH_PITCH = 0.21
-GENE_PITCH = 0.155
-ax_h_a_in = PATH_PITCH * n_rows
-ax_h_b_in = GENE_PITCH * n_g
-gap_in = 0.50           # holds Panel A's rotated x-tick labels + title
-chord_gap_in = 1.00
-
-# Gene-card column
-ANNO_W_IN, ANNO_GAP_IN = 0.07, 0.03
-N_CARDS = len(CARD_GENES)
-CARD_GAP_IN = 0.10
-CARD_TITLE_H_IN = 0.30
-ab_vspan_in = ax_h_b_in + gap_in + ax_h_a_in
-content_h_in = (ab_vspan_in
-                - (N_CARDS - 1) * (CARD_TITLE_H_IN + CARD_GAP_IN)) / N_CARDS
-SP_W_IN = content_h_in
-SP_GAP_IN = 0.05
-SP_FOREST_GAP_IN = 0.10
-FOREST_W_IN = 0.75
-FOREST_LABEL_GAP_IN = 0.05
-LABEL_W_IN = 0.95
-CARD_W_IN = (SP_W_IN + SP_GAP_IN + SP_W_IN + SP_FOREST_GAP_IN
-             + FOREST_W_IN + FOREST_LABEL_GAP_IN + LABEL_W_IN)
-# Widest card (D=3) extends right by (SP_W + SP_GAP) per extra platform.
-CARD_W_MAX_IN = CARD_W_IN + max(0, MAX_SP_N - 2) * (SP_W_IN + SP_GAP_IN)
-CARD_FOREST_ROW_H = 0.13
-CARD_FOREST_MIN_H = 0.42
-cards_left_in = ax_left_in + ax_w_in + ANNO_GAP_IN + ANNO_W_IN + 0.35
-
-top_margin_in = 0.85
-bot_margin_in = 2.15
-card_total_h_in = content_h_in + CARD_TITLE_H_IN
-cards_h_in = (N_CARDS * card_total_h_in
-              + (N_CARDS - 1) * CARD_GAP_IN)
-
-# Forest legend column (right of cards)
-FLEG_GAP_IN = 0.12
-FLEG_EXTRA_RIGHT_IN = 0.20
-FLEG_COL_W_IN = 1.10
-
-# Chord row (Panel D)
-CHORD_PANEL_GAP_IN = 0.45
-CHORD_ROW_GAP_IN = 0.30
-CHORD_TITLE_H_IN = 0.40
-chord_panel_w_in = (ax_w_in - CHORD_PANEL_GAP_IN) / 2
-chord_panel_h_in = chord_panel_w_in * 0.85
-CHORD_ROW_H_IN = (2 * chord_panel_h_in + 2 * CHORD_TITLE_H_IN
-                  + CHORD_ROW_GAP_IN + 0.20)
-
-fig_h = (top_margin_in + ax_h_a_in + gap_in + ax_h_b_in + chord_gap_in
-         + CHORD_ROW_H_IN + bot_margin_in)
-fig_w = (cards_left_in + CARD_W_MAX_IN + FLEG_GAP_IN + FLEG_EXTRA_RIGHT_IN
-         + FLEG_COL_W_IN + 0.10)
-
-chord_row_bot_in = bot_margin_in
-chord_row_top_in = chord_row_bot_in + CHORD_ROW_H_IN
-ax_b_bot_in = chord_row_top_in + chord_gap_in
-ax_a_bot_in = ax_b_bot_in + ax_h_b_in + gap_in
-ax_a_top_in = ax_a_bot_in + ax_h_a_in
-
-fig = plt.figure(figsize=(fig_w, fig_h))
-ax_a = fig.add_axes([ax_left_in / fig_w, ax_a_bot_in / fig_h,
-                     ax_w_in / fig_w, ax_h_a_in / fig_h])
-ax_b = fig.add_axes([ax_left_in / fig_w, ax_b_bot_in / fig_h,
-                     ax_w_in / fig_w, ax_h_b_in / fig_h])
-
-# =============================================================================
-# Panel A: GSEA dotplot
-# =============================================================================
-xs, ys, sizes, colors, edges, lws = [], [], [], [], [], []
-sig_xs_a, sig_ys_a = [], []
-for i in range(n_rows):
-    for j in range(n_cols):
-        if np.isnan(nlp_mat[i, j]):
-            continue
-        xs.append(j); ys.append(i)
-        sizes.append(nlp_to_size(nlp_mat[i, j]))
-        nes = nes_mat[i, j]
-        nes_clip = np.clip(nes, -NES_VMAX, NES_VMAX) \
-            if not np.isnan(nes) else np.nan
-        colors.append(cmap(norm_nes(nes_clip))
-                      if not np.isnan(nes) else '#999999')
-        edges.append('#555555' if d_mat[i, j] == 3 else 'none')
-        lws.append(0.8 if d_mat[i, j] == 3 else 0.0)
-        if sig_mat_a[i, j]:
-            sig_xs_a.append(j); sig_ys_a.append(i)
-ax_a.scatter(xs, ys, s=sizes, c=colors, edgecolors=edges,
-             linewidths=lws, zorder=3)
-if sig_xs_a:
-    ax_a.scatter(sig_xs_a, sig_ys_a, s=SIG_DOT_SIZE, c='white',
-                 edgecolors='none', linewidths=0, zorder=4)
-
-for k in range(1, n_cols):
-    ax_a.axvline(k - 0.5, color='#F2F2F2', lw=0.25, zorder=1)
-for k in range(1, n_rows):
-    ax_a.axhline(k - 0.5, color='#F2F2F2', lw=0.25, zorder=1)
-for _, _, hi in class_spans[:-1]:
-    ax_a.axvline(hi + 0.5, color='#BBBBBB', lw=0.4, zorder=2)
-for _, _, hi in band_spans[:-1]:
-    ax_a.axhline(hi + 0.5, color='#BBBBBB', lw=0.4, zorder=2)
-
-ax_a.set_xlim(-0.5, n_cols - 0.5)
-ax_a.set_ylim(n_rows - 0.5, -0.5)
-prefix_labels = [f'{numeric_prefix(ct):03d}' for ct in ordered_cts]
-# x-ticks/labels live on the subclass column annotation strip below ax_a
-ax_a.tick_params(axis='x', bottom=False, labelbottom=False)
-ax_a.set_yticks(range(n_rows))
-ax_a.set_yticklabels([PATHWAY_LABELS.get(p, p) for p in ordered_pathways],
-                     fontsize=7.5)
-ax_a.tick_params(axis='y', length=2, pad=1)
-ax_a.set_ylabel('GSEA pathways (meta)', fontsize=9.0, labelpad=8)
-for sp in ('top', 'right', 'left', 'bottom'):
-    ax_a.spines[sp].set_visible(True)
-    ax_a.spines[sp].set_color('black')
-    ax_a.spines[sp].set_linewidth(0.9)
-
-trans_x_a = ax_a.get_xaxis_transform()
-for cls, lo, hi in class_spans:
-    ax_a.text((lo + hi) / 2, 1.04, cls,
-              ha='center', va='bottom', fontsize=7.5,
-              color='black', transform=trans_x_a, clip_on=False,
-              linespacing=1.05)
-
-# =============================================================================
-# Panel B: DE dotplot (color = signed logFC, size = % nonzero)
-# =============================================================================
-ax_b.set_facecolor('white')
-xs_b, ys_b, sizes_b, colors_b, edges_b, lws_b = [], [], [], [], [], []
-sig_xs, sig_ys = [], []
-for i in range(n_g):
-    for j in range(n_cols):
-        if d_mat_b[i, j] < 2:
-            continue
-        pct = pct_mat[i, j]
-        if np.isnan(pct):
-            continue
-        lfc = lfc_mat[i, j]
-        lfc_clip = np.clip(lfc, -LFC_VMAX, LFC_VMAX)
-        xs_b.append(j); ys_b.append(i)
-        sizes_b.append(pct_to_size(pct))
-        colors_b.append(cmap(norm_lfc(lfc_clip))
-                        if not np.isnan(lfc) else '#CCCCCC')
-        edges_b.append('#555555' if d_mat_b[i, j] == 3 else 'none')
-        lws_b.append(0.8 if d_mat_b[i, j] == 3 else 0.0)
-        if sig_mat_b[i, j]:
-            sig_xs.append(j); sig_ys.append(i)
-ax_b.scatter(xs_b, ys_b, s=sizes_b, c=colors_b,
-             edgecolors=edges_b, linewidths=lws_b, zorder=3)
-if sig_xs:
-    ax_b.scatter(sig_xs, sig_ys, s=SIG_DOT_SIZE, c='white',
-                 edgecolors='none', linewidths=0, zorder=4)
-
-for k in range(1, n_cols):
-    ax_b.axvline(k - 0.5, color='#F2F2F2', lw=0.25, zorder=1)
-for k in range(1, n_g):
-    ax_b.axhline(k - 0.5, color='#F2F2F2', lw=0.25, zorder=1)
-for _, _, hi in class_spans[:-1]:
-    ax_b.axvline(hi + 0.5, color='#BBBBBB', lw=0.4, zorder=2)
-for _, _, hi in gene_band_spans[:-1]:
-    ax_b.axhline(hi + 0.5, color='#BBBBBB', lw=0.4, zorder=2)
-
-ax_b.set_xlim(-0.5, n_cols - 0.5)
-ax_b.set_ylim(n_g - 0.5, -0.5)
-# Panel B: x-ticks/labels moved to col-anno strip below
-ax_b.tick_params(axis='x', bottom=False, labelbottom=False)
-ax_b.set_yticks(range(n_g))
-ax_b.set_yticklabels(ordered_genes, fontsize=7.5, fontstyle='italic')
-ax_b.tick_params(axis='y', length=2, pad=1)
-ax_b.set_ylabel('DE genes (meta)', fontsize=9.0, labelpad=8)
-for sp in ('top', 'right', 'left', 'bottom'):
-    ax_b.spines[sp].set_visible(True)
-    ax_b.spines[sp].set_color('black')
-    ax_b.spines[sp].set_linewidth(0.9)
-
-# =============================================================================
-# Column annotation strips (subclass colors) below A and B; x-ticks emanate
-# from the strip bottom edge. Strip height matches band-anno thickness.
-# =============================================================================
-COL_ANNO_H_IN = ANNO_W_IN
-COL_ANNO_GAP_IN = 0.02
-
-def _draw_col_anno(panel_bot_in, ticklabels, ticklabel_fs=7.5):
-    bot = panel_bot_in - COL_ANNO_GAP_IN - COL_ANNO_H_IN
-    ax = fig.add_axes([ax_left_in / fig_w, bot / fig_h,
-                       ax_w_in / fig_w, COL_ANNO_H_IN / fig_h])
-    ax.set_xlim(-0.5, n_cols - 0.5)
-    ax.set_ylim(0, 1)
-    for j, ct in enumerate(ordered_cts):
-        ax.add_patch(plt.Rectangle(
-            (j - 0.5, 0), 1, 1,
-            facecolor=SUBCLASS_COLORS.get(ct, '#d3d3d3'),
-            edgecolor='none'))
-    ax.set_yticks([])
-    ax.set_xticks(range(n_cols))
-    ax.set_xticklabels(ticklabels, rotation=45, ha='right',
-                       fontsize=ticklabel_fs)
-    ax.tick_params(axis='x', length=3, pad=2, direction='out',
-                   bottom=True, top=False,
-                   labelbottom=True, labeltop=False)
-    ax.tick_params(axis='y', left=False, right=False,
-                   labelleft=False, labelright=False)
-    for s in ax.spines.values():
-        s.set_visible(False)
-    return ax
-
-ax_a_col = _draw_col_anno(ax_a_bot_in, prefix_labels)
-ax_b_col = _draw_col_anno(ax_b_bot_in, ordered_cts)
-
-# =============================================================================
-# Band-color annotation strips (right of A + B)
-# =============================================================================
-ANNO_X_IN = ax_left_in + ax_w_in + ANNO_GAP_IN
-
-ax_a_anno = fig.add_axes([ANNO_X_IN / fig_w, ax_a_bot_in / fig_h,
-                          ANNO_W_IN / fig_w, ax_h_a_in / fig_h])
-ax_a_anno.set_xlim(0, 1); ax_a_anno.set_ylim(n_rows - 0.5, -0.5)
-ax_a_anno.set_xticks([]); ax_a_anno.set_yticks([])
-for s in ax_a_anno.spines.values():
-    s.set_visible(False)
-for i, p in enumerate(ordered_pathways):
-    ax_a_anno.add_patch(plt.Rectangle(
-        (0, i - 0.5), 1, 1,
-        facecolor=BAND_COLORS[pathway_band[p]], edgecolor='none'))
-
-ax_b_anno = fig.add_axes([ANNO_X_IN / fig_w, ax_b_bot_in / fig_h,
-                          ANNO_W_IN / fig_w, ax_h_b_in / fig_h])
-ax_b_anno.set_xlim(0, 1); ax_b_anno.set_ylim(n_g - 0.5, -0.5)
-ax_b_anno.set_xticks([]); ax_b_anno.set_yticks([])
-for s in ax_b_anno.spines.values():
-    s.set_visible(False)
-for i, g in enumerate(ordered_genes):
-    ax_b_anno.add_patch(plt.Rectangle(
-        (0, i - 0.5), 1, 1,
-        facecolor=BAND_COLORS[gene_band[g]], edgecolor='none'))
-
-# =============================================================================
-# Dotplot legends: LEG_A (panel A) / LEG_B (panel B) / LEG_S (shared)
-# =============================================================================
-ax_b_top_in = ax_b_bot_in + ax_h_b_in
-CBAR_W_FIG = 0.005
-CBAR_TARGET_X_AXES = 0.95
-cbar_x_fig = ((leg_left_in + CBAR_TARGET_X_AXES * leg_w_in) / fig_w
-              - CBAR_W_FIG / 2)
-
-def _make_leg_axes(bot_in, h_in):
-    ax = fig.add_axes([leg_left_in / fig_w, bot_in / fig_h,
-                       leg_w_in / fig_w, h_in / fig_h], zorder=100)
-    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.set_xticks([]); ax.set_yticks([])
-    ax.set_facecolor('white')
-    ax.patch.set_facecolor('white')
-    ax.patch.set_alpha(1.0)
-    ax.patch.set_zorder(99)
-    for s in ax.spines.values():
-        s.set_visible(False)
-    return ax
-
-LEG_A_TOP_IN = ax_b_top_in
-LEG_A_H_IN = 8 * GENE_PITCH
-LEG_A_BOT_IN = LEG_A_TOP_IN - LEG_A_H_IN
-
-LEG_B_TOP_IN = LEG_A_BOT_IN - 1 * GENE_PITCH
-LEG_B_H_IN = 8 * GENE_PITCH
-LEG_B_BOT_IN = LEG_B_TOP_IN - LEG_B_H_IN
-
-LEG_S_TOP_IN = LEG_B_BOT_IN - 1 * GENE_PITCH
-LEG_S_H_IN = 8 * GENE_PITCH
-LEG_S_BOT_IN = LEG_S_TOP_IN - LEG_S_H_IN
-
-# LEG_A: -log10 emp p sizes + NES colorbar (GSEA)
-ax_leg_a = _make_leg_axes(LEG_A_BOT_IN, LEG_A_H_IN)
-ax_leg_a.text(1.0, 0.96, 'GSEA\n' + r'$-\log_{10}$ emp $p$',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-for k, lev in enumerate([1.5, 2.5, 4.0]):
-    y = 0.72 - k * 0.13
-    ax_leg_a.scatter([0.95], [y], s=nlp_to_size(lev),
-                     c=['#555555'], edgecolors='none')
-    ax_leg_a.text(0.85, y, f'{lev:.1f}',
-                  ha='right', va='center', fontsize=6.5)
-ax_leg_a.text(1.0, 0.30, 'GSEA\nNES (median)',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-cbar_ax_a = fig.add_axes([cbar_x_fig,
-                          LEG_A_BOT_IN / fig_h + LEG_A_H_IN / fig_h * 0.02,
-                          CBAR_W_FIG,
-                          LEG_A_H_IN / fig_h * 0.16],
-                         zorder=110)
-cb_a = fig.colorbar(mpl.cm.ScalarMappable(norm=norm_nes, cmap=cmap),
-                    cax=cbar_ax_a, orientation='vertical')
-cb_a.set_ticks([-NES_VMAX, 0, NES_VMAX])
-cb_a.ax.yaxis.tick_left()
-cb_a.ax.tick_params(labelsize=6.0, length=2, pad=1)
-cbar_ax_a.set_zorder(110)
-
-# LEG_B: logFC colorbar + Percent expressed sizes (DE)
-ax_leg_b = _make_leg_axes(LEG_B_BOT_IN, LEG_B_H_IN)
-ax_leg_b.text(1.0, 0.96, 'DE\nlogFC (median)',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-cbar_ax_b = fig.add_axes([cbar_x_fig,
-                          LEG_B_BOT_IN / fig_h + LEG_B_H_IN / fig_h * 0.60,
-                          CBAR_W_FIG,
-                          LEG_B_H_IN / fig_h * 0.16],
-                         zorder=110)
-cb_b = fig.colorbar(mpl.cm.ScalarMappable(norm=norm_lfc, cmap=cmap),
-                    cax=cbar_ax_b, orientation='vertical')
-cb_b.set_ticks([-LFC_VMAX, 0, LFC_VMAX])
-cb_b.ax.yaxis.tick_left()
-cb_b.ax.tick_params(labelsize=6.0, length=2, pad=1)
-cbar_ax_b.set_zorder(110)
-
-ax_leg_b.text(1.0, 0.45, 'DE\nPercent expressed',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-for k, lev in enumerate([10, 50, 90]):
-    y = 0.24 - k * 0.10
-    ax_leg_b.scatter([0.95], [y], s=pct_to_size(lev),
-                     c=['#777777'], edgecolors='none')
-    ax_leg_b.text(0.85, y, f'{lev}%',
-                  ha='right', va='center', fontsize=6.5)
-
-# LEG_S: shared D + Significance (applies to both panels)
-ax_leg_s = _make_leg_axes(LEG_S_BOT_IN, LEG_S_H_IN)
-ax_leg_s.text(1.0, 0.95, 'DE/GSEA\nCross-platform',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-ax_leg_s.scatter([0.95], [0.74], s=50, c=['#bbbbbb'],
-                 edgecolors='#555555', linewidths=0.8)
-ax_leg_s.text(0.85, 0.74, 'D = 3', ha='right', va='center', fontsize=6.5)
-ax_leg_s.scatter([0.95], [0.60], s=50, c=['#bbbbbb'],
-                 edgecolors='none', linewidths=0)
-ax_leg_s.text(0.85, 0.60, 'D = 2', ha='right', va='center', fontsize=6.5)
-ax_leg_s.text(1.0, 0.40, 'DE/GSEA\nSignificance',
-              ha='right', va='top', fontsize=6.8, linespacing=1.0)
-_sig_demo_color = cmap(norm_lfc(LFC_VMAX * 0.7))
-ax_leg_s.scatter([0.95], [0.19], s=50, c=[_sig_demo_color],
-                 edgecolors='none', linewidths=0)
-ax_leg_s.scatter([0.95], [0.19], s=SIG_DOT_SIZE, c='white',
-                 edgecolors='none', linewidths=0)
-ax_leg_s.text(0.85, 0.19, r'emp $p \leq 0.05$',
-              ha='right', va='center', fontsize=6.5)
-
-# =============================================================================
-# Gene cards (right column)
-# =============================================================================
-LABEL_FS = 7.5
-AXIS_FS = 7.5
-TITLE_FS = 8.5
-JIT = 0.18
-
-def draw_forest(axf, gd, show_xlabel=False):
-    n = len(gd['rows'])
-    axf.set_ylim(n - 0.5, -0.5)
-    axf.axvline(0, color='grey', lw=0.4, zorder=1)
-    vals = []
-    for r in gd['rows']:
-        for p in PLATFORMS:
-            for k in ('lci', 'uci', 'lfc'):
-                v = r['plat'][p].get(k, np.nan)
-                if not np.isnan(v):
-                    vals.append(v)
-        if not np.isnan(r['meta_lfc']):
-            vals.append(r['meta_lfc'])
-    if vals:
-        lo = float(np.percentile(vals, 2))
-        hi = float(np.percentile(vals, 98))
-    else:
-        lo, hi = -1.0, 1.0
-    lo = min(lo, 0.0); hi = max(hi, 0.0)
-    if hi - lo < 0.4:
-        mid = (hi + lo) / 2
-        lo, hi = mid - 0.2, mid + 0.2
-    pad = (hi - lo) * 0.10
-    axf.set_xlim(lo - pad, hi + pad)
-
-    pos = {'slidetags': -JIT, 'merfish': 0, 'xenium': +JIT}
-    for i, r in enumerate(gd['rows']):
-        for p in PLATFORMS:
-            d = r['plat'][p]
-            lci, uci = d.get('lci', np.nan), d.get('uci', np.nan)
-            if np.isnan(lci) or np.isnan(uci):
-                continue
-            axf.hlines(i + pos[p], lci, uci,
-                       color=PLATFORM_COLORS[p], lw=0.9, zorder=3)
-        if not np.isnan(r['meta_lfc']) and r['D'] >= 2:
-            axf.plot(r['meta_lfc'], i, 'D',
-                     mfc=D_COLORS[r['D']], mec='black',
-                     mew=0.3, ms=3.0, zorder=5)
-    axf.set_yticks([])
-    axf.tick_params(axis='x', labelsize=AXIS_FS, length=1.5, pad=1)
-    if show_xlabel:
-        axf.set_xlabel('logFC', fontsize=AXIS_FS, labelpad=1)
-    for sp in axf.spines.values():
-        sp.set_linewidth(0.5)
-
-cards_top_in = ax_a_top_in + CARD_TITLE_H_IN
-for i, g in enumerate(CARD_GENES):
-    gd = cards[g]
-    card_top_in = cards_top_in - i * (card_total_h_in + CARD_GAP_IN)
-    title_bot_in = card_top_in - CARD_TITLE_H_IN
-    content_bot_in = title_bot_in - content_h_in
-
-    fig.text(cards_left_in / fig_w,
-             (card_top_in - 0.02) / fig_h, g,
-             ha='left', va='top', fontsize=TITLE_FS,
-             fontstyle='italic')
-
-    # Spatial maps (LEFT side of card). D=3 cards extend right; forest shifts.
-    n_sp = len(gd['sp_pair'])
-    sp_bot_in = content_bot_in
-    for si in range(n_sp):
-        sp_left_in = cards_left_in + si * (SP_W_IN + SP_GAP_IN)
-        ax_sp = fig.add_axes([sp_left_in / fig_w, sp_bot_in / fig_h,
-                              SP_W_IN / fig_w, SP_W_IN / fig_h])
-        ds = gd['sp_pair'][si]
-        ax_sp.set_title(PLATFORM_LABELS[ds], fontsize=AXIS_FS, pad=1.5)
-        ax_sp.set_xticks([]); ax_sp.set_yticks([])
-        ax_sp.set_facecolor('black')
-        for sp in ax_sp.spines.values():
-            sp.set_linewidth(0.5)
-        sd = gd['sp_data'][si]
-        if sd is None or len(sd['x']) == 0:
-            continue
-        vmin_sp, vmax_sp = gd['sp_vranges'][si]
-        order = np.argsort(sd['expr'])
-        # Slide-tags is much sparser than xenium/merfish; scale dot size to match.
-        n_total_ds = len(sp_coords[ds]['x'])
-        sp_size = 250.0 / np.sqrt(n_total_ds)
-        ax_sp.scatter(sd['x'][order], sd['y'][order],
-                      c=sd['expr'][order], cmap='viridis',
-                      s=sp_size, vmin=vmin_sp, vmax=vmax_sp,
-                      linewidths=0, rasterized=True)
-        c = sp_coords[ds]
-        ax_sp.plot([sd['midline'], sd['midline']],
-                   [c['y'].min(), c['y'].max()],
-                   color='white', lw=0.3, zorder=2)
-        ax_sp.set_xlim(sd['fov_cx'] - sd['fov_half'],
-                       sd['fov_cx'] + sd['fov_half'])
-        ax_sp.set_ylim(sd['fov_cy'] - sd['fov_half'],
-                       sd['fov_cy'] + sd['fov_half'])
-        ax_sp.set_aspect('equal')
-        ax_sp.text(0.25, 0.97, 'Null', transform=ax_sp.transAxes,
-                   ha='center', va='top', color='white',
-                   fontsize=AXIS_FS - 1.5, zorder=4)
-        ax_sp.text(0.75, 0.97, 'Preg', transform=ax_sp.transAxes,
-                   ha='center', va='top', color='white',
-                   fontsize=AXIS_FS - 1.5, zorder=4)
-
-    n_cells = len(gd['rows'])
-    forest_h_in = max(n_cells * CARD_FOREST_ROW_H, CARD_FOREST_MIN_H)
-    forest_h_in = min(forest_h_in, content_h_in)
-    forest_bot_in = content_bot_in + (content_h_in - forest_h_in) / 2
-    forest_left_in = (cards_left_in
-                      + n_sp * SP_W_IN + (n_sp - 1) * SP_GAP_IN
-                      + SP_FOREST_GAP_IN)
-    ax_f = fig.add_axes([forest_left_in / fig_w, forest_bot_in / fig_h,
-                         FOREST_W_IN / fig_w, forest_h_in / fig_h])
-    draw_forest(ax_f, gd, show_xlabel=(i == N_CARDS - 1))
-
-    label_left_frac = 1.0 + FOREST_LABEL_GAP_IN / FOREST_W_IN
-    trans_y_f = ax_f.get_yaxis_transform()
-    for ri, r in enumerate(gd['rows']):
-        text = f"{short_ct(r['cell_type'])} {r['stars']}".strip()
-        ax_f.text(label_left_frac, ri, text,
-                  transform=trans_y_f, ha='left', va='center',
-                  fontsize=LABEL_FS, clip_on=False)
-
-# =============================================================================
-# Forest legend column (Platforms / Meta / Significance)
-# =============================================================================
-flegv_left_in = (cards_left_in + CARD_W_MAX_IN + FLEG_GAP_IN
-                 + FLEG_EXTRA_RIGHT_IN)
-flegv_top_in = cards_top_in
-flegv_bot_in = ax_b_bot_in
-flegv_h_in = flegv_top_in - flegv_bot_in
-ax_fleg = fig.add_axes([flegv_left_in / fig_w, flegv_bot_in / fig_h,
-                        FLEG_COL_W_IN / fig_w, flegv_h_in / fig_h])
-ax_fleg.set_xlim(0, 1); ax_fleg.set_ylim(0, 1)
-ax_fleg.set_xticks([]); ax_fleg.set_yticks([])
-for s in ax_fleg.spines.values():
-    s.set_visible(False)
-
-FLEG_FS = 6.5
-FLEG_HEADER_FS = 6.8
-sections = [
-    ('Platforms', [
-        ('line', 'slidetags', PLATFORM_LABELS['slidetags']),
-        ('line', 'merfish',   PLATFORM_LABELS['merfish']),
-        ('line', 'xenium',    PLATFORM_LABELS['xenium']),
-    ]),
-    ('Meta', [
-        ('diamond', 3, 'D=3'),
-        ('diamond', 2, 'D=2'),
-    ]),
-    ('Significance', [
-        ('star', 1, r'*  emp$\,p\leq 0.05$'),
-        ('star', 2, r'**  emp$\,p\leq 0.01$'),
-        ('star', 3, r'***  emp$\,p\leq 0.001$'),
-    ]),
-]
-# Inch-based spacing -> axes fraction so the layout is constant regardless
-# of the dynamic axes height. Values reproduce the original (flegv=1.95in) layout.
-header_h = 0.075 * 1.95 / flegv_h_in
-item_h = 0.060 * 1.95 / flegv_h_in
-section_gap = 0.050 * 1.95 / flegv_h_in
-y = 1.0 - (1.0 - 0.97) * 1.95 / flegv_h_in
-for header, items in sections:
-    ax_fleg.text(0.05, y, header, ha='left', va='top',
-                 fontsize=FLEG_HEADER_FS, transform=ax_fleg.transAxes)
-    y -= header_h
-    for kind, key, label in items:
-        if kind == 'line':
-            ax_fleg.plot([0.06, 0.13], [y, y],
-                         color=PLATFORM_COLORS[key], lw=1.4,
-                         solid_capstyle='butt',
-                         transform=ax_fleg.transAxes, clip_on=False)
-            ax_fleg.text(0.17, y, label, ha='left', va='center',
-                         fontsize=FLEG_FS, transform=ax_fleg.transAxes)
-        elif kind == 'diamond':
-            ax_fleg.plot(0.095, y, 'D', mfc=D_COLORS[key], mec='black',
-                         mew=0.3, ms=3.5,
-                         transform=ax_fleg.transAxes, clip_on=False)
-            ax_fleg.text(0.17, y, label, ha='left', va='center',
-                         fontsize=FLEG_FS, transform=ax_fleg.transAxes)
-        elif kind == 'star':
-            ax_fleg.text(0.05, y, label, ha='left', va='center',
-                         fontsize=FLEG_FS, transform=ax_fleg.transAxes)
-        y -= item_h
-    y -= section_gap
-
-# =============================================================================
-# Panel D: chord row (4 per-LR-theme panels + stacked legend)
-# =============================================================================
-chord_panels_left_in = ax_left_in
-chord_panel_bot_row1 = chord_row_bot_in - 0.20
-chord_panel_bot_row0 = (chord_panel_bot_row1 + chord_panel_h_in
-                        + CHORD_ROW_GAP_IN + CHORD_TITLE_H_IN)
-
-chord_theme_axes = {}
-for i, theme in enumerate(CHORD_THEMES):
-    row = i // 2
-    col = i % 2
-    px_left_in = chord_panels_left_in + col * (chord_panel_w_in
-                                                + CHORD_PANEL_GAP_IN)
-    py_bot_in = chord_panel_bot_row0 if row == 0 else chord_panel_bot_row1
-    ax = fig.add_axes([px_left_in / fig_w, py_bot_in / fig_h,
-                       chord_panel_w_in / fig_w,
-                       chord_panel_h_in / fig_h],
-                      projection='polar')
-    chord_theme_axes[theme] = ax
-
-def draw_theme_chord(ax, theme):
-    df = theme_chord_edges(theme)
-    if df.height == 0:
-        ax.text(0.5, 0.5, 'no edges', transform=ax.transAxes,
-                ha='center', va='center', fontsize=7.0, color='#888888')
-        return df
-    df = df.sort('mag', descending=True).head(40)
-
-    sec_size = {c: 0.0 for c in ordered_cts}
-    for r in df.iter_rows(named=True):
-        sec_size[r['source']] += r['mag']
-        sec_size[r['target']] += r['mag']
-    max_sz = max(sec_size.values()) if any(sec_size.values()) else 1.0
-    floor = max_sz * 0.05
-    sector_dict = {c: max(sec_size[c], floor) for c in chord_cells_ordered}
-
-    space_per = []
-    for k, c in enumerate(chord_cells_ordered):
-        if k == 0:
-            space_per.append(2.0); continue
-        prev_c = chord_cells_ordered[k - 1]
-        space_per.append(7.0 if chord_class(c) != chord_class(prev_c)
-                         else 2.0)
-    circos = Circos(sector_dict, space=space_per)
-
-    for sector in circos.sectors:
-        c = sector.name
-        inner = sector.add_track((85, 91), r_pad_ratio=0.0)
-        inner.axis(fc=SUBCLASS_COLORS.get(c, '#d3d3d3'),
-                   ec='black', lw=0.3)
-        sector.text(chord_num_label(c), r=106, size=5.5, color='black',
-                    orientation='vertical')
-
-    max_mag = float(df['mag'].max())
-    src_off = {c: 0.0 for c in ordered_cts}
-    tgt_off = {c: 0.0 for c in ordered_cts}
-    for r in df.sort('mag', descending=False).iter_rows(named=True):
-        s, t, w = r['source'], r['target'], r['mag']
-        col = CHORD_COLOR_UP if r['signed_sum'] > 0 else CHORD_COLOR_DOWN
-        alpha = 0.30 + 0.60 * (w / max_mag)
-        s0, s1 = src_off[s], src_off[s] + w
-        t0, t1 = tgt_off[t], tgt_off[t] + w
-        src_off[s], tgt_off[t] = s1, t1
-        circos.link((s, s0, s1), (t, t0, t1),
-                    color=col, alpha=alpha,
-                    direction=1, height_ratio=0.50,
-                    arrow_length_ratio=0.05, allow_twist=True)
-    circos.plotfig(ax=ax)
-
-    class_groups = {}
-    for sector in circos.sectors:
-        class_groups.setdefault(chord_class(sector.name), []).append(sector)
-    for cls, sectors_in_class in class_groups.items():
-        rads = [s.x_to_rad(0) for s in sectors_in_class] + \
-               [s.x_to_rad(s.size) for s in sectors_in_class]
-        start_rad, end_rad = min(rads), max(rads)
-        center = (start_rad + end_rad) / 2
-        width = end_rad - start_rad
-        ax.bar(x=center, height=6, width=width, bottom=94,
-               facecolor=CHORD_CLASS_COLORS[cls],
-               edgecolor='black', linewidth=0.4,
-               align='center', zorder=0.5)
-    return df
-
-for theme, ax in chord_theme_axes.items():
-    draw_theme_chord(ax, theme)
-
-# Titles offset 0.35" above polar axis to clear chord cell-prefix labels at r=106.
-fig.canvas.draw()
-_title_offset_frac = 0.35 / fig_h
-for theme, ax in chord_theme_axes.items():
-    bbox = ax.get_position()
-    fig.text((bbox.x0 + bbox.x1) / 2,
-             bbox.y1 + _title_offset_frac,
-             CHORD_THEME_TITLES[theme], ha='center', va='bottom',
-             fontsize=9.0)
-
-# Chord y-axis title (left of the chord grid, vertical)
-_chord_grid_cy = (chord_panel_bot_row1
-                  + chord_panel_bot_row0 + chord_panel_h_in) / 2
-fig.text((ax_left_in - 0.34) / fig_w, _chord_grid_cy / fig_h,
-         'Spatial cell-cell\ncommunication (meta)', rotation=90,
-         ha='center', va='center', fontsize=9.0)
-
-# Chord legend: single column in the LEFT legend pad alongside the chord
-# grid, right-justified. Direction + Cell class + Subclass stacked.
-scleg_cells = chord_cells_legend_ordered
-CLEG_HDR_IN, CLEG_ROW_IN, CLEG_GAPV_IN = 0.27, 0.108, 0.07
-CHORD_LEG_H_IN = (3 * CLEG_HDR_IN + (5 + len(scleg_cells)) * CLEG_ROW_IN
-                  + 2 * CLEG_GAPV_IN + 0.06)
-CHORD_LEG_TOP_IN = chord_row_top_in
-CHORD_LEG_BOT_IN = CHORD_LEG_TOP_IN - CHORD_LEG_H_IN
-ax_clegL = _make_leg_axes(CHORD_LEG_BOT_IN, CHORD_LEG_H_IN)
-_sw_w = SWATCH_W_IN / leg_w_in
-_sw_h = SWATCH_H_IN / CHORD_LEG_H_IN
-_sw_x = 0.95 - _sw_w
-_lbl_x = _sw_x - 0.02
-
-
-def _d(v):
-    return v / CHORD_LEG_H_IN
-
-
-def _cleg_swatch(yy, label, color):
-    ax_clegL.add_patch(plt.Rectangle((_sw_x, yy - _sw_h / 2), _sw_w, _sw_h,
-                                     facecolor=color, edgecolor='black',
-                                     lw=0.3))
-    ax_clegL.text(_lbl_x, yy, label, ha='right', va='center', fontsize=6.5,
-                  clip_on=False)
-
-
-y = 1.0 - _d(0.03)
-ax_clegL.text(0.95, y, 'CCC\nDirection', ha='right', va='top',
-              fontsize=6.8, linespacing=1.0)
-y -= _d(CLEG_HDR_IN)
-for lbl, col in [('UP in pregnancy', CHORD_COLOR_UP),
-                 ('DOWN in pregnancy', CHORD_COLOR_DOWN)]:
-    _cleg_swatch(y, lbl, col); y -= _d(CLEG_ROW_IN)
-y -= _d(CLEG_GAPV_IN)
-ax_clegL.text(0.95, y, 'CCC\nCell class', ha='right', va='top',
-              fontsize=6.8, linespacing=1.0)
-y -= _d(CLEG_HDR_IN)
-for cls in CHORD_CLASS_ORDER:
-    _cleg_swatch(y, CHORD_CLASS_LABELS[cls], CHORD_CLASS_COLORS[cls])
-    y -= _d(CLEG_ROW_IN)
-y -= _d(CLEG_GAPV_IN)
-ax_clegL.text(0.95, y, 'CCC\nSubclass', ha='right', va='top',
-              fontsize=6.8, linespacing=1.0)
-y -= _d(CLEG_HDR_IN)
-for ct in scleg_cells:
-    _cleg_swatch(y, short_ct(ct), SUBCLASS_COLORS.get(ct, '#d3d3d3'))
-    y -= _d(CLEG_ROW_IN)
-
-# =============================================================================
-# TLEG: band-color theme legend (below LEG_S, with title)
-# =============================================================================
-TLEG_TOP_IN = LEG_S_BOT_IN - 1 * GENE_PITCH
-TLEG_H_IN = 8 * GENE_PITCH
-TLEG_BOT_IN = TLEG_TOP_IN - TLEG_H_IN
-ax_tleg = _make_leg_axes(TLEG_BOT_IN, TLEG_H_IN)
-ax_tleg.text(0.95, 0.97, 'DE/GSEA\nTheme', ha='right', va='top',
-             fontsize=6.8, linespacing=1.0)
-band_names = [b for b, _ in GENE_BANDS]
-y_top, y_bot = 0.60, 0.10
-y_step = (y_top - y_bot) / (len(band_names) - 1)
-bw, bh = SWATCH_W_IN / leg_w_in, SWATCH_H_IN / TLEG_H_IN
-for i, band in enumerate(band_names):
-    y = y_top - i * y_step
-    ax_tleg.add_patch(plt.Rectangle((0.95 - bw, y - bh / 2), bw, bh,
-                                    facecolor=BAND_COLORS[band],
-                                    edgecolor='none'))
-    ax_tleg.text(0.95 - bw - 0.03, y, band, ha='right', va='center',
-                 fontsize=6.5, color='black')
-
-for ext in ('png', 'svg'):
-    fig.savefig(f'{out_dir}/lipid_combined.{ext}',
-                bbox_inches='tight', facecolor='white')
-plt.close(fig)
+class_spans = fc.spans([ct_class[c] for c in ordered_cts])
+band_spans = fc.spans([pathway_band[p] for p in ordered_pathways])
+gene_band_spans = fc.spans([gene_band[g] for g in ordered_genes])
+norm_nes, norm_lfc, nes_vmax, lfc_vmax = fc.make_norms(
+    nes_mat, lfc_mat, d_mat_b)
+
+BOT_MARGIN, CHORD_GAP = 2.15, 1.00
+PANEL_GAP, ROW_GAP, TITLE_H = 0.45, 0.30, 0.40
+cm = fc.card_metrics(len(ordered_pathways), len(ordered_genes),
+                     len(ordered_cts), len(CARD_GENES), max_sp_n)
+cpw, cph = fc.chord_panel_size(cm.ax_w_in, len(CHORD_THEMES), 2, PANEL_GAP)
+chord_h = fc.chord_band_height(cph, len(CHORD_THEMES), 2, TITLE_H, ROW_GAP,
+                               extra=0.20)
+ax_b_bot = BOT_MARGIN + chord_h + CHORD_GAP
+
+L = fc.core_layout(len(ordered_pathways), len(ordered_genes),
+                   len(ordered_cts), len(CARD_GENES), max_sp_n, ax_b_bot)
+fig = plt.figure(figsize=(L.fig_w, L.fig_h))
+ax_a = fc.add_axes(fig, L, L.ax_left_in, L.ax_a_bot_in, L.ax_w_in, L.ax_h_a_in)
+ax_b = fc.add_axes(fig, L, L.ax_left_in, L.ax_b_bot_in, L.ax_w_in, L.ax_h_b_in)
+
+fc.draw_panel_a(ax_a, L, nlp_mat, nes_mat, d_mat, sig_mat_a, norm_nes,
+                ordered_pathways, PATHWAY_LABELS, class_spans, band_spans)
+fc.draw_panel_b(ax_b, L, lfc_mat, pct_mat, d_mat_b, sig_mat_b, norm_lfc,
+                ordered_genes, class_spans, gene_band_spans)
+
+prefix_labels = [f'{fc.numeric_prefix(ct):03d}' for ct in ordered_cts]
+fc.draw_col_anno(fig, L, L.ax_a_bot_in, ordered_cts, prefix_labels,
+                 subclass_colors)
+fc.draw_col_anno(fig, L, L.ax_b_bot_in, ordered_cts, ordered_cts,
+                 subclass_colors)
+fc.draw_band_anno(fig, L, L.ax_a_bot_in, L.ax_h_a_in, len(ordered_pathways),
+                  [pathway_band[p] for p in ordered_pathways], BAND_COLORS)
+fc.draw_band_anno(fig, L, L.ax_b_bot_in, L.ax_h_b_in, len(ordered_genes),
+                  [gene_band[g] for g in ordered_genes], BAND_COLORS)
+tleg_bot = fc.draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax,
+                               lfc_vmax, [b for b, _ in GENE_BANDS],
+                               BAND_COLORS)
+fc.draw_forest_legend(fig, L)
+fc.draw_cards(fig, L, CARD_GENES, cards, sp_coords)
+
+specs = fc.chord_grid_specs(CHORD_THEMES, L.ax_left_in, BOT_MARGIN, cpw, cph,
+                            2, PANEL_GAP, ROW_GAP, TITLE_H, bottom_drop=0.20)
+cy = (min(s[2] for s in specs) + max(s[2] + s[4] for s in specs)) / 2
+fc.draw_chord_row(fig, L, specs, chord_edges, CHORD_THEME_LIGANDS,
+                  CHORD_THEME_TITLES, chord_cell_set, subclass_colors,
+                  ytitle_x_in=L.ax_left_in - 0.34, ytitle_cy_in=cy)
+fc.draw_chord_legend(fig, L, tleg_bot - fc.GENE_PITCH, chord_cell_set,
+                     subclass_colors)
+
+fc.save(fig, f'{out_dir}/lipid_combined')
 print(f'wrote {out_dir}/lipid_combined.png and .svg')
