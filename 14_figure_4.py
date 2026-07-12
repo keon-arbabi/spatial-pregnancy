@@ -81,7 +81,7 @@ GENE_BANDS = [
     ('Angiogenic sprouting',
      ['Vegfa', 'Flt1', 'Notch1', 'Eng', 'Id1', 'Bmpr2']),
     ('Endothelial dynamics', ['Rgcc', 'Kdr', 'Cxcl12', 'Pecam1', 'Cdh5']),
-    ('Barrier & ECM', ['Slc2a1', 'Mfsd2a', 'Dag1', 'Col1a1', 'Tnxb']),
+    ('Barrier & ECM', ['Slc2a1', 'Mfsd2a', 'Col1a1', 'Tnxb']),
 ]
 
 NN_NICHE = {

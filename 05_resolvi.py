@@ -3,6 +3,7 @@
 import os
 import gc
 import time
+import json
 os.environ.setdefault(
     'CUPY_CACHE_DIR', '/tmp/cupy_cache')
 os.environ.setdefault(
@@ -164,6 +165,34 @@ def run_resolvi(adata, sample_col, name):
 #endregion
 #region process ################################################################
 
+# Save CAST QC metrics + filter thresholds for the supplementary QC figure
+# (mirrors save_qc in 01_preprocessing.py). Grouped by condition-level 'sample'
+# (matching qc_metrics_data.csv) for a consistent x-axis across datasets in the
+# figure; for xenium the actual filter below groups by sample_rep, so the
+# displayed per-sample distance cutoffs are condition-level approximations.
+# The upper-percentile cutoffs for min_cos_dist / avg_pdist are stored as
+# {sample: value} dicts; the subclass thresholds are global scalars.
+def save_cast(obs, group_col, output_dir, thr):
+    cast_cols = ['min_cos_dist', 'class_confidence', 'avg_pdist',
+                 'subclass_confidence', 'subclass_margin']
+    df = pd.DataFrame({'sample': np.asarray(obs[group_col].values)})
+    for c in cast_cols:
+        df[c] = pd.to_numeric(np.asarray(obs[c].values), errors='coerce')
+    df.to_csv(f'{output_dir}/cast_metrics_data.csv', index=False)
+    fin = df.replace([np.inf, -np.inf], np.nan)
+    cos_cut = fin.groupby('sample', observed=True)['min_cos_dist']\
+        .quantile(thr['cos_dist_pct'])
+    pd_cut = fin.groupby('sample', observed=True)['avg_pdist']\
+        .quantile(thr['pdist_pct'])
+    out = {
+        'subclass_confidence': float(thr['subclass_confidence']),
+        'subclass_margin': float(thr['subclass_margin']),
+        'min_cos_dist': {str(k): float(v) for k, v in cos_cut.items()},
+        'avg_pdist': {str(k): float(v) for k, v in pd_cut.items()},
+    }
+    with open(f'{output_dir}/cast_filter_thresholds.json', 'w') as f:
+        json.dump(out, f)
+
 for name, sample_col in datasets.items():
     in_path = f'{working_dir}/output/{name}/02_adata_query_{name}.h5ad'
     out_path = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
@@ -174,6 +203,7 @@ for name, sample_col in datasets.items():
     adata = run_resolvi(adata, sample_col, name)
 
     obs = adata.obs
+    save_cast(obs, 'sample', f'{working_dir}/output/{name}', thr)
     # per-sample upper-percentile cutoffs: drop cells above sample-specific
     # quantile for min_cos_dist and avg_pdist (distributions differ by
     # platform/sample, so a global threshold over- or under-filters).

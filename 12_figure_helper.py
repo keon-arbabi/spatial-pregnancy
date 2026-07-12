@@ -52,7 +52,8 @@ NLP_MIN, NLP_MAX = 1.30, 5.0
 SIZE_MIN, SIZE_MAX = 16.0, 80.0
 SIZE_MAX_A = 140.0
 SIG_DOT_SIZE = 4.0
-TITLE_FS = 9.0   # shared: axis titles, neighbourhood titles, card gene names
+TITLE_FS = 11.0  # axis / neighbourhood / card-gene / chord titles
+LABEL_FS = 9.0   # dotplot ticks + forest-plot labels
 
 # --- small helpers -----------------------------------------------------------
 
@@ -465,9 +466,11 @@ def theme_chord_edges(edges, ligands):
 LEFT_FIG_PAD_IN = 1.15
 LABEL_MARGIN_IN = 1.55
 LEG_LEFT_IN = 0.45
-LEG_W_IN = 0.85
-SWATCH_W_IN = 0.09
-SWATCH_H_IN = 0.07
+LEG_W_IN = 1.00
+LEG_TITLE_FS = 8.4       # legend section titles
+LEG_ITEM_FS = 7.9        # legend item labels
+SWATCH_W_IN = 0.11
+SWATCH_H_IN = 0.085
 PATH_PITCH = 0.21
 GENE_PITCH = 0.155
 GAP_IN = 0.50
@@ -478,17 +481,17 @@ CARD_GAP_IN = 0.10
 CARD_TITLE_H_IN = 0.30
 SP_GAP_IN = 0.05
 SP_FOREST_GAP_IN = 0.10
-FOREST_W_IN = 0.75
+FOREST_W_IN = 1.15
 FOREST_LABEL_GAP_IN = 0.05
-CARD_FOREST_ROW_H = 0.13
+CARD_FOREST_ROW_H = 0.17
 CARD_FOREST_MIN_H = 0.42
 FLEG_GAP_IN = 0.12
 FLEG_EXTRA_RIGHT_IN = 0.20
-FLEG_COL_W_IN = 1.10
+FLEG_COL_W_IN = 1.28
 CBAR_W_FIG = 0.005
 
 
-def label_drop_in(labels, fontsize=7.5, rotation=45.0):
+def label_drop_in(labels, fontsize=LABEL_FS, rotation=45.0):
     """Vertical extent (inches) of the longest rotated column label. Used to
     extend the gene cards down to the bottom of the x-axis cell-type labels
     (rather than stopping at the dotplot's bottom edge). Independent of figure
@@ -506,7 +509,7 @@ def label_drop_in(labels, fontsize=7.5, rotation=45.0):
     return drop
 
 
-def text_width_in(labels, fontsize=7.5, pad_in=0.0):
+def text_width_in(labels, fontsize=LABEL_FS, pad_in=0.0):
     """Max rendered width (inches) of the given strings at ``fontsize``. Used to
     size the forest-plot label column so full cell-type names fit (the cards use
     the same full names as the dotplot x-axis)."""
@@ -525,7 +528,7 @@ def text_width_in(labels, fontsize=7.5, pad_in=0.0):
 
 def card_metrics(n_path, n_gene, n_ct, n_cards, max_sp_n, label_w_in=0.95,
                  n_sections=1, section_gap=0.0, n_path_extra=0.0,
-                 n_gene_extra=0.0, card_extend_in=0.0):
+                 n_gene_extra=0.0, card_extend_in=0.0, cards_pad_in=0.0):
     """Position-independent geometry (no vertical anchor). Lets a figure size
     a chord row before fixing ``ax_b_bot_in``. ``section_gap`` (column units)
     widens Panel A/B to make room for inter-section gaps; ``n_path_extra`` /
@@ -549,21 +552,23 @@ def card_metrics(n_path, n_gene, n_ct, n_cards, max_sp_n, label_w_in=0.95,
     card_w = (2 * L.SP_W_IN + SP_GAP_IN + SP_FOREST_GAP_IN + FOREST_W_IN
               + FOREST_LABEL_GAP_IN + label_w_in)
     L.card_w_max_in = card_w + max(0, max_sp_n - 2) * (L.SP_W_IN + SP_GAP_IN)
-    L.cards_left_in = L.ax_left_in + L.ax_w_in + ANNO_GAP_IN + ANNO_W_IN + 0.35
+    L.cards_left_in = (L.ax_left_in + L.ax_w_in + ANNO_GAP_IN + ANNO_W_IN
+                       + 0.35 + cards_pad_in)
     L.label_w_in = label_w_in
     return L
 
 
 def core_layout(n_path, n_gene, n_ct, n_cards, max_sp_n, ax_b_bot_in,
                 label_w_in=0.95, n_sections=1, section_gap=0.0,
-                n_path_extra=0.0, n_gene_extra=0.0, card_extend_in=0.0):
+                n_path_extra=0.0, n_gene_extra=0.0, card_extend_in=0.0,
+                cards_pad_in=0.0):
     """Full positions for the shared core (Panel A/B + cards + legends),
     stacked above ``ax_b_bot_in`` (Panel B bottom edge in inches). The figure
     reserves whatever it needs below ax_b_bot_in for a chord row / extras.
     ``card_extend_in`` grows the cards down to the column-label bottom."""
     L = card_metrics(n_path, n_gene, n_ct, n_cards, max_sp_n, label_w_in,
                      n_sections, section_gap, n_path_extra, n_gene_extra,
-                     card_extend_in)
+                     card_extend_in, cards_pad_in)
     L.ax_b_bot_in = ax_b_bot_in
     L.ax_b_top_in = ax_b_bot_in + L.ax_h_b_in
     L.ax_a_bot_in = L.ax_b_top_in + GAP_IN
@@ -635,9 +640,9 @@ def save(fig, stem, pad=0.1):
 def _dotplot(ax, L, nr, present, size_of, color_of, d_of, sig_of,
              class_spans, band_spans, yticklabels, ylabel, ytick_italic,
              bold_labels=None, row_y=None, row_sections=None):
-    # ``row_y`` (optional) maps each row index -> a y-position, letting a figure
-    # insert vertical gaps between row super-sections; ``row_sections`` is a list
-    # of (lo, hi) row spans, each wrapped in its own box (outer spine suppressed).
+    # ``row_y`` (optional) maps each row index to a y-position, letting a
+    # figure insert vertical gaps between row super-sections; ``row_sections``
+    # is a list of (lo, hi) row spans, each boxed (outer spine suppressed).
     nc = L.n_cols
     sectioned = getattr(L, 'section_gap', 0.0) > 0
     col_x = getattr(L, 'col_x', None) if sectioned else None
@@ -664,19 +669,27 @@ def _dotplot(ax, L, nr, present, size_of, color_of, d_of, sig_of,
         ax.scatter(sx, sy, s=SIG_DOT_SIZE, c='white', edgecolors='none',
                    linewidths=0, zorder=4)
     if sectioned:
+        # boxes = (column super-section) x (row super-section); when no
+        # row_sections are given this is one box per column group (old behavior)
+        rsecs = row_sections if row_sections is not None else [(0, nr - 1)]
         for _, lo, hi in class_spans:
             x0, x1 = col_x[lo] - 0.5, col_x[hi] + 0.5
-            for j in range(lo + 1, hi + 1):
-                ax.plot([col_x[j] - 0.5] * 2, [-0.5, nr - 0.5], color='#F2F2F2',
-                        lw=0.25, zorder=1)
-            for k in range(1, nr):
-                ax.plot([x0, x1], [k - 0.5, k - 0.5], color='#F2F2F2',
-                        lw=0.25, zorder=1)
-            for _, _, bhi in band_spans[:-1]:
-                ax.plot([x0, x1], [bhi + 0.5, bhi + 0.5], color='#BBBBBB',
-                        lw=0.4, zorder=2)
-            ax.add_patch(plt.Rectangle((x0, -0.5), x1 - x0, nr, fill=False,
-                         edgecolor='black', lw=0.9, zorder=6, clip_on=False))
+            for rlo, rhi in rsecs:  # vgridlines + box per section
+                y0, y1 = ry[rlo] - 0.5, ry[rhi] + 0.5
+                for j in range(lo + 1, hi + 1):
+                    ax.plot([col_x[j] - 0.5] * 2, [y0, y1], color='#F2F2F2',
+                            lw=0.25, zorder=1)
+                ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0,
+                             fill=False, edgecolor='black', lw=0.9, zorder=6,
+                             clip_on=False))
+            for k in range(1, nr):  # row gridlines (skip gaps)
+                if ry[k] - ry[k - 1] < 1.5:
+                    ax.plot([x0, x1], [(ry[k] + ry[k - 1]) / 2] * 2,
+                            color='#F2F2F2', lw=0.25, zorder=1)
+            for _, _, bhi in band_spans[:-1]:  # band sep (skip gaps)
+                if bhi + 1 < nr and ry[bhi + 1] - ry[bhi] < 1.5:
+                    ax.plot([x0, x1], [(ry[bhi] + ry[bhi + 1]) / 2] * 2,
+                            color='#BBBBBB', lw=0.4, zorder=2)
     else:
         for k in range(1, nc):
             ax.axvline(k - 0.5, color='#F2F2F2', lw=0.25, zorder=1)
@@ -700,7 +713,7 @@ def _dotplot(ax, L, nr, present, size_of, color_of, d_of, sig_of,
     ax.set_ylim(y_hi + 0.5, -0.5)
     ax.tick_params(axis='x', bottom=False, labelbottom=False)
     ax.set_yticks(ry)
-    ax.set_yticklabels(yticklabels, fontsize=7.5,
+    ax.set_yticklabels(yticklabels, fontsize=LABEL_FS,
                        fontstyle='italic' if ytick_italic else 'normal')
     if bold_labels:
         bs = set(bold_labels)
@@ -781,7 +794,7 @@ def draw_col_anno(fig, L, panel_bot_in, ordered_cts, ticklabels,
     ax.set_yticks([])
     ax.set_xticks(col_x)
     ax.set_xticklabels(ticklabels, rotation=45, ha='right',
-                       rotation_mode='anchor', fontsize=7.5)
+                       rotation_mode='anchor', fontsize=LABEL_FS)
     ax.tick_params(axis='x', length=3, pad=2, direction='out', bottom=True,
                    top=False, labelbottom=True, labeltop=False)
     ax.tick_params(axis='y', left=False, right=False, labelleft=False,
@@ -802,6 +815,20 @@ def draw_band_anno(fig, L, bot_in, h_in, n, item_band, band_colors,
         ax.add_patch(plt.Rectangle((0, ry[i] - 0.5), 1, 1,
                      facecolor=band_colors[item_band[i]], edgecolor='none'))
 
+
+def draw_group_labels(fig, L, panel_bot_in, panel_h_in, ry, sections, labels,
+                      x_in, fontsize=LABEL_FS, rotation=270):
+    """Rotated theme-super-group titles: one per ``sections`` (lo, hi) span,
+    centered on the group's vertical extent, at figure x ``x_in`` (inches)."""
+    y_top, y_bot = -0.5, ry[-1] + 0.5
+    span = y_bot - y_top
+    for (lo, hi), lab in zip(sections, labels):
+        yc = (ry[lo] + ry[hi]) / 2
+        frac = (yc - y_top) / span                       # 0 at panel top
+        y_in = (panel_bot_in + panel_h_in) - frac * panel_h_in
+        fig.text(x_in / L.fig_w, y_in / L.fig_h, lab, rotation=rotation,
+                 ha='center', va='center', fontsize=fontsize, linespacing=0.9)
+
 # --- legends -----------------------------------------------------------------
 
 def _leg_axes(fig, L, bot_in, h_in):
@@ -819,16 +846,16 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                      band_names, band_colors):
     """Single top-down flow (inches). Uniform title->element + inter-item
     gaps; an extra category gap separates the GSEA / DE / DE-GSEA groups."""
-    TITLE_H = 0.20         # 2-line title block
-    TITLE_GAP = 0.05       # title bottom -> first element (tight, consistent)
-    DOT_PITCH = 0.17       # row pitch for dot rows
-    SW_PITCH = 0.13        # row pitch for swatch rows
-    CBAR_H = 0.16          # colorbar bar height
-    END_DOT = 0.11         # trailing pad below last dot
-    END_SW = 0.07          # trailing pad below last swatch
-    SUB_GAP = 0.13         # gap between items within a category
-    CAT_GAP = 0.30         # extra gap between categories
-    DOT_X, LAB_X = 0.88, 0.72
+    TITLE_H = 0.24         # 2-line title block
+    TITLE_GAP = 0.06       # title bottom -> first element (tight, consistent)
+    DOT_PITCH = 0.20       # row pitch for dot rows
+    SW_PITCH = 0.155       # row pitch for swatch rows
+    CBAR_H = 0.19          # colorbar bar height
+    END_DOT = 0.12         # trailing pad below last dot
+    END_SW = 0.08          # trailing pad below last swatch
+    SUB_GAP = 0.15         # gap between items within a category
+    CAT_GAP = 0.34         # extra gap between categories
+    DOT_X, LAB_X = 0.86, 0.70
 
     # (category, title, kind, payload)
     items = [
@@ -868,7 +895,7 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
         s.set_visible(False)
 
     for (cat, ttl, kind, payload), yt in zip(items, tops):
-        lax.text(1.0, yt, ttl, ha='right', va='top', fontsize=6.8,
+        lax.text(1.0, yt, ttl, ha='right', va='top', fontsize=LEG_TITLE_FS,
                  linespacing=1.0)
         e0 = yt - TITLE_H - TITLE_GAP            # first-element baseline
         if kind in ('sizedots', 'pctdots'):
@@ -879,22 +906,24 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                 lax.scatter([DOT_X], [yc], s=s, c=[col], edgecolors='none',
                             clip_on=False)
                 lab = f'{lev:.1f}' if kind == 'sizedots' else f'{lev}%'
-                lax.text(LAB_X, yc, lab, ha='right', va='center', fontsize=6.5)
+                lax.text(LAB_X, yc, lab, ha='right', va='center',
+                         fontsize=LEG_ITEM_FS)
         elif kind == 'ddots':
             for k, (D, lab) in enumerate([(3, 'D = 3'), (2, 'D = 2')]):
                 yc = e0 - k * DOT_PITCH
-                lax.scatter([DOT_X], [yc], s=50, c=['#bbbbbb'],
+                lax.scatter([DOT_X], [yc], s=64, c=['#bbbbbb'],
                             edgecolors='#999999' if D == 3 else 'none',
                             linewidths=0.8 if D == 3 else 0, clip_on=False)
-                lax.text(LAB_X, yc, lab, ha='right', va='center', fontsize=6.5)
+                lax.text(LAB_X, yc, lab, ha='right', va='center',
+                         fontsize=LEG_ITEM_FS)
         elif kind == 'sig':
             yc = e0
-            lax.scatter([DOT_X], [yc], s=50, c=[CMAP(norm_lfc(lfc_vmax * 0.7))],
+            lax.scatter([DOT_X], [yc], s=64, c=[CMAP(norm_lfc(lfc_vmax * 0.7))],
                         edgecolors='none', clip_on=False)
             lax.scatter([DOT_X], [yc], s=SIG_DOT_SIZE, c='white',
                         edgecolors='none', clip_on=False)
             lax.text(LAB_X, yc, r'emp $p \leq 0.05$', ha='right', va='center',
-                     fontsize=6.5)
+                     fontsize=LEG_ITEM_FS)
         elif kind == 'swatches':
             bw = SWATCH_W_IN / LEG_W_IN
             for k, band in enumerate(payload):
@@ -903,7 +932,7 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                               / 2), bw, SWATCH_H_IN,
                               facecolor=band_colors[band], edgecolor='none'))
                 lax.text(DOT_X - bw / 2 - 0.03, yc, band, ha='right',
-                         va='center', fontsize=6.5, color='black')
+                         va='center', fontsize=LEG_ITEM_FS, color='black')
         elif kind == 'cbar':
             norm, vmax = payload
             bar_bot = e0 - CBAR_H
@@ -912,7 +941,7 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
             cb = fig.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=CMAP),
                               cax=cax, orientation='vertical')
             cb.set_ticks([-vmax, 0, vmax]); cb.ax.yaxis.tick_left()
-            cb.ax.tick_params(labelsize=6.5, length=2, pad=1)
+            cb.ax.tick_params(labelsize=LEG_ITEM_FS, length=2, pad=1)
 
     return bottom_in   # bottom of legend column, for stacking below
 
@@ -935,30 +964,30 @@ def draw_forest_legend(fig, L):
                           ('star', 2, r'**  emp$\,p\leq 0.01$'),
                           ('star', 3, r'***  emp$\,p\leq 0.001$')]),
     ]
-    hh = 0.075 * 1.95 / h
-    ih = 0.060 * 1.95 / h
-    sg = 0.050 * 1.95 / h
+    hh = 0.090 * 1.95 / h
+    ih = 0.074 * 1.95 / h
+    sg = 0.058 * 1.95 / h
     y = 1.0 - 0.03 * 1.95 / h
     for header, items in sections:
-        ax.text(0.05, y, header, ha='left', va='top', fontsize=6.8,
+        ax.text(0.05, y, header, ha='left', va='top', fontsize=LEG_TITLE_FS,
                 transform=ax.transAxes)
         y -= hh
         for kind, key, label in items:
             if kind == 'line':
-                ax.plot([0.06, 0.13], [y, y], color=PLATFORM_COLORS[key],
-                        lw=1.4, solid_capstyle='butt',
+                ax.plot([0.05, 0.14], [y, y], color=PLATFORM_COLORS[key],
+                        lw=1.8, solid_capstyle='butt',
                         transform=ax.transAxes, clip_on=False)
-                ax.text(0.17, y, label, ha='left', va='center', fontsize=6.5,
-                        transform=ax.transAxes)
+                ax.text(0.17, y, label, ha='left', va='center',
+                        fontsize=LEG_ITEM_FS, transform=ax.transAxes)
             elif kind == 'diamond':
                 ax.plot(0.095, y, 'D', mfc=D_COLORS[key], mec='black',
-                        mew=0.3, ms=3.5, transform=ax.transAxes,
+                        mew=0.4, ms=4.6, transform=ax.transAxes,
                         clip_on=False)
-                ax.text(0.17, y, label, ha='left', va='center', fontsize=6.5,
-                        transform=ax.transAxes)
+                ax.text(0.17, y, label, ha='left', va='center',
+                        fontsize=LEG_ITEM_FS, transform=ax.transAxes)
             else:
-                ax.text(0.05, y, label, ha='left', va='center', fontsize=6.5,
-                        transform=ax.transAxes)
+                ax.text(0.05, y, label, ha='left', va='center',
+                        fontsize=LEG_ITEM_FS, transform=ax.transAxes)
             y -= ih
         y -= sg
 
@@ -1073,7 +1102,7 @@ def _draw_forest(axf, gd, show_xlabel):
     axf.set_yticks([])
     axf.tick_params(axis='x', labelsize=7.5, length=1.5, pad=1)
     if show_xlabel:
-        axf.set_xlabel('logFC', fontsize=7.5, labelpad=1)
+        axf.set_xlabel('logFC', fontsize=LABEL_FS, labelpad=1)
     for sp in axf.spines.values():
         sp.set_linewidth(0.5)
 
@@ -1128,7 +1157,7 @@ def draw_cards(fig, L, card_genes, cards, sp_coords):
         for ri, r in enumerate(gd['rows']):
             axf.text(lab_frac, ri, f"{r['cell_type']} "
                      f"{r['stars']}".strip(), transform=trans, ha='left',
-                     va='center', fontsize=7.5, clip_on=False)
+                     va='center', fontsize=LABEL_FS, clip_on=False)
 
 # --- chord -------------------------------------------------------------------
 
@@ -1157,7 +1186,7 @@ def draw_theme_chord(ax, df, cell_set, cells_ordered, subclass_colors):
     for s in circos.sectors:
         s.add_track((85, 91), r_pad_ratio=0.0).axis(
             fc=subclass_colors.get(s.name, '#d3d3d3'), ec='black', lw=0.3)
-        s.text(_num_label(s.name), r=106, size=6.5, color='black',
+        s.text(_num_label(s.name), r=106, size=8.5, color='black',
                orientation='vertical')
     mx = float(df['mag'].max())
     so = {c: 0.0 for c in cell_set}
@@ -1186,7 +1215,7 @@ def draw_theme_chord(ax, df, cell_set, cells_ordered, subclass_colors):
 
 
 def draw_chord_legend(fig, L, top_in, cell_set, subclass_colors):
-    hdr, row, gapv = 0.27, 0.108, 0.07
+    hdr, row, gapv = 0.31, 0.128, 0.085
     h_in = (3 * hdr + (5 + len(cell_set)) * row + 2 * gapv + 0.06)
     ax = _leg_axes(fig, L, top_in - h_in, h_in)
     sw = SWATCH_W_IN / LEG_W_IN
@@ -1199,25 +1228,25 @@ def draw_chord_legend(fig, L, top_in, cell_set, subclass_colors):
     def swatch(yy, label, color):
         ax.add_patch(plt.Rectangle((sx, yy - sh / 2), sw, sh,
                      facecolor=color, edgecolor='black', lw=0.3))
-        ax.text(sx - 0.02, yy, label, ha='right', va='center', fontsize=6.5,
-                clip_on=False)
+        ax.text(sx - 0.02, yy, label, ha='right', va='center',
+                fontsize=LEG_ITEM_FS, clip_on=False)
     y = 1.0 - d(0.03)
-    ax.text(0.95, y, 'CCC\nDirection', ha='right', va='top', fontsize=6.8,
-            linespacing=1.0)
+    ax.text(0.95, y, 'CCC\nDirection', ha='right', va='top',
+            fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for lbl, col in [('UP in pregnancy', CHORD_COLOR_UP),
                      ('DOWN in pregnancy', CHORD_COLOR_DOWN)]:
         swatch(y, lbl, col); y -= d(row)
     y -= d(gapv)
-    ax.text(0.95, y, 'CCC\nCell class', ha='right', va='top', fontsize=6.8,
-            linespacing=1.0)
+    ax.text(0.95, y, 'CCC\nCell class', ha='right', va='top',
+            fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for cls in CHORD_CLASS_ORDER:
         swatch(y, CHORD_CLASS_LABELS[cls], CHORD_CLASS_COLORS[cls])
         y -= d(row)
     y -= d(gapv)
-    ax.text(0.95, y, 'CCC\nSubclass', ha='right', va='top', fontsize=6.8,
-            linespacing=1.0)
+    ax.text(0.95, y, 'CCC\nSubclass', ha='right', va='top',
+            fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for ct in sorted(cell_set, key=numeric_prefix):
         swatch(y, ct, subclass_colors.get(ct, '#d3d3d3'))
@@ -1241,8 +1270,113 @@ def draw_chord_row(fig, L, specs, edges, theme_ligands, theme_titles,
     for theme, *_ in specs:
         bb = axes[theme].get_position()
         fig.text((bb.x0 + bb.x1) / 2, bb.y1 + off, theme_titles[theme],
-                 ha='center', va='bottom', fontsize=8.5)
+                 ha='center', va='bottom', fontsize=TITLE_FS)
     if ytitle_x_in is not None:
         fig.text(ytitle_x_in / L.fig_w, ytitle_cy_in / L.fig_h,
                  'Spatial cell-cell\ncommunication (meta)', rotation=90,
                  ha='center', va='center', fontsize=9.0)
+
+
+# --- IF-validation bar plots (GraphPad Prism style) --------------------------
+
+CONDITION_COLORS = {'CTRL': '#7209b7', 'PREG': '#b5179e', 'POSTPART': '#f72585'}
+IF_BAR_COLORS = (CONDITION_COLORS['CTRL'], CONDITION_COLORS['PREG'])
+
+
+def _if_norm(x):
+    # sheet headers use a non-breaking space ('Non\xa0Pregnant')
+    return str(x).replace('\xa0', ' ').strip()
+
+
+def read_if_validation(xlsx_path, sheet, groups=('Non Pregnant', 'Pregnant')):
+    """Return {group: 1D float array} from the per-animal summary columns
+    (headed by the group names) on the right of an IF-quantification sheet."""
+    raw = pd.read_excel(xlsx_path, sheet_name=sheet, header=None)
+    vs = raw.apply(lambda s: s.map(_if_norm)).values
+    out = {}
+    for g in groups:
+        hits = np.argwhere(vs == g)
+        if not len(hits):
+            raise ValueError(f'{g!r} not found in sheet {sheet!r}')
+        r, c = hits[0]
+        col = pd.to_numeric(raw.iloc[r + 1:, c], errors='coerce').to_numpy()
+        run = []
+        for v in col:                    # leading contiguous numeric run
+            if np.isnan(v):
+                break
+            run.append(float(v))
+        out[g] = np.asarray(run)
+    return out
+
+
+def _sig_stars(p):
+    return ('***' if p < 1e-3 else '**' if p < 1e-2
+            else '*' if p < 0.05 else 'ns')
+
+
+def draw_if_barplot(ax, xlsx_path, sheet, ylabel, *,
+                    groups=('Non Pregnant', 'Pregnant'),
+                    display_labels=None, colors=IF_BAR_COLORS,
+                    bar_w=0.6, jitter=0.11, equal_var=False):
+    """Two-group bar + scatter (mean bar, SEM whiskers, per-animal points,
+    unpaired t-test significance bracket), styled to match the main figure:
+    condition colours, no bold, shared LABEL_FS/TITLE_FS. Returns p."""
+    from scipy import stats
+    import matplotlib.ticker as mtick
+    dl = {'Non Pregnant': 'Nulliparous'}
+    if display_labels:
+        dl.update(display_labels)
+    labels = [dl.get(g, g) for g in groups]
+    data = read_if_validation(xlsx_path, sheet, groups)
+    xs = [0, 1]
+    means = [float(np.mean(data[g])) for g in groups]
+    sems = [float(stats.sem(data[g])) for g in groups]
+    for x, g, col in zip(xs, groups, colors):
+        ax.bar(x, np.mean(data[g]), width=bar_w, facecolor=col,
+               edgecolor='black', linewidth=0.9, zorder=2)
+    ax.errorbar(xs, means, yerr=sems, fmt='none', ecolor='black',
+                elinewidth=0.9, capsize=4, capthick=0.9, zorder=4)
+    rng = np.random.default_rng(0)
+    for x, g in zip(xs, groups):
+        v = data[g]
+        ax.scatter(x + rng.uniform(-jitter, jitter, size=len(v)), v, s=22,
+                   color='black', edgecolors='white', linewidths=0.5, zorder=5)
+    a, b = data[groups[0]], data[groups[1]]
+    p = float(stats.ttest_ind(a, b, equal_var=equal_var).pvalue)
+    top = max(float(np.concatenate([a, b]).max()),
+              max(m + s for m, s in zip(means, sems)))
+    by, drop = top * 1.07, top * 0.03
+    ax.plot([0, 0, 1, 1], [by - drop, by, by, by - drop], color='black',
+            lw=0.9, clip_on=False, zorder=6)
+    ax.text(0.5, by, _sig_stars(p), ha='center', va='bottom', fontsize=TITLE_FS)
+    ax.set_xlim(-0.75, 1.75)
+    ax.set_ylim(0, by * 1.28)
+    ax.yaxis.set_major_locator(
+        mtick.MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=TITLE_FS)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(0.9)
+    ax.spines['bottom'].set_linewidth(0.9)
+    ax.tick_params(axis='both', direction='out', width=0.9, length=4,
+                   labelsize=LABEL_FS)
+    return p
+
+
+def if_validation_figure(xlsx_path, panels, out_stem, *, panel_w=2.5,
+                         panel_h=3.8):
+    """panels: list of (sheet, ylabel). One Prism bar panel each, in a row.
+    Saves <out_stem>.png/.svg; returns the per-panel p-values. panel_h is
+    generous so long rotated y-axis titles fit within the axis height."""
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(panel_w * n, panel_h),
+                             constrained_layout=True)
+    axes = np.atleast_1d(axes)
+    ps = [draw_if_barplot(ax, xlsx_path, sheet, ylabel)
+          for ax, (sheet, ylabel) in zip(axes, panels)]
+    fig.savefig(f'{out_stem}.png', dpi=400)
+    fig.savefig(f'{out_stem}.svg')
+    plt.close(fig)
+    return ps

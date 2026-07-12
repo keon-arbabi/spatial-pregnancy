@@ -1,6 +1,6 @@
 """Neuron remodeling figure: Panel A (GSEA dotplot) + Panel B (DE dotplot)
-+ gene cards. Neuronal classes (Glut + GABA) plus glial context columns.
-Orchestrates the shared building blocks in 12_figure_helper.py.
++ gene cards + CCC chord row. Neuronal classes (Glut + GABA) plus glial
+context columns. Orchestrates the shared blocks in 12_figure_helper.py.
 """
 import os
 import importlib
@@ -18,17 +18,17 @@ out_dir = f'{working_dir}/figures'
 os.makedirs(out_dir, exist_ok=True)
 
 # =============================================================================
-# Config: pathways (6 bands), genes (6 bands), cells, cards
+# Config: pathways (7 bands), genes (7 bands), columns, cards, chords
 # =============================================================================
 PATHWAY_BANDS = [
     ('Synaptic adhesion', [
         'GOBP_SYNAPSE_ASSEMBLY',
-        'GOBP_MAINTENANCE_OF_SYNAPSE_STRUCTURE',
+        'GOBP_SYNAPSE_ORGANIZATION',
         'GOBP_HOMOPHILIC_CELL_CELL_ADHESION',
     ]),
     ('Excitability', [
         'GOBP_REGULATION_OF_MEMBRANE_POTENTIAL',
-        'GOBP_MONOATOMIC_ION_TRANSPORT',
+        'GOBP_REGULATION_OF_POSTSYNAPTIC_MEMBRANE_POTENTIAL',
         'GOBP_POTASSIUM_ION_TRANSPORT',
     ]),
     ('GABA & neuropeptide', [
@@ -39,12 +39,11 @@ PATHWAY_BANDS = [
     ('Glucocorticoid stress', [
         'GOBP_RESPONSE_TO_CORTICOSTEROID',
         'GOBP_RESPONSE_TO_STEROID_HORMONE',
-        'GOBP_CELLULAR_RESPONSE_TO_CORTICOSTEROID_STIMULUS',
     ]),
     ('Neurotrophic', [
         'GOBP_RESPONSE_TO_NERVE_GROWTH_FACTOR',
         'GOBP_NEUROTROPHIN_TRK_RECEPTOR_SIGNALING_PATHWAY',
-        'GOBP_NEUROTROPHIN_SIGNALING_PATHWAY',
+        'GOBP_RESPONSE_TO_GROWTH_FACTOR',
     ]),
     ('Neuronal development', [
         'GOBP_REGULATION_OF_NEURON_DIFFERENTIATION',
@@ -62,22 +61,21 @@ pathway_band = {p: b for b, ps in PATHWAY_BANDS for p in ps}
 
 PATHWAY_LABELS = {
     'GOBP_SYNAPSE_ASSEMBLY':                     'synapse assembly',
-    'GOBP_MAINTENANCE_OF_SYNAPSE_STRUCTURE':     'synapse maintenance',
+    'GOBP_SYNAPSE_ORGANIZATION':                 'synapse organization',
     'GOBP_HOMOPHILIC_CELL_CELL_ADHESION':        'homophilic cell adhesion',
     'GOBP_REGULATION_OF_MEMBRANE_POTENTIAL':     'membrane potential',
-    'GOBP_MONOATOMIC_ION_TRANSPORT':             'ion transport',
+    'GOBP_REGULATION_OF_POSTSYNAPTIC_MEMBRANE_POTENTIAL':
+                                                 'postsynaptic potential',
     'GOBP_POTASSIUM_ION_TRANSPORT':              'potassium transport',
     'GOBP_SYNAPTIC_TRANSMISSION_GABAERGIC':      'GABAergic transmission',
     'GOBP_NEUROPEPTIDE_SIGNALING_PATHWAY':       'neuropeptide signaling',
     'GOBP_NEUROTRANSMITTER_SECRETION':           'neurotransmitter secretion',
     'GOBP_RESPONSE_TO_CORTICOSTEROID':           'corticosteroid response',
     'GOBP_RESPONSE_TO_STEROID_HORMONE':          'steroid hormone response',
-    'GOBP_CELLULAR_RESPONSE_TO_CORTICOSTEROID_STIMULUS':
-                                                 'corticosteroid signaling',
     'GOBP_RESPONSE_TO_NERVE_GROWTH_FACTOR':      'NGF response',
     'GOBP_NEUROTROPHIN_TRK_RECEPTOR_SIGNALING_PATHWAY':
                                                  'Trk receptor signaling',
-    'GOBP_NEUROTROPHIN_SIGNALING_PATHWAY':       'neurotrophin signaling',
+    'GOBP_RESPONSE_TO_GROWTH_FACTOR':            'growth factor response',
     'GOBP_REGULATION_OF_NEURON_DIFFERENTIATION': 'neuron differentiation',
     'GOBP_NEURON_FATE_COMMITMENT':               'neuron fate commitment',
     'GOBP_AXON_DEVELOPMENT':                     'axon development',
@@ -100,30 +98,67 @@ BAND_COLORS = {
 
 GENE_BANDS = [
     ('Synaptic adhesion', [
-        'Cntn1', 'Sdk1', 'Nrcam', 'Ncam1', 'Cadm1', 'Robo1', 'Cdh13',
+        'Cntn1', 'Sdk1', 'Nrcam', 'Ncam1', 'Dag1', 'Robo1', 'Cdh13',
     ]),
     ('Excitability', [
-        'Gria1', 'Gria2', 'Grin1', 'Grin2a', 'Kcnh1', 'Gria4', 'Camk4',
+        'Gria1', 'Gria2', 'Grin1', 'Trpc5', 'Kcnh1', 'Sez6',
     ]),
     ('GABA & neuropeptide', [
-        'Gad2', 'Gad1', 'Gabrb3', 'Gabra1', 'Tac1', 'Vamp2', 'Syt1',
+        'Gad2', 'Gad1', 'Gabrb3', 'Drd1', 'Tac1', 'Ptprn2', 'Syt1',
     ]),
     ('Glucocorticoid stress', [
-        'Fkbp5', 'Gpr83', 'Zbtb16', 'Nr3c2', 'Bcl2',
+        'Fkbp5', 'Gpr83', 'Zbtb16', 'Ar',
     ]),
     ('Neurotrophic', [
-        'Ntrk2', 'Gfra1', 'Nrg3', 'Igf1r',
+        'Ntrk2', 'Ntrk3', 'Gfra1', 'Nrg3', 'Erbb4', 'Igf1r', 'Fgf1', 'Sort1',
     ]),
+    # development ordered fate/TF (Foxg1..Sox11) then axon/structural
     ('Neuronal development', [
-        'Meis2', 'Foxg1', 'Sox11', 'Zfhx3', 'Nefl', 'Nefm',
-        'Sema4a', 'Sema5a', 'Plxnd1',
+        'Foxg1', 'Zfhx3', 'Sox11',
+        'Nefl', 'Nefm', 'Ntng1', 'Sema4a', 'Sema5a', 'Plxnd1',
     ]),
     ('Activity-dependent plasticity', [
-        'Egr1', 'Arc', 'Homer1', 'Egr3',
+        'Egr1', 'Arc', 'Homer1', 'Egr3', 'Nrn1',
     ]),
 ]
 ordered_genes = [g for _, gs in GENE_BANDS for g in gs]
 gene_band = {g: b for b, gs in GENE_BANDS for g in gs}
+
+# Major theme super-groups: both dotplots' rows are split into these boxed
+# super-sections with a gap between (mirrors fig-4's immune/vascular split).
+THEME_GROUPS = [
+    ('Synaptic & excitability remodeling',
+     ['Synaptic adhesion', 'Excitability', 'GABA & neuropeptide']),
+    ('Hormone & trophic signalling',
+     ['Glucocorticoid stress', 'Neurotrophic']),
+    ('Development & plasticity',
+     ['Neuronal development', 'Activity-dependent plasticity']),
+]
+theme_group = {b: i for i, (_, bs) in enumerate(THEME_GROUPS) for b in bs}
+GROUP_GAP = 0.9
+GROUP_EXTRA = (len(THEME_GROUPS) - 1) * GROUP_GAP
+
+
+def _grouped_rows(band_of_row):
+    """row_y (GROUP_GAP inserted at theme-group boundaries) + row_sections
+    [(lo, hi)] index ranges, one per theme-group."""
+    ys, secs, gap, start = [], [], 0.0, 0
+    prev = theme_group[band_of_row[0]]
+    for i, band in enumerate(band_of_row):
+        g = theme_group[band]
+        if g != prev:
+            secs.append((start, i - 1))
+            gap += GROUP_GAP
+            start, prev = i, g
+        ys.append(i + gap)
+    secs.append((start, len(band_of_row) - 1))
+    return ys, secs
+
+
+row_y_a, row_sections_a = _grouped_rows(
+    [pathway_band[p] for p in ordered_pathways])
+row_y_b, row_sections_b = _grouped_rows(
+    [gene_band[g] for g in ordered_genes])
 
 # MPOA parenting nuclei: force-included maternal-behavior anchors.
 MPOA_ALLOWLIST = {'085 SI-MPO-LPO Lhx8 Gaba', '086 MPO-ADP Lhx8 Gaba',
@@ -157,37 +192,33 @@ _pre2nb = {p: nb for nb, ps in NEIGHBOURHOODS.items() for p in ps}
 def assign_class(ct):
     return _pre2nb.get(_sub2cls.get(ct), 'Non-neuronal')
 
-CARD_GENES = ['Cntn1', 'Gria1', 'Gad2', 'Tac1', 'Fkbp5', 'Ntrk2', 'Meis2',
-              'Egr1']
-# Force the (IHC-validated) striatal population into the Fkbp5 card; it is
-# significant (emp_p 0.013) but otherwise cut by the 6-row cap, which fills
-# with the more-significant cortical/astrocyte populations.
+# highlighted-gene cards (spatial map + forest), reordered to match the dotplot
+CARD_GENES = ['Cntn1', 'Gria1', 'Gad2', 'Ar', 'Fkbp5', 'Ntrk2', 'Nefl', 'Egr1']
+CARD_GENES = [g for g in ordered_genes if g in set(CARD_GENES)]
+# force the IHC-validated striatal population into the Fkbp5 card (the 6-row
+# cap otherwise fills it with more-significant cortical/astrocyte populations)
 card_ctx = {'Fkbp5': ['061 STR D1 Gaba']}
 max_rows_map = {g: 6 for g in CARD_GENES}
 
-# CCC chord row: 5 neuron-intrinsic (neuron<->neuron) themes, one chord each,
-# mirroring the dotplot themes. Only cross-platform-validated (xenium &
-# slidetags) L-R pairs are used; glia-niche / lipid / immune signalling is
-# reserved for the glial + lipid figures.
-CHORD_THEMES = ['Synaptic adhesion', 'Excitability', 'GABA & neuropeptide',
-                'Neuronal development']
+# CCC chord row: 3 neuron-intrinsic themes, one chord each, mirroring the
+# dotplot themes. Only cross-platform (xenium & slidetags) L-R pairs are used;
+# glia-niche / lipid / immune signalling is reserved for the glial + lipid
+# figures. The development chord (Sema->Plxn) was dropped as drawn-level noise.
+CHORD_THEMES = ['Synaptic adhesion', 'Excitability', 'GABA & neuropeptide']
 CHORD_THEME_LIGANDS = {
     'Synaptic adhesion':    ['Cntn1', 'Ncam1'],
     'Excitability':         ['Slc17a7'],
     'GABA & neuropeptide':  ['Gad2'],
-    'Neuronal development': ['Sema4a', 'Sema5a'],
 }
 CHORD_THEME_TITLES = {
-    'Synaptic adhesion':    'Synaptic adhesion\nCntn1 / Ncam1',
-    'Excitability':         'Glutamatergic\nSlc17a7',
-    'GABA & neuropeptide':  'GABAergic\nGad2',
-    'Neuronal development': 'Axon guidance\nSema4a / Sema5a',
+    'Synaptic adhesion':    'Synaptic adhesion signalling\nCntn1 / Ncam1',
+    'Excitability':         'Glutamatergic signalling\nSlc17a7',
+    'GABA & neuropeptide':  'GABAergic signalling\nGad2',
 }
 CANONICAL_LR_PAIRS = {
     ('Cntn1', 'Nrcam'), ('Ncam1', 'Robo1'),
     ('Slc17a7', 'Gria1'), ('Slc17a7', 'Grin1'),
     ('Gad2', 'Gabbr1'),
-    ('Sema4a', 'Plxnd1'), ('Sema5a', 'Plxna3'),
 }
 
 # =============================================================================
@@ -231,23 +262,25 @@ gene_band_spans = fc.spans([gene_band[g] for g in ordered_genes])
 norm_nes, norm_lfc, nes_vmax, lfc_vmax = fc.make_norms(
     nes_mat, lfc_mat, d_mat_b)
 
-# cards extend down to the bottom of the Panel B cell-type labels
+# drop of the rotated column labels below Panel B (used for chord clearance)
 card_extend = (fc.COL_ANNO_GAP_IN + fc.ANNO_W_IN
                + fc.label_drop_in(ordered_cts))
 # forest-plot label column sized for full cell-type names (match dotplot)
 label_w = fc.text_width_in([f'{c}  ***' for c in ordered_cts], pad_in=0.10)
-# single chord row (5 themes) reserved below Panel B + its x-axis labels;
-# CHORD_GAP clears the extended cards + column labels (chords shift down with them)
-BOT_MARGIN, CHORD_GAP = 1.95, card_extend + 0.55
+# single chord row reserved below Panel B + its x-axis labels; CHORD_GAP clears
+# the column labels (chords shifted up toward the dotplots, titles still clear)
+BOT_MARGIN, CHORD_GAP = 1.95, card_extend + 0.25
 PANEL_GAP, ROW_GAP, TITLE_H = 0.28, 0.0, 0.45
+# extra dotplot->cards gap to hold the rotated theme-group titles
+CARDS_PAD = 0.30
 cm = fc.card_metrics(len(ordered_pathways), len(ordered_genes),
                      len(ordered_cts), len(CARD_GENES), max_sp_n,
                      label_w_in=label_w, n_sections=len(class_spans),
-                     section_gap=SECTION_GAP, card_extend_in=card_extend)
-# span the row from the dotplot left y-axis to the right edge of the 2nd
-# spatial plot (the 2-technology cards' rightmost spatial panel)
-chord_span = (cm.cards_left_in + 2 * cm.SP_W_IN + fc.SP_GAP_IN
-              - cm.ax_left_in)
+                     section_gap=SECTION_GAP, n_path_extra=GROUP_EXTRA,
+                     n_gene_extra=GROUP_EXTRA, card_extend_in=0,
+                     cards_pad_in=CARDS_PAD)
+# span the row across the dotplot width only (left to right of Panels A/B)
+chord_span = cm.ax_w_in
 NCHORD = len(CHORD_THEMES)
 cpw, cph = fc.chord_panel_size(chord_span, NCHORD, NCHORD, PANEL_GAP,
                                aspect=0.96)
@@ -258,16 +291,20 @@ ax_b_bot = BOT_MARGIN + chord_h + CHORD_GAP
 L = fc.core_layout(len(ordered_pathways), len(ordered_genes),
                    len(ordered_cts), len(CARD_GENES), max_sp_n, ax_b_bot,
                    label_w_in=label_w, n_sections=len(class_spans),
-                   section_gap=SECTION_GAP, card_extend_in=card_extend)
+                   section_gap=SECTION_GAP, n_path_extra=GROUP_EXTRA,
+                   n_gene_extra=GROUP_EXTRA, card_extend_in=0,
+                   cards_pad_in=CARDS_PAD)
 L.col_x = fc.column_positions(class_spans, len(ordered_cts), SECTION_GAP)
 fig = plt.figure(figsize=(L.fig_w, L.fig_h))
 ax_a = fc.add_axes(fig, L, L.ax_left_in, L.ax_a_bot_in, L.ax_w_in, L.ax_h_a_in)
 ax_b = fc.add_axes(fig, L, L.ax_left_in, L.ax_b_bot_in, L.ax_w_in, L.ax_h_b_in)
 
 fc.draw_panel_a(ax_a, L, nlp_mat, nes_mat, d_mat, sig_mat_a, norm_nes,
-                ordered_pathways, PATHWAY_LABELS, class_spans, band_spans)
+                ordered_pathways, PATHWAY_LABELS, class_spans, band_spans,
+                row_y=row_y_a, row_sections=row_sections_a)
 fc.draw_panel_b(ax_b, L, lfc_mat, pct_mat, d_mat_b, sig_mat_b, norm_lfc,
-                ordered_genes, class_spans, gene_band_spans, CARD_GENES)
+                ordered_genes, class_spans, gene_band_spans, CARD_GENES,
+                row_y=row_y_b, row_sections=row_sections_b)
 
 prefix_labels = [f'{fc.numeric_prefix(ct):03d}' for ct in ordered_cts]
 fc.draw_col_anno(fig, L, L.ax_a_bot_in, ordered_cts, prefix_labels,
@@ -275,18 +312,34 @@ fc.draw_col_anno(fig, L, L.ax_a_bot_in, ordered_cts, prefix_labels,
 fc.draw_col_anno(fig, L, L.ax_b_bot_in, ordered_cts, ordered_cts,
                  subclass_colors)
 fc.draw_band_anno(fig, L, L.ax_a_bot_in, L.ax_h_a_in, len(ordered_pathways),
-                  [pathway_band[p] for p in ordered_pathways], BAND_COLORS)
+                  [pathway_band[p] for p in ordered_pathways], BAND_COLORS,
+                  row_y=row_y_a)
 fc.draw_band_anno(fig, L, L.ax_b_bot_in, L.ax_h_b_in, len(ordered_genes),
-                  [gene_band[g] for g in ordered_genes], BAND_COLORS)
+                  [gene_band[g] for g in ordered_genes], BAND_COLORS,
+                  row_y=row_y_b)
+
+# rotated super-group titles, one per theme-group, right of the colour strip
+GROUP_LABELS = ['Synaptic & excitability\nremodeling',
+                'Hormone & trophic\nsignalling', 'Development &\nplasticity']
+_gx = L.anno_x_in + fc.ANNO_W_IN + 0.20   # near the dotplots; keep cards gap
+fc.draw_group_labels(fig, L, L.ax_a_bot_in, L.ax_h_a_in, row_y_a,
+                     row_sections_a, GROUP_LABELS, _gx)
+fc.draw_group_labels(fig, L, L.ax_b_bot_in, L.ax_h_b_in, row_y_b,
+                     row_sections_b, GROUP_LABELS, _gx)
 tleg_bot = fc.draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                                [b for b, _ in GENE_BANDS], BAND_COLORS)
 fc.draw_forest_legend(fig, L)
 fc.draw_cards(fig, L, CARD_GENES, cards, sp_coords)
 
-# CCC chord row (single row of 5 neuron-intrinsic themes)
+# CCC chord row (single row of 3 neuron-intrinsic themes)
 specs = fc.chord_grid_specs(CHORD_THEMES, L.ax_left_in, BOT_MARGIN, cpw, cph,
                             NCHORD, PANEL_GAP, ROW_GAP, TITLE_H,
                             bottom_drop=0.20)
+# slightly shrink the chord circles (keeps titles/sector labels the same size)
+CHORD_SHRINK = 0.86
+specs = [(t, lft + (w - w * CHORD_SHRINK) / 2, bt + (h - h * CHORD_SHRINK) / 2,
+          w * CHORD_SHRINK, h * CHORD_SHRINK)
+         for (t, lft, bt, w, h) in specs]
 cy = (min(s[2] for s in specs) + max(s[2] + s[4] for s in specs)) / 2
 fc.draw_chord_row(fig, L, specs, chord_edges, CHORD_THEME_LIGANDS,
                   CHORD_THEME_TITLES, chord_cell_set, subclass_colors,
@@ -296,3 +349,16 @@ fc.draw_chord_legend(fig, L, tleg_bot - fc.GENE_PITCH, chord_cell_set,
 
 fc.save(fig, f'{out_dir}/figure_3')
 print(f'wrote {out_dir}/figure_3.png and .svg')
+
+# =============================================================================
+# IF validation (Fkbp5): striatal FKBP5+ area rises in pregnancy, validating
+# the Fkbp5 card (Fkbp5 up in 061 STR D1). Prism bar+scatter, mean +/- SEM,
+# unpaired t-test.
+# =============================================================================
+IF_XLSX = f'{working_dir}/input/IF validation quantification.xlsx'
+IF_PANELS = [
+    ('NONP_P_FKBP5', 'Striatal FKBP5+ area (A.U.)'),   # FKBP5 / DAPI, striatum
+]
+_vp = fc.if_validation_figure(IF_XLSX, IF_PANELS,
+                              f'{out_dir}/figure_3_validation', panel_w=2.6)
+print(f'wrote {out_dir}/figure_3_validation.png/.svg  (p: FKBP5={_vp[0]:.3g})')
