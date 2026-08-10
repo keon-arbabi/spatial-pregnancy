@@ -2,6 +2,7 @@
 import os
 import importlib
 
+import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
 
@@ -13,18 +14,22 @@ out_dir = f'{working_dir}/figures'
 os.makedirs(out_dir, exist_ok=True)
 
 # --- config -----------------------------------------------------------------
+# The immune arm was originally split four ways, but those bands' per-cell-type
+# NES profiles are largely redundant (mean pairwise r = 0.65, vs 0.42 for the
+# vascular bands) and trace a single trajectory. Immune activation and
+# inflammatory response (r = 0.69) are therefore merged; cytokine signalling is
+# the one distinct axis (r = 0.50-0.62 against the rest) and the myeloid
+# effector band is kept for its clean microglia-restricted gene set.
 PATHWAY_BANDS = [
-    ('Immune activation', [
+    ('Innate immune activation', [
         'GOBP_ADAPTIVE_IMMUNE_RESPONSE',
         'GOBP_ACTIVATION_OF_IMMUNE_RESPONSE',
-    ]),
-    ('Cytokine production', [
-        'GOBP_CYTOKINE_PRODUCTION',
-        'GOBP_CYTOKINE_MEDIATED_SIGNALING_PATHWAY',
-    ]),
-    ('Inflammatory response', [
         'GOBP_INFLAMMATORY_RESPONSE',
         'GOBP_ACUTE_INFLAMMATORY_RESPONSE',
+    ]),
+    ('Cytokine signalling', [
+        'GOBP_CYTOKINE_PRODUCTION',
+        'GOBP_CYTOKINE_MEDIATED_SIGNALING_PATHWAY',
     ]),
     ('Myeloid effector', [
         'GOBP_MYELOID_LEUKOCYTE_MIGRATION',
@@ -63,20 +68,44 @@ PATHWAY_LABELS = {
     'GOBP_EXTRACELLULAR_MATRIX_ASSEMBLY': 'ECM assembly',
 }
 
+# six distinct hues, only one blue (blue also reads as "down" in the dot
+# colormap); adjacent bands within each super-section are maximally separated
 BAND_COLORS = {
-    'Immune activation':     '#0072B2',
-    'Cytokine production':   '#E69F00',
-    'Inflammatory response': '#009E73',
-    'Myeloid effector':      '#CC79A7',
-    'Angiogenic sprouting':  '#56B4E9',
-    'Endothelial dynamics':  '#332288',
-    'Barrier & ECM':         '#661100',
+    'Innate immune activation': '#882255',   # wine
+    'Cytokine signalling':      '#E69F00',   # orange
+    'Myeloid effector':         '#CC79A7',   # pink
+    'Angiogenic sprouting':     '#009E73',   # green
+    'Endothelial dynamics':     '#0072B2',   # blue
+    'Barrier & ECM':            '#999933',   # olive
 }
 
+# Major theme super-groups: both dotplots' rows are split into these boxed
+# super-sections with a gap between (immune / vascular); also the facets of the
+# peripartum trajectory panel (Panel A).
+THEME_GROUPS = [
+    # named "inflammatory signalling" rather than "immune activation": the
+    # latter collides with maternal immune activation (MIA), an established and
+    # entirely different paradigm (induced inflammation, offspring brain)
+    ('Microglial & inflammatory signalling',
+     ['Innate immune activation', 'Cytokine signalling', 'Myeloid effector']),
+    ('Vascular remodeling & barrier',
+     ['Angiogenic sprouting', 'Endothelial dynamics', 'Barrier & ECM']),
+]
+theme_group = {b: i for i, (_, bs) in enumerate(THEME_GROUPS) for b in bs}
+GROUP_GAP = 0.9
+GROUP_EXTRA = (len(THEME_GROUPS) - 1) * GROUP_GAP
+GROUP_LABELS = ['Microglial &\ninflammatory signalling',
+                'Vascular remodeling\n& barrier']
+
 GENE_BANDS = [
-    ('Immune activation', ['Cd81', 'Cd38', 'Isg15', 'Cd27', 'Lacc1']),
-    ('Cytokine production', ['Lifr', 'Il6st', 'Il4ra', 'Il10ra', 'Stat3']),
-    ('Inflammatory response', ['Nlrp3', 'Txnip', 'Grn', 'Ifngr1', 'Lyn']),
+    # Cd27 (lymphocyte TNFRSF7; sig only in astrocytes at 18% detection) and
+    # Isg15 (8-9% detection, BAM/SMC only) dropped as unreliable; Cd81 dropped
+    # as a ubiquitous tetraspanin already carried by figure 5's uptake band.
+    # P2rx7 added: microglial purinergic/inflammasome receptor, UP in
+    # microglia (68%), OPC (66%) and oligodendrocytes (37%).
+    ('Innate immune activation',
+     ['Cd38', 'Lacc1', 'P2rx7', 'Nlrp3', 'Txnip', 'Grn', 'Ifngr1', 'Lyn']),
+    ('Cytokine signalling', ['Lifr', 'Il6st', 'Il4ra', 'Il10ra', 'Stat3']),
     ('Myeloid effector', ['Mertk', 'Csf3r', 'Pik3cd', 'Trpm2', 'Adgre1']),
     ('Angiogenic sprouting',
      ['Vegfa', 'Flt1', 'Notch1', 'Eng', 'Id1', 'Bmpr2']),
@@ -100,10 +129,10 @@ def assign_class(ct):
     return 'Non-neuronal'
 
 
-CARD_GENES = ['Cd81', 'Lifr', 'Lyn', 'Mertk',
+CARD_GENES = ['Lifr', 'Lyn', 'Mertk',
               'Vegfa', 'Flt1', 'Cxcl12', 'Slc2a1']
 _mg = ['334 Microglia NN']
-card_ctx = {'Cd81': ['318 Astro-NT NN', '334 Microglia NN'], 'Lifr': _mg,
+card_ctx = {'Lifr': _mg,
             'Lyn': _mg, 'Mertk': _mg + ['335 BAM NN'],
             'Vegfa': ['326 OPC NN', '330 VLMC NN'],
             'Flt1': ['333 Endo NN', '331 Peri NN'],
@@ -139,10 +168,9 @@ for _r in ['Cxcr4', 'Ackr3']:
 
 # --- selection report (printed on run) --------------------------------------
 BAND_PATHWAY_POOLS = {
-    'Immune activation':
-        r'IMMUNE_RESPONSE|IMMUNE_SYSTEM|IMMUNE_EFFECTOR|ANTIGEN',
-    'Cytokine production': r'CYTOKINE|INTERLEUKIN|TUMOR_NECROSIS|INTERFERON',
-    'Inflammatory response': r'INFLAMMAT',
+    'Innate immune activation':
+        r'IMMUNE_RESPONSE|IMMUNE_SYSTEM|IMMUNE_EFFECTOR|ANTIGEN|INFLAMMAT',
+    'Cytokine signalling': r'CYTOKINE|INTERLEUKIN|TUMOR_NECROSIS|INTERFERON',
     'Myeloid effector':
         r'MACROPHAGE|MYELOID|LEUKOCYTE|PHAGOCYT|MICROGLIAL|CHEMOTAXIS',
     'Angiogenic sprouting':
@@ -271,6 +299,28 @@ chord_cell_set, chord_edges = fc.build_chord(
     f'{working_dir}/output/liana/inflow_diff.csv',
     CANONICAL_LR_PAIRS, CHORD_THEME_LIGANDS, k_neurons=10)
 
+# Panel A trajectory: median NES across platforms per (contrast, pathway, ct);
+# arcs track the pregnancy-responsive (sig-in-pregnancy) pairs per band,
+# restricted to the non-neuronal niche shown as columns in Panels B/C.
+_nes = (pl.read_parquet(f'{working_dir}/output/gsea/perms/real_gsea.parquet')
+        .filter(pl.col('pathway').is_in(ordered_pathways))
+        .group_by(['contrast', 'pathway', 'cell_type'])
+        .agg(pl.col('NES').median().alias('nes')))
+_nl = {(r['contrast'], r['pathway'], r['cell_type']): r['nes']
+       for r in _nes.iter_rows(named=True)}
+_resp = [(r['pathway'], r['cell_type'])
+         for r in gsea.filter(pl.col('pathway').is_in(ordered_pathways))
+         .iter_rows(named=True) if ' NN' in r['cell_type']]
+
+
+def band_arc(band):
+    """(preg_NES, postpart_NES) rows for a band's responsive pairs."""
+    rows = [(_nl.get(('PREG_vs_CTRL', p, c)),
+             _nl.get(('POSTPART_vs_CTRL', p, c)))
+            for p, c in _resp if pathway_band[p] == band]
+    rows = [(a, b) for a, b in rows if a is not None and b is not None]
+    return np.array(rows) if rows else np.empty((0, 2))
+
 # --- layout + draw ----------------------------------------------------------
 class_spans = fc.spans([ct_class[c] for c in ordered_cts])
 band_spans = fc.spans([pathway_band[p] for p in ordered_pathways])
@@ -278,27 +328,76 @@ gene_band_spans = fc.spans([gene_band[g] for g in ordered_genes])
 norm_nes, norm_lfc, nes_vmax, lfc_vmax = fc.make_norms(
     nes_mat, lfc_mat, d_mat_b)
 
-# split dotplot rows into boxed immune (first 4 bands) / vascular super-sections
-IMMUNE_BANDS = 4
-ROW_GAP = 0.9
-_p_split = sum(len(ps) for _, ps in PATHWAY_BANDS[:IMMUNE_BANDS])
-_g_split = sum(len(gs) for _, gs in GENE_BANDS[:IMMUNE_BANDS])
+# split dotplot rows into the boxed theme super-sections (immune / vascular)
+def _grouped_rows(band_of_row):
+    """row_y (GROUP_GAP inserted at theme-group boundaries) + row_sections
+    [(lo, hi)] index ranges, one per theme-group."""
+    ys, secs, gap, start = [], [], 0.0, 0
+    prev = theme_group[band_of_row[0]]
+    for i, band in enumerate(band_of_row):
+        g = theme_group[band]
+        if g != prev:
+            secs.append((start, i - 1))
+            gap += GROUP_GAP
+            start, prev = i, g
+        ys.append(i + gap)
+    secs.append((start, len(band_of_row) - 1))
+    return ys, secs
 
 
-def _row_y(n, split):
-    return [i if i < split else i + ROW_GAP for i in range(n)]
+row_y_a, row_sections_a = _grouped_rows(
+    [pathway_band[p] for p in ordered_pathways])
+row_y_b, row_sections_b = _grouped_rows(
+    [gene_band[g] for g in ordered_genes])
 
+# Chords sit in the right margin as a single column, beside the lower gene
+# cards, with the CCC legend below them: the bottom of the figure is then free
+# for the CD31 validation block, which moves up into it.
+# titles are two lines drawn above each circle, so the cell must reserve the
+# offset plus the text; CHORD_PAD leaves room for the sector labels, which
+# overflow the polar axes
+CHORD_TITLE_H = 0.58
+CHORD_TITLE_OFF = 0.24
+CHORD_PAD = 0.18
+CHORD_MAX_W = 1.72         # sized so the numeric prefixes do not collide
+CHORD_COL_GAP = 0.16       # between stacked chords
+CHORD_CLEARANCE = 0.25     # below the cards, before the validation block
+CHORD_LEG_GAP = 0.30       # between stacked right-column blocks
+RIGHT_COL_W = 1.95         # right margin holding chords + both legends
+RIGHT_COL_PAD = 0.12       # gap from the gene cards to the chord column
+CARD_LEG_AT = 5            # card legend sits level with card index 5 (Cxcl12)
 
-row_y_a = _row_y(len(ordered_pathways), _p_split)
-row_y_b = _row_y(len(ordered_genes), _g_split)
-row_sections_a = [(0, _p_split - 1), (_p_split, len(ordered_pathways) - 1)]
-row_sections_b = [(0, _g_split - 1), (_g_split, len(ordered_genes) - 1)]
+# CD31 validation row, below the chords: two representative fields plus the
+# morphometric battery. The four metrics are one per independent dimension of
+# that battery -- density, branching, caliber and vessel-associated cellularity
+# -- chosen from the correlation structure of the 18 measures, in which vessel
+# area, length density and inter-vessel distance are the same measurement
+# (pairwise |r| = 0.96) and the eighteen collapse to six real dimensions.
+VASC_METRICS = [
+    ('manual_vessel_area_fraction', 'Vessel area\n(% of tissue)'),
+    ('manual_junction_density_per_mm2', 'Junction density\n(mm$^{-2}$)'),
+    ('manual_mean_vessel_diameter_um', 'Mean vessel\ndiameter (µm)'),
+    ('perivascular_nuclei_per_mm_vessel',
+     'Perivascular nuclei\n(per mm vessel)'),
+]
+# one image row per condition (4 nulliparous, 5 pregnant), then the metric
+# battery below; all rows span the dotplot-to-cards content width
+VASC_MET_H = 1.95          # height of the metric axes
+VASC_LABEL_H = 0.68        # rotated condition labels below the metric axes
+VASC_ROW_GAP = 0.50        # between the image block and the metric row
+VASC_IMG_ROW_GAP = 0.30    # between the two image rows
+VASC_TITLE_H = 0.28        # condition title above each image row
+VASC_BOT_PAD = 0.02
+VASC_GAP = 0.35            # clearance above the validation block
+VASC_IMG_GAP = 0.07        # between fields within a row
+VASC_MET_GAP = 0.78        # between metric panels
+VASC_YLAB = 0.30           # rotated 'CD31 / DAPI' label column
 
-CHORD_NCOLS = 3
-CHORD_ROW_GAP, CHORD_TITLE_H = 0.20, fc.CHORD_TITLE_H_IN
-CHORD_PANEL_GAP = fc.CHORD_PANEL_GAP_IN
-CHORD_BOT_PAD, CHORD_CLEARANCE = 0.02, 0.55
+# the image height follows from the content width and is resolved with the
+# rest of the geometry, below
 
+# extra dotplot->cards gap to hold the rotated theme-group titles
+CARDS_PAD = 0.30
 # cards extend down to the bottom of the Panel B cell-type labels
 card_extend = (fc.COL_ANNO_GAP_IN + fc.ANNO_W_IN
                + fc.label_drop_in(ordered_cts))
@@ -307,22 +406,75 @@ label_w = fc.text_width_in([f'{c}  ***' for c in ordered_cts], pad_in=0.10)
 cm = fc.card_metrics(len(ordered_pathways), len(ordered_genes),
                      len(ordered_cts), len(CARD_GENES), max_sp_n,
                      label_w_in=label_w,
-                     n_path_extra=ROW_GAP, n_gene_extra=ROW_GAP,
-                     card_extend_in=card_extend)
+                     n_path_extra=GROUP_EXTRA, n_gene_extra=GROUP_EXTRA,
+                     card_extend_in=card_extend, cards_pad_in=CARDS_PAD)
 span = fc.chord_full_span(cm, max_sp_n)
-cpw, cph = fc.chord_panel_size(span, len(CHORD_THEMES), CHORD_NCOLS,
-                               CHORD_PANEL_GAP)
-chord_h = fc.chord_band_height(cph, len(CHORD_THEMES), CHORD_NCOLS,
-                               CHORD_TITLE_H, row_gap=CHORD_ROW_GAP)
+
+# CD31 validation geometry: every row spans the content block, from the
+# dotplot left edge to the right edge of the gene cards. Fields are sized by
+# the longer of the two condition rows, so both conditions render at one scale.
+vasc_roi, vasc_animal, vasc_stats = fc.load_vascular(working_dir)
+COND_ORDER = ['Nulliparous', 'Pregnant']
+vasc_rows = [(c, sorted(vasc_animal.loc[vasc_animal.condition == c, 'animal']))
+             for c in COND_ORDER]
+per_row = max(len(a) for _, a in vasc_rows)
+vasc_span = (cm.cards_left_in + cm.card_w_max_in) - cm.ax_left_in
+vasc_img_w = ((vasc_span - VASC_YLAB - (per_row - 1) * VASC_IMG_GAP)
+              / per_row)
+n_met = len(VASC_METRICS)
+vasc_met_w = ((vasc_span - VASC_YLAB - (n_met - 1) * VASC_MET_GAP) / n_met)
+vasc_met_bot = VASC_BOT_PAD + VASC_LABEL_H
+# image rows stack upward from the metric row, each carrying a title above it
+vasc_row_bot = [vasc_met_bot + VASC_MET_H + VASC_ROW_GAP]
+for _ in range(len(vasc_rows) - 1):
+    vasc_row_bot.append(vasc_row_bot[-1] + vasc_img_w + VASC_TITLE_H
+                        + VASC_IMG_ROW_GAP)
+vasc_row_bot = vasc_row_bot[::-1]          # top row first, matching COND_ORDER
+vasc_top = vasc_row_bot[0] + vasc_img_w + VASC_TITLE_H
+
 # reserve room below Panel B for the extended cards + column labels, then a
-# clearance gap above the chord row (chords shift down with the cards)
-ax_b_bot = CHORD_BOT_PAD + chord_h + card_extend + CHORD_CLEARANCE
+# clearance gap above the validation block
+ax_b_bot = vasc_top + VASC_GAP + card_extend + CHORD_CLEARANCE
 
 L = fc.core_layout(len(ordered_pathways), len(ordered_genes),
                    len(ordered_cts), len(CARD_GENES), max_sp_n, ax_b_bot,
                    label_w_in=label_w,
-                   n_path_extra=ROW_GAP, n_gene_extra=ROW_GAP,
-                   card_extend_in=card_extend)
+                   n_path_extra=GROUP_EXTRA, n_gene_extra=GROUP_EXTRA,
+                   card_extend_in=card_extend, cards_pad_in=CARDS_PAD)
+
+# reserve Panel A (trajectory arcs) as a full-width row above the gene cards.
+# Figures 3/5 fit their arcs to the dotplot width, but this figure's dotplot is
+# only 11 columns (~2.2 in) -- too narrow for two readable facets -- so the arc
+# row spans the whole panel block (dotplot + cards) instead.
+ARC_H, ARC_GAP, ARC_FGAP = 1.45, 0.50, 0.45
+arc_bot_in = L.cards_top_in + ARC_GAP
+L.fig_h += ARC_GAP + ARC_H
+arc_fw = (span - (len(THEME_GROUPS) - 1) * ARC_FGAP) / len(THEME_GROUPS)
+
+# Right margin, top-aligned with the gene cards and dotplots: chords stack
+# from the top, then the card legend level with the Cxcl12/Slc2a1 cards, then
+# the CCC legend. The rotated axis title sits to the right of the circles, so
+# the margin carries the column width plus room for that label.
+right_col_left = L.cards_left_in + L.card_w_max_in + RIGHT_COL_PAD
+_ytitle_w = 0.34
+L.fig_w = max(L.fig_w,
+              right_col_left + RIGHT_COL_W + _ytitle_w + 0.10)
+_cpitch = L.card_total_h_in + fc.CARD_GAP_IN
+cpw = CHORD_MAX_W
+cph = cpw * 0.85
+_cell_h = CHORD_TITLE_H + cph + CHORD_PAD
+chord_band_top = L.cards_top_in
+chord_specs = []
+for _k, _theme in enumerate(CHORD_THEMES):
+    _cell_top = chord_band_top - _k * (_cell_h + CHORD_COL_GAP)
+    chord_specs.append((_theme, right_col_left + (RIGHT_COL_W - cpw) / 2,
+                        _cell_top - CHORD_TITLE_H - cph, cpw, cph))
+chord_band_bot = min(s[2] for s in chord_specs) - CHORD_PAD
+# card legend level with the Cxcl12 card, CCC legend below it
+card_leg_top = min(chord_band_bot - CHORD_LEG_GAP,
+                   L.cards_top_in - CARD_LEG_AT * _cpitch)
+card_leg_h = 2.12          # the legend's spacing needs >= 2.08 in
+
 fig = plt.figure(figsize=(L.fig_w, L.fig_h))
 ax_a = fc.add_axes(fig, L, L.ax_left_in, L.ax_a_bot_in, L.ax_w_in, L.ax_h_a_in)
 ax_b = fc.add_axes(fig, L, L.ax_left_in, L.ax_b_bot_in, L.ax_w_in, L.ax_h_b_in)
@@ -345,20 +497,129 @@ fc.draw_band_anno(fig, L, L.ax_a_bot_in, L.ax_h_a_in, len(ordered_pathways),
 fc.draw_band_anno(fig, L, L.ax_b_bot_in, L.ax_h_b_in, len(ordered_genes),
                   [gene_band[g] for g in ordered_genes], BAND_COLORS,
                   row_y=row_y_b)
+
+# rotated super-group titles, one per theme-group, right of the colour strip
+_gx = L.anno_x_in + fc.ANNO_W_IN + 0.20
+fc.draw_group_labels(fig, L, L.ax_a_bot_in, L.ax_h_a_in, row_y_a,
+                     row_sections_a, GROUP_LABELS, _gx)
+fc.draw_group_labels(fig, L, L.ax_b_bot_in, L.ax_h_b_in, row_y_b,
+                     row_sections_b, GROUP_LABELS, _gx)
 tleg_bot = fc.draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                                [b for b, _ in GENE_BANDS], BAND_COLORS)
-fc.draw_forest_legend(fig, L)
+fc.draw_forest_legend(fig, L, left_in=right_col_left,
+                      top_in=card_leg_top, h_in=card_leg_h,
+                      w_in=RIGHT_COL_W)
 fc.draw_cards(fig, L, CARD_GENES, cards, sp_coords)
 
-specs = fc.chord_grid_specs(CHORD_THEMES, L.ax_left_in, CHORD_BOT_PAD, cpw, cph,
-                            CHORD_NCOLS, CHORD_PANEL_GAP, row_gap=CHORD_ROW_GAP,
-                            title_h=CHORD_TITLE_H)
-cy = (min(s[2] for s in specs) + max(s[2] + s[4] for s in specs)) / 2
-fc.draw_chord_row(fig, L, specs, chord_edges, CHORD_THEME_LIGANDS,
+# --- Panel A: peripartum trajectory arcs (spans the dotplot width) -----------
+XS = np.array([0.0, 1.0, 2.0])
+XLAB = ['Null', 'Preg', 'Post']
+_arcs = {b: band_arc(b) for _, bs in THEME_GROUPS for b in bs}
+_meds = [np.median(_arcs[b][:, j]) for b in _arcs for j in (0, 1)
+         if len(_arcs[b])]
+arc_ylim = (min(_meds) - 0.5, max(_meds) + 0.4)
+arc_rng = arc_ylim[1] - arc_ylim[0]
+arc_ticks = [t for t in (-1, 0, 1, 2) if arc_ylim[0] <= t <= arc_ylim[1]]
+
+
+def _place_arc_labels(ax, items, min_gap):
+    """Draw right-side band labels at their Post-endpoint y, nudged apart
+    (order preserved) so near-coincident arcs don't overprint."""
+    items = sorted(items, key=lambda t: t[0])
+    ys = [t[0] for t in items]
+    for i in range(1, len(ys)):
+        if ys[i] - ys[i - 1] < min_gap:
+            ys[i] = ys[i - 1] + min_gap
+    for (y0, txt, col), y in zip(items, ys):
+        ax.text(2.12, y, txt, color=col, fontsize=7.5, va='center',
+                ha='left', fontweight='bold')
+
+
+for k, (_, bands) in enumerate(THEME_GROUPS):
+    fx = L.ax_left_in + k * (arc_fw + ARC_FGAP)
+    ax = fc.add_axes(fig, L, fx, arc_bot_in, arc_fw, ARC_H)
+    ax.axhline(0, color='#999', lw=0.8, ls='--', zorder=1)
+    # dashed frame on the pregnant column (Panels B/C detail this preg v null)
+    ax.add_patch(plt.Rectangle((0.6, arc_ylim[0] + 0.04 * arc_rng), 0.8,
+                 arc_rng * 0.92, fill=False, edgecolor='black', lw=1.0,
+                 ls=(0, (4, 3)), zorder=1.5))
+    labs = []
+    for b in bands:
+        med = [0, np.median(_arcs[b][:, 0]), np.median(_arcs[b][:, 1])]
+        col = BAND_COLORS[b]
+        ax.plot(XS, med, color=col, lw=2.4, marker='o', ms=5, zorder=4,
+                solid_capstyle='round')
+        labs.append((med[2], b, col))
+    _place_arc_labels(ax, labs, arc_rng * 0.075)
+    ax.set_xlim(-0.15, 4.6); ax.set_ylim(arc_ylim)
+    ax.set_xticks(XS); ax.set_xticklabels(XLAB, fontsize=fc.LABEL_FS)
+    ax.tick_params(length=2, labelsize=fc.LABEL_FS)
+    if k == 0:
+        ax.set_yticks(arc_ticks)
+        ax.set_ylabel('median NES', fontsize=fc.LABEL_FS)
+    else:
+        ax.set_yticks([])
+    fig.text((fx + arc_fw / 2) / L.fig_w,
+             (arc_bot_in + ARC_H + 0.14) / L.fig_h, GROUP_LABELS[k],
+             ha='center', va='bottom', fontsize=fc.TITLE_FS)
+
+cy = (min(s[2] for s in chord_specs)
+      + max(s[2] + s[4] for s in chord_specs)) / 2
+fc.draw_chord_row(fig, L, chord_specs, chord_edges, CHORD_THEME_LIGANDS,
                   CHORD_THEME_TITLES, chord_cell_set, subclass_colors,
-                  ytitle_x_in=L.ax_left_in - 0.34, ytitle_cy_in=cy)
-fc.draw_chord_legend(fig, L, tleg_bot - fc.GENE_PITCH, chord_cell_set,
-                     subclass_colors)
+                  title_off_in=CHORD_TITLE_OFF,
+                  ytitle_x_in=right_col_left + RIGHT_COL_W + _ytitle_w / 2,
+                  ytitle_cy_in=cy, ytitle_fs=fc.TITLE_FS)
+fc.draw_chord_legend(fig, L, card_leg_top - card_leg_h - CHORD_LEG_GAP,
+                     chord_cell_set, subclass_colors,
+                     left_in=right_col_left, w_in=RIGHT_COL_W, align='left')
+
+# --- CD31 validation block (bottom): representative fields + morphometrics ---
+# n = 4 nulliparous and 5 pregnant animals, 28 fields, one representative field
+# per animal. The unit of analysis is the animal: fields within an animal are
+# near-replicates (vessel-area ICC 0.85), so they are drawn as grey points
+# behind the black animal means rather than tested as independent samples.
+# Whiskers are 95% confidence intervals, not SEM, because these are null
+# results and the interval, not the p-value, is the finding.
+vasc_left = L.ax_left_in + VASC_YLAB
+
+for r, ((cond, animals), row_bot) in enumerate(zip(vasc_rows, vasc_row_bot)):
+    col = fc.IF_BAR_COLORS[r]
+    for i, an in enumerate(animals):
+        rgb, _, box = fc.vascular_representative(
+            working_dir, vasc_roi, vasc_animal, which=an)
+        x_in = vasc_left + i * (vasc_img_w + VASC_IMG_GAP)
+        ax = fc.add_axes(fig, L, x_in, row_bot, vasc_img_w, vasc_img_w)
+        ax.imshow(rgb, interpolation='nearest')
+        ax.set_xticks([]); ax.set_yticks([])
+        for s in ax.spines.values():
+            s.set_linewidth(0.9); s.set_color(col)
+        ax.text(0.04, 0.96, an, transform=ax.transAxes, ha='left', va='top',
+                color='white', fontsize=fc.LABEL_FS)
+        if r == 0 and i == 0:
+            bar = 100.0 * 1.7583 / box
+            ax.plot([0.05, 0.05 + bar], [0.07, 0.07], color='white', lw=2.0,
+                    transform=ax.transAxes, solid_capstyle='butt')
+            ax.text(0.05, 0.10, '100 µm', color='white', ha='left',
+                    va='bottom', fontsize=fc.LABEL_FS - 1.5,
+                    transform=ax.transAxes)
+    fig.text(vasc_left / L.fig_w, (row_bot + vasc_img_w + 0.05) / L.fig_h,
+             cond, ha='left', va='bottom', fontsize=fc.TITLE_FS,
+             color='black')
+_vasc_mid = (vasc_row_bot[-1] + vasc_row_bot[0] + vasc_img_w) / 2
+fig.text((L.ax_left_in + 0.02) / L.fig_w, _vasc_mid / L.fig_h, 'CD31 / DAPI',
+         rotation=90, ha='center', va='center', fontsize=fc.TITLE_FS)
+
+for j, (col_name, label) in enumerate(VASC_METRICS):
+    ax = fc.add_axes(fig, L, vasc_left + j * (vasc_met_w + VASC_MET_GAP),
+                     vasc_met_bot, vasc_met_w, VASC_MET_H)
+    srow = vasc_stats.loc[col_name.replace('manual_', '')]
+    fc.draw_group_barplot(
+        ax, [vasc_animal.loc[vasc_animal.condition == c, col_name].to_numpy()
+             for c in COND_ORDER], label,
+        roi_values=[vasc_roi.loc[vasc_roi.condition == c, col_name].to_numpy()
+                    for c in COND_ORDER],
+        err='ci', p=float(srow.p_welch), annot=f'g = {srow.hedges_g:+.2f}')
 
 fc.save(fig, f'{out_dir}/figure_4')
 print(f'wrote {out_dir}/figure_4.png and .svg '

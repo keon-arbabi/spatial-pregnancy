@@ -67,6 +67,11 @@ def sub_num(s):
     p = s.split(' ', 1)[0]
     return int(p) if p.isdigit() else 9999
 
+def sub_code(s):
+    """Leading numeric code of a subclass ('318 Astro-NT NN' -> '318')."""
+    p = s.split(' ', 1)[0]
+    return p if p.isdigit() else ''
+
 def included_subclasses(min_cells=MIN_CELLS, min_platforms=MIN_PLATFORMS):
     """Subclasses with >= min_cells in >= min_platforms platforms (figure 1)."""
     n_pass = {}
@@ -94,19 +99,23 @@ def neighbourhood_blocks(keep):
 
 #region gsea themes ###########################################################
 
-# Curated theme pathways from the deep-dive figures, consolidated into three
-# super-themes: Neuronal, Glial (microglia + vascular), Lipid (standalone).
+# Curated theme pathways, consolidated into three super-themes: Neuronal,
+# Glial (microglia + vascular), Lipid. The bands and their pathway sets mirror
+# PATHWAY_BANDS in 13_figure_3.py, 14_figure_4.py and 15_figure_5.py exactly,
+# so the curated core of this landscape is the union of what the deep-dive
+# figures show. Keep them in sync when a deep-dive band changes.
 # (theme, color, [(band, [(pathway, label)])]).
 GSEA_THEMES = [
-    ('Neuron', '#5B6BBF', [
+    ('Neuron', '#5B6BBF', [                          # 13_figure_3.py
         ('Synaptic adhesion', [
             ('GOBP_SYNAPSE_ASSEMBLY', 'synapse assembly'),
-            ('GOBP_MAINTENANCE_OF_SYNAPSE_STRUCTURE', 'synapse maintenance'),
+            ('GOBP_SYNAPSE_ORGANIZATION', 'synapse organization'),
             ('GOBP_HOMOPHILIC_CELL_CELL_ADHESION', 'homophilic cell adhesion'),
         ]),
         ('Excitability', [
             ('GOBP_REGULATION_OF_MEMBRANE_POTENTIAL', 'membrane potential'),
-            ('GOBP_MONOATOMIC_ION_TRANSPORT', 'ion transport'),
+            ('GOBP_REGULATION_OF_POSTSYNAPTIC_MEMBRANE_POTENTIAL',
+             'postsynaptic potential'),
             ('GOBP_POTASSIUM_ION_TRANSPORT', 'potassium transport'),
         ]),
         ('GABA & neuropeptide', [
@@ -117,13 +126,12 @@ GSEA_THEMES = [
         ('Glucocorticoid stress', [
             ('GOBP_RESPONSE_TO_CORTICOSTEROID', 'corticosteroid response'),
             ('GOBP_RESPONSE_TO_STEROID_HORMONE', 'steroid hormone response'),
-            ('GOBP_CELLULAR_RESPONSE_TO_CORTICOSTEROID_STIMULUS',
-             'corticosteroid signaling'),
         ]),
         ('Neurotrophic', [
-            ('GOBP_RESPONSE_TO_GROWTH_FACTOR', 'growth factor response'),
-            ('GOBP_RESPONSE_TO_FIBROBLAST_GROWTH_FACTOR', 'FGF response'),
             ('GOBP_RESPONSE_TO_NERVE_GROWTH_FACTOR', 'NGF response'),
+            ('GOBP_NEUROTROPHIN_TRK_RECEPTOR_SIGNALING_PATHWAY',
+             'Trk receptor signaling'),
+            ('GOBP_RESPONSE_TO_GROWTH_FACTOR', 'growth factor response'),
         ]),
         ('Neuronal development', [
             ('GOBP_REGULATION_OF_NEURON_DIFFERENTIATION',
@@ -131,16 +139,22 @@ GSEA_THEMES = [
             ('GOBP_NEURON_FATE_COMMITMENT', 'neuron fate commitment'),
             ('GOBP_AXON_DEVELOPMENT', 'axon development'),
         ]),
+        ('Activity-dependent plasticity', [
+            ('GOBP_REGULATION_OF_SYNAPTIC_PLASTICITY', 'synaptic plasticity'),
+            ('GOBP_REGULATION_OF_TRANS_SYNAPTIC_SIGNALING',
+             'trans-synaptic signaling'),
+            ('GOBP_REGULATION_OF_LONG_TERM_SYNAPTIC_POTENTIATION',
+             'long-term potentiation'),
+        ]),
     ]),
-    ('Lipid', '#E69F00', [
+    ('Lipid', '#E69F00', [                           # 15_figure_5.py
         ('Membrane lipid', [
             ('GOBP_MEMBRANE_LIPID_METABOLIC_PROCESS',
              'membrane lipid metabolism'),
-            ('GOBP_MEMBRANE_LIPID_BIOSYNTHETIC_PROCESS',
-             'membrane lipid biosynthesis'),
+            ('GOBP_GLYCEROLIPID_METABOLIC_PROCESS', 'glycerolipid metabolism'),
             ('GOBP_LIPID_TRANSLOCATION', 'lipid translocation'),
         ]),
-        ('Sphingolipid', [
+        ('Ceramide & sphingolipid', [
             ('GOBP_SPHINGOLIPID_METABOLIC_PROCESS', 'sphingolipid metabolism'),
             ('GOBP_CERAMIDE_METABOLIC_PROCESS', 'ceramide metabolism'),
         ]),
@@ -148,64 +162,48 @@ GSEA_THEMES = [
             ('GOBP_FATTY_ACID_CATABOLIC_PROCESS', 'fatty acid catabolism'),
             ('GOBP_FATTY_ACID_BETA_OXIDATION', 'fatty acid β-oxidation'),
         ]),
-        ('Cholesterol & carriers', [
+        ('Sterol & lipoprotein supply', [
             ('GOBP_REGULATION_OF_LIPID_LOCALIZATION',
              'lipid localization regulation'),
-            ('GOBP_LIPOPROTEIN_METABOLIC_PROCESS', 'lipoprotein metabolism'),
-            ('GOBP_STEROID_BIOSYNTHETIC_PROCESS', 'steroid biosynthesis'),
+            ('GOBP_NEGATIVE_REGULATION_OF_LIPID_TRANSPORT', 'lipid transport'),
+        ]),
+        ('Lipoprotein uptake & efflux', [
+            ('GOBP_POSITIVE_REGULATION_OF_LIPID_LOCALIZATION', 'lipid uptake'),
+            ('GOBP_POSITIVE_REGULATION_OF_CHOLESTEROL_EFFLUX',
+             'cholesterol efflux'),
         ]),
     ]),
-    ('Vascular', '#CC3311', [
-        ('Angiogenic sprouting', [
-            ('GOBP_VASCULATURE_DEVELOPMENT', 'vasculature development'),
-            ('GOBP_SPROUTING_ANGIOGENESIS', 'sprouting angiogenesis'),
-            ('GOBP_VASCULOGENESIS', 'vasculogenesis'),
-        ]),
-        ('VEGF axis', [
-            ('GOBP_CELLULAR_RESPONSE_TO_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_'
-             'STIMULUS', 'response to VEGF'),
-            ('GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_SIGNALING_PATHWAY',
-             'VEGF signaling'),
-            ('GOBP_VASCULAR_ENDOTHELIAL_GROWTH_FACTOR_PRODUCTION',
-             'VEGF production'),
-        ]),
-        ('Endothelial dynamics', [
-            ('GOBP_ENDOTHELIAL_CELL_PROLIFERATION',
-             'endothelial proliferation'),
-            ('GOBP_ENDOTHELIAL_CELL_MIGRATION', 'endothelial migration'),
-            ('GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_MIGRATION',
-             'blood-vessel EC migration'),
-        ]),
-        ('Barrier & ECM', [
-            ('GOBP_ESTABLISHMENT_OF_ENDOTHELIAL_BARRIER',
-             'endothelial barrier'),
-            ('GOBP_TIGHT_JUNCTION_ORGANIZATION', 'tight junction organization'),
-            ('GOBP_COLLAGEN_BIOSYNTHETIC_PROCESS', 'collagen biosynthesis'),
-        ]),
-    ]),
-    ('Microglia', '#117733', [
-        ('Immune activation', [
+    ('Microglia', '#117733', [                       # 14_figure_4.py
+        ('Innate immune activation', [
             ('GOBP_ADAPTIVE_IMMUNE_RESPONSE', 'adaptive immune response'),
             ('GOBP_ACTIVATION_OF_IMMUNE_RESPONSE',
              'activation of immune response'),
-            ('GOBP_REGULATION_OF_INNATE_IMMUNE_RESPONSE',
-             'innate immune response'),
-        ]),
-        ('Cytokine production', [
-            ('GOBP_CYTOKINE_PRODUCTION', 'cytokine production'),
-            ('GOBP_INTERLEUKIN_1_PRODUCTION', 'IL-1 production'),
-            ('GOBP_TUMOR_NECROSIS_FACTOR_SUPERFAMILY_CYTOKINE_PRODUCTION',
-             'TNF production'),
-        ]),
-        ('Inflammatory response', [
             ('GOBP_INFLAMMATORY_RESPONSE', 'inflammatory response'),
             ('GOBP_ACUTE_INFLAMMATORY_RESPONSE', 'acute inflammatory response'),
-            ('GOBP_NEUROINFLAMMATORY_RESPONSE', 'neuroinflammatory response'),
+        ]),
+        ('Cytokine signalling', [
+            ('GOBP_CYTOKINE_PRODUCTION', 'cytokine production'),
+            ('GOBP_CYTOKINE_MEDIATED_SIGNALING_PATHWAY',
+             'cytokine-mediated signaling'),
         ]),
         ('Myeloid effector', [
-            ('GOBP_MACROPHAGE_ACTIVATION', 'macrophage activation'),
             ('GOBP_MYELOID_LEUKOCYTE_MIGRATION', 'myeloid leukocyte migration'),
-            ('GOBP_LEUKOCYTE_CHEMOTAXIS', 'leukocyte chemotaxis'),
+            ('GOBP_LEUKOCYTE_DIFFERENTIATION', 'leukocyte differentiation'),
+        ]),
+    ]),
+    ('Vascular', '#CC3311', [                        # 14_figure_4.py
+        ('Angiogenic sprouting', [
+            ('GOBP_VASCULATURE_DEVELOPMENT', 'vasculature development'),
+            ('GOBP_SPROUTING_ANGIOGENESIS', 'sprouting angiogenesis'),
+        ]),
+        ('Endothelial dynamics', [
+            ('GOBP_ENDOTHELIAL_CELL_MIGRATION', 'endothelial migration'),
+            ('GOBP_ENDOTHELIAL_CELL_PROLIFERATION',
+             'endothelial proliferation'),
+        ]),
+        ('Barrier & ECM', [
+            ('GOBP_COLLAGEN_BIOSYNTHETIC_PROCESS', 'collagen biosynthesis'),
+            ('GOBP_EXTRACELLULAR_MATRIX_ASSEMBLY', 'ECM assembly'),
         ]),
     ]),
 ]
@@ -239,16 +237,18 @@ def assign_theme3(p):
             return t
     return None
 
+# Call-outs are derived from GSEA_THEMES rather than written out, so the bands
+# named on the figure cannot drift from the bands actually curated above (and
+# therefore from figures 3-5).
+BANDS_OF_THEME3 = {t: [] for t in THEME3}
+for _theme, _, _bands in GSEA_THEMES:
+    for _band, _ in _bands:
+        BANDS_OF_THEME3[THEME3_OF_FIG[_theme]].append(_band)
+
 THEME3_CALLOUT = {
-    'Neuronal': r'$\mathbf{Neuronal}$' + '\n• Synaptic & ion channels\n'
-                '• Neuropeptide / GABA\n• Glucocorticoid stress\n'
-                '• Neurotrophic\n• Neuronal development',
-    'Glial': r'$\mathbf{Glial}$' + '\n• Immune activation / cytokine\n'
-             '• Inflammation / myeloid\n• Angiogenesis / VEGF\n'
-             '• Endothelial barrier & ECM',
-    'Lipid': r'$\mathbf{Lipid}$' + '\n• Membrane & sphingolipid\n'
-             '• Fatty-acid catabolism\n• Cholesterol & carriers',
-}
+    t: r'$\mathbf{%s}$' % t + '\n'
+       + '\n'.join(f'• {b}' for b in BANDS_OF_THEME3[t])
+    for t in THEME3}
 
 GSEA_CAP = 4.0           # cap on |signed -log10 emp_p|
 GSEA_CONTRAST = 2.5      # color saturation range (smaller = punchier)
@@ -263,10 +263,22 @@ BG_ALPHA = 0.22          # faded background (non-theme GO terms)
 ROW_H, BLOCK_GAP, BOX_LW = 0.10, 0.12, 0.6
 M_L, M_T, M_B = 0.10, 0.20, 0.85
 NEI_W, CELL_LAB_W, CBAR_W = 0.20, 1.50, 0.09
+TICK_LEN = 2.0            # row tick marks left of each subclass strip, points
+LAB_PAD = 0.055           # gap between panel A's cell-type label and its strip
+CODE_PAD = 0.055          # gap between panel B's subclass code and its strip
 AX_GAP = 0.05
 PANEL_GAP, PANEL_W, TOP_H, RIGHT_W = 0.50, 4.4, 0.40, 0.25
 U = (PANEL_W - len(contrasts) * AX_GAP) / 4          # contrast unit (PREG = 2U)
 HEATW = PANEL_W                                       # both panels share width
+
+
+def row_ticks(ax, n):
+    """One tick per row, protruding left of a subclass colour strip. The strip
+    has no spines, but tick marks draw independently of them."""
+    ax.set_yticks(np.arange(n))
+    ax.set_yticklabels([])
+    ax.tick_params(axis='y', left=True, right=False, direction='out',
+                   length=TICK_LEN, width=0.5, color='black', pad=1)
 
 
 def build_figure():
@@ -372,13 +384,15 @@ def build_figure():
         # subclass colour bar + cell-type + neighbourhood labels
         cax = fig.add_axes(rect(x_cbar, by, CBAR_W, bh))
         cax.set_xlim(0, 1); cax.set_ylim(n - 0.5, -0.5)
-        cax.set_xticks([]); cax.set_yticks([])
+        cax.set_xticks([])
         for s in cax.spines.values():
             s.set_visible(False)
+        row_ticks(cax, n)
         for k, c in enumerate(cts):
             cax.add_patch(Rectangle((0, k - 0.5), 1, 1,
                           facecolor=subclass_color.get(c, '#333'), lw=0))
-            fig.text((x_cbar - 0.04) / W, 1 - (by + (k + 0.5) * ROW_H) / H, c,
+            fig.text((x_cbar - LAB_PAD) / W,
+                     1 - (by + (k + 0.5) * ROW_H) / H, c,
                      ha='right', va='center', fontsize=5.5)
         fig.text((M_L + NEI_W / 2) / W, 1 - (by + bh / 2) / H, name,
                  rotation=90, ha='center', va='center', fontsize=8)
@@ -412,15 +426,22 @@ def build_figure():
                 ax.set_xticklabels([])
             x += contrast_w[j] + AX_GAP
 
-        # Panel B: subclass strip + GSEA landscape (faded bg + bright bands)
-        sc2 = fig.add_axes(rect(x_heat - 0.04 - CBAR_W, by, CBAR_W, bh))
+        # Panel B: subclass code + strip + GSEA landscape (faded bg + bands)
+        x_sc2 = x_heat - 0.04 - CBAR_W
+        sc2 = fig.add_axes(rect(x_sc2, by, CBAR_W, bh))
         sc2.set_xlim(0, 1); sc2.set_ylim(n - 0.5, -0.5)
-        sc2.set_xticks([]); sc2.set_yticks([])
+        sc2.set_xticks([])
         for s in sc2.spines.values():
             s.set_visible(False)
+        row_ticks(sc2, n)
         for k, c in enumerate(cts):
             sc2.add_patch(Rectangle((0, k - 0.5), 1, 1,
                           facecolor=subclass_color.get(c, '#333'), lw=0))
+            # numeric subclass code, so panel B rows can be read without
+            # tracking back across the panel gap to the panel A labels
+            fig.text((x_sc2 - CODE_PAD) / W,
+                     1 - (by + (k + 0.5) * ROW_H) / H, sub_code(c),
+                     ha='right', va='center', fontsize=5.5)
 
         hb = fig.add_axes(rect(x_heat, by, HEATW, bh))
         bgd = np.where(So[ridx], Mo[ridx], np.nan)

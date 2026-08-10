@@ -355,6 +355,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
     <input id="filter-search" type="search" placeholder="search…">
     <div id="filter-list" class="list" style="margin-top:4px;max-height:340px"></div>
 
+    <div id="gene-panel">
     <h2>gene expression</h2>
     <div class="gene-search-wrap">
         <input id="gene-input" type="text" placeholder="type a gene name…"
@@ -370,6 +371,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
             <span id="cmap-max">max</span>
             <span style="margin-left:8px">log<sub>2</sub>(cpm+1) per cell</span>
         </div>
+    </div>
     </div>
 </aside>
 
@@ -1530,6 +1532,14 @@ function redrawViolinIfActive() {
 // gene expression loading + violin plot
 //----------------------------------------------------------------------------
 function initGene() {
+    // the export can omit per-gene data (export_genes = False); with no gene
+    // lists in the manifest there is nothing to search, so hide the panel.
+    const anyGenes = Object.values(state.manifest.datasets || {})
+        .some(d => d.genes && d.genes.length);
+    if (!anyGenes) {
+        document.getElementById('gene-panel').style.display = 'none';
+        return;
+    }
     const input = document.getElementById('gene-input');
     const sgBox = document.getElementById('gene-suggestions');
     let activeIdx = -1;

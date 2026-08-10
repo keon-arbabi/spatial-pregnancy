@@ -64,6 +64,11 @@ drop_samples_map = {
     'slidetags': [],
 }
 
+# per-gene expression export. viewer.html keys its "gene expression" panel off
+# manifest['datasets'][name]['genes'], so with this False the binaries are not
+# written, the key is omitted, and the panel is hidden in the viewer.
+export_genes = False
+
 #endregion
 #region helpers ################################################################
 
@@ -478,109 +483,114 @@ for name in datasets:
 #endregion
 #region per-gene expression export #############################################
 
-import re
-import scipy.sparse as sp
+if not export_genes:
+    print('\n[genes] export disabled (export_genes = False); no per-gene '
+          'binaries written and no gene lists added to the manifest, so the '
+          'gene expression panel is hidden in viewer.html')
+else:
+    import re
+    import scipy.sparse as sp
 
-TARGET_SUM = 1e4  # library-size normalize to this
+    TARGET_SUM = 1e4  # library-size normalize to this
 
-# filter genes the same way 06_sumrank.py does for slidetags
-# (protein-coding AND NOT mt AND NOT ribo). for merfish/xenium the gene panel
-# is curated so no filter is applied.
-filter_genes_map = {
-    'xenium':    False,
-    'merfish':   False,
-    'slidetags': True,
-}
+    # filter genes the same way 06_sumrank.py does for slidetags
+    # (protein-coding AND NOT mt AND NOT ribo). for merfish/xenium the gene panel
+    # is curated so no filter is applied.
+    filter_genes_map = {
+        'xenium':    False,
+        'merfish':   False,
+        'slidetags': True,
+    }
 
-# load protein-coding gene list (same source as 06_sumrank.py)
-_pc_df = pd.read_csv(
-    f'{working_dir}/input/MRK_ENSEMBL.csv', header=None)
-PROTEIN_CODING = set(
-    _pc_df[_pc_df[8] == 'protein coding gene'][1].astype(str).tolist())
-del _pc_df
-print(f'[filter] {len(PROTEIN_CODING):,} protein-coding gene symbols loaded')
+    # load protein-coding gene list (same source as 06_sumrank.py)
+    _pc_df = pd.read_csv(
+        f'{working_dir}/input/MRK_ENSEMBL.csv', header=None)
+    PROTEIN_CODING = set(
+        _pc_df[_pc_df[8] == 'protein coding gene'][1].astype(str).tolist())
+    del _pc_df
+    print(f'[filter] {len(PROTEIN_CODING):,} protein-coding gene symbols loaded')
 
-_mt_re = re.compile(r'^(mt-|MT-)')
-_ribo_re = re.compile(r'^(Rps|Rpl)')
+    _mt_re = re.compile(r'^(mt-|MT-)')
+    _ribo_re = re.compile(r'^(Rps|Rpl)')
 
-def is_keep_gene(g):
-    return (g in PROTEIN_CODING
-            and not _mt_re.match(g)
-            and not _ribo_re.match(g))
+    def is_keep_gene(g):
+        return (g in PROTEIN_CODING
+                and not _mt_re.match(g)
+                and not _ribo_re.match(g))
 
-for name in datasets:
-    print(f'\n[{name}] exporting gene expression...')
-    p = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
-    gene_dir = f'{out_dir}/{name}/genes'
-    os.makedirs(gene_dir, exist_ok=True)
+    for name in datasets:
+        print(f'\n[{name}] exporting gene expression...')
+        p = f'{working_dir}/output/{name}/03_adata_query_{name}.h5ad'
+        gene_dir = f'{out_dir}/{name}/genes'
+        os.makedirs(gene_dir, exist_ok=True)
 
-    with h5py.File(p, 'r') as f:
-        # read gene names from var
-        var = f['var']
-        if '_index' in var:
-            gene_names = var['_index'][:]
-        else:
-            gene_names = var[list(var.keys())[0]][:]
-        gene_names = [g.decode() if isinstance(g, bytes) else str(g)
-                      for g in gene_names]
-        n_genes = len(gene_names)
+        with h5py.File(p, 'r') as f:
+            # read gene names from var
+            var = f['var']
+            if '_index' in var:
+                gene_names = var['_index'][:]
+            else:
+                gene_names = var[list(var.keys())[0]][:]
+            gene_names = [g.decode() if isinstance(g, bytes) else str(g)
+                          for g in gene_names]
+            n_genes = len(gene_names)
 
-        # read sample_rep + sample for ordering and drop filter
-        obs = f['obs']
-        sample_rep_arr = read_obs_column(obs, 'sample_rep').astype(str)
-        sample_arr_full = read_obs_column(obs, 'sample').astype(str)
-        n_cells = len(sample_rep_arr)
+            # read sample_rep + sample for ordering and drop filter
+            obs = f['obs']
+            sample_rep_arr = read_obs_column(obs, 'sample_rep').astype(str)
+            sample_arr_full = read_obs_column(obs, 'sample').astype(str)
+            n_cells = len(sample_rep_arr)
 
-        # keep mask (drop samples listed for this dataset)
-        drop = drop_samples_map.get(name, [])
-        keep = ~np.isin(sample_arr_full, drop) \
-            if drop else np.ones(n_cells, dtype=bool)
-        # build cell ordering: within-dataset sorted by sample_rep, KEEP cells
-        sorted_reps = sorted(np.unique(sample_rep_arr[keep]))
-        gene_order = np.concatenate(
-            [np.where((sample_rep_arr == rep) & keep)[0]
-             for rep in sorted_reps])
+            # keep mask (drop samples listed for this dataset)
+            drop = drop_samples_map.get(name, [])
+            keep = ~np.isin(sample_arr_full, drop) \
+                if drop else np.ones(n_cells, dtype=bool)
+            # build cell ordering: within-dataset sorted by sample_rep, KEEP cells
+            sorted_reps = sorted(np.unique(sample_rep_arr[keep]))
+            gene_order = np.concatenate(
+                [np.where((sample_rep_arr == rep) & keep)[0]
+                 for rep in sorted_reps])
 
-        # read sparse X matrix (CSR) — RAW counts
-        X_grp = f['X']
-        data = X_grp['data'][:].astype(np.float32)
-        indices = X_grp['indices'][:]
-        indptr = X_grp['indptr'][:]
-        X = sp.csr_matrix((data, indices, indptr), shape=(n_cells, n_genes))
-        del data, indices, indptr
+            # read sparse X matrix (CSR) — RAW counts
+            X_grp = f['X']
+            data = X_grp['data'][:].astype(np.float32)
+            indices = X_grp['indices'][:]
+            indptr = X_grp['indptr'][:]
+            X = sp.csr_matrix((data, indices, indptr), shape=(n_cells, n_genes))
+            del data, indices, indptr
 
-    # filter genes (06_sumrank.py convention: protein_coding AND NOT mt
-    # AND NOT ribo). only applied to datasets flagged in filter_genes_map.
-    if filter_genes_map.get(name, False):
-        keep_gene_idx = [j for j, g in enumerate(gene_names) if is_keep_gene(g)]
-        kept_names = [gene_names[j] for j in keep_gene_idx]
-        print(f'[{name}] gene filter: '
-              f'{len(kept_names):,}/{n_genes:,} kept '
-              f'(protein_coding ∧ ¬mt ∧ ¬ribo)')
-        X = X[:, keep_gene_idx]
-        gene_names = kept_names
-        n_genes = len(gene_names)
+        # filter genes (06_sumrank.py convention: protein_coding AND NOT mt
+        # AND NOT ribo). only applied to datasets flagged in filter_genes_map.
+        if filter_genes_map.get(name, False):
+            keep_gene_idx = [j for j, g in enumerate(gene_names) if is_keep_gene(g)]
+            kept_names = [gene_names[j] for j in keep_gene_idx]
+            print(f'[{name}] gene filter: '
+                  f'{len(kept_names):,}/{n_genes:,} kept '
+                  f'(protein_coding ∧ ¬mt ∧ ¬ribo)')
+            X = X[:, keep_gene_idx]
+            gene_names = kept_names
+            n_genes = len(gene_names)
 
-    # convert to CSC for efficient column access
-    print(f'[{name}] converting to CSC ({n_genes:,} genes, '
-          f'{X.nnz:,} nnz)...')
-    X = X.tocsc()
+        # convert to CSC for efficient column access
+        print(f'[{name}] converting to CSC ({n_genes:,} genes, '
+              f'{X.nnz:,} nnz)...')
+        X = X.tocsc()
 
-    # write per-gene binary = raw counts as float32, in sample_rep order.
-    # client derives: per-cell log2(count/total_counts*1e4+1) for coloring,
-    # per-sample pseudobulk log2(sum_count/n_cells*1e4+1) for violin.
-    for j in range(n_genes):
-        gene = gene_names[j]
-        col = X[:, j].toarray().ravel().astype(np.float32)
-        expr_ordered = col[gene_order]
-        write_atomic(f'{gene_dir}/{gene}.bin', expr_ordered.tobytes())
-        if (j + 1) % 500 == 0 or j + 1 == n_genes:
-            print(f'[{name}]   {j+1:,}/{n_genes:,} genes')
+        # write per-gene binary = raw counts as float32, in sample_rep order.
+        # client derives: per-cell log2(count/total_counts*1e4+1) for coloring,
+        # per-sample pseudobulk log2(sum_count/n_cells*1e4+1) for violin.
+        for j in range(n_genes):
+            gene = gene_names[j]
+            col = X[:, j].toarray().ravel().astype(np.float32)
+            expr_ordered = col[gene_order]
+            write_atomic(f'{gene_dir}/{gene}.bin', expr_ordered.tobytes())
+            if (j + 1) % 500 == 0 or j + 1 == n_genes:
+                print(f'[{name}]   {j+1:,}/{n_genes:,} genes')
 
-    # add gene list to manifest
-    manifest['datasets'][name]['genes'] = gene_names
-    del X
-    print(f'[{name}] wrote {n_genes:,} gene files to {gene_dir}/')
+        # add gene list to manifest
+        manifest['datasets'][name]['genes'] = gene_names
+        del X
+        print(f'[{name}] wrote {n_genes:,} gene files to {gene_dir}/')
 
 write_atomic(
     f'{out_dir}/manifest.json',

@@ -1,3 +1,13 @@
+"""Figure 6: psychiatric-trait heritability mapped onto the maternal brain.
+A) peak Cauchy enrichment per trait per platform;
+B) trait x cell-type heatmap, Slide-tags over Xenium;
+C) per-cell MDD association in situ;
+D) exemplar subclasses across reproductive states.
+Supplementary panels (figS_*) cover trait specificity, platform concordance,
+trait correlation and the Xenium-only subclasses.
+Reads the gsMap tables written by 09_gsmap.py.
+"""
+
 #region imports and setup ######################################################
 
 import os
@@ -21,7 +31,7 @@ plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['figure.dpi'] = 400
 
-working_dir = 'spatial-pregnancy'
+working_dir = '/home/karbabi/spatial-pregnancy'
 out_dir = f'{working_dir}/output'
 gsmap_dir = f'{out_dir}/gsmap'
 fig_dir = f'{working_dir}/figures/gsmap'
@@ -101,7 +111,7 @@ print(f'cauchy: {cauchy.height}  per_ds: {per_ds.height}  '
 
 #endregion
 
-#region fig 5A — trait ranking #################################################
+#region fig 6A — trait ranking #################################################
 # Peak -log10(p_cauchy) per trait per dataset, Bonferroni lines.
 
 def plot_trait_ranking():
@@ -137,11 +147,11 @@ def plot_trait_ranking():
     ax.tick_params(axis='y', length=0, labelsize=8)
     ax.tick_params(axis='x', labelsize=8)
     fig.tight_layout()
-    _save(fig, 'fig5A_trait_ranking')
+    _save(fig, 'fig6A_trait_ranking')
 
 #endregion
 
-#region fig 5B — trait × cell-type heatmap (across-condition) ##################
+#region fig 6B — trait × cell-type heatmap (across-condition) ##################
 
 def select_featured_cts(n_glut=12, n_gaba=12, n_nn=6):
     sub = cauchy.filter(pl.col('trait').is_in(TOP_TRAITS))
@@ -252,7 +262,7 @@ def plot_condition_heatmap(sig_fdr=0.01):
 
     fig.text(0.99, 0.01, f'* FDR < {sig_fdr:g}', fontsize=8,
              color='black', ha='right', va='bottom')
-    _save(fig, 'fig5B_trait_ct_heatmap')
+    _save(fig, 'fig6B_trait_ct_heatmap')
 
 
 def plot_trait_specificity(ref_trait='MDD',
@@ -505,7 +515,7 @@ def plot_trait_correlation():
 
 #endregion
 
-#region fig 5C — single-cell spatial map #######################################
+#region fig 6C — single-cell spatial map #######################################
 
 _adata_cache = {}
 def _load_adata(dataset):
@@ -569,11 +579,11 @@ def plot_spatial(trait='MDD', condition='PREG'):
                    color='white', fontsize=6)
 
     fig.suptitle(f'{trait} — {condition}', fontsize=11, y=0.98)
-    _save(fig, f'fig5C_spatial_{trait}_{condition}')
+    _save(fig, f'fig6C_spatial_{trait}_{condition}')
 
 #endregion
 
-#region fig 5D — exemplar cell-type trajectories ###############################
+#region fig 6D — exemplar cell-type trajectories ###############################
 
 def _load_percell_scores(trait, cts):
     cts = set(cts)
@@ -718,7 +728,7 @@ def plot_exemplar_trajectories(trait='MDD', cts=None, max_swarm=1200):
     fig.suptitle(f'{trait} enrichment across conditions',
                  fontsize=11, x=0.5, y=0.995, ha='center')
     fig.tight_layout(rect=[0, 0, 1, 0.955])
-    _save(fig, f'fig5D_trajectories_{trait}')
+    _save(fig, f'fig6D_trajectories_{trait}')
 
 
 def plot_xenium_only_supp(trait='MDD', cts=None, max_swarm=1200):

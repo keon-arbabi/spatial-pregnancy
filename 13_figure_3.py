@@ -5,6 +5,7 @@ context columns. Orchestrates the shared blocks in 12_figure_helper.py.
 import os
 import importlib
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import matplotlib.pyplot as plt
@@ -253,6 +254,28 @@ chord_cell_set, chord_edges = fc.build_chord(
     neuron_intrinsic=True, include_nn=True, cell_allow=set(ordered_cts),
     mag_floor=False)
 
+# Panel A trajectory: median NES across platforms per (contrast, pathway, ct);
+# arcs track the pregnancy-responsive (sig-in-pregnancy) neuronal pairs.
+_nes = (pl.read_parquet(f'{working_dir}/output/gsea/perms/real_gsea.parquet')
+        .filter(pl.col('pathway').is_in(ordered_pathways))
+        .group_by(['contrast', 'pathway', 'cell_type'])
+        .agg(pl.col('NES').median().alias('nes')))
+_nl = {(r['contrast'], r['pathway'], r['cell_type']): r['nes']
+       for r in _nes.iter_rows(named=True)}
+_resp = [(r['pathway'], r['cell_type'])
+         for r in gsea.filter(pl.col('pathway').is_in(ordered_pathways))
+         .iter_rows(named=True)
+         if any(t in r['cell_type'] for t in (' Glut', ' Gaba', 'IMN'))]
+
+
+def band_arc(band):
+    """(preg_NES, postpart_NES) rows for a band's responsive pairs."""
+    rows = [(_nl.get(('PREG_vs_CTRL', p, c)),
+             _nl.get(('POSTPART_vs_CTRL', p, c)))
+            for p, c in _resp if pathway_band[p] == band]
+    rows = [(a, b) for a, b in rows if a is not None and b is not None]
+    return np.array(rows) if rows else np.empty((0, 2))
+
 # =============================================================================
 # Layout + draw
 # =============================================================================
@@ -295,6 +318,14 @@ L = fc.core_layout(len(ordered_pathways), len(ordered_genes),
                    n_gene_extra=GROUP_EXTRA, card_extend_in=0,
                    cards_pad_in=CARDS_PAD)
 L.col_x = fc.column_positions(class_spans, len(ordered_cts), SECTION_GAP)
+
+# reserve Panel A (trajectory arcs) above the dotplots: the cards stay top-
+# anchored (float) while the dotplots + chords shift down
+ARC_H, ARC_GAP, ARC_FGAP = 2.2, 1.0, 0.35
+arc_bot_in = L.ax_a_top_in + ARC_GAP
+L.fig_h += ARC_GAP + ARC_H
+L.cards_top_in += ARC_GAP + ARC_H
+
 fig = plt.figure(figsize=(L.fig_w, L.fig_h))
 ax_a = fc.add_axes(fig, L, L.ax_left_in, L.ax_a_bot_in, L.ax_w_in, L.ax_h_a_in)
 ax_b = fc.add_axes(fig, L, L.ax_left_in, L.ax_b_bot_in, L.ax_w_in, L.ax_h_b_in)
@@ -330,6 +361,42 @@ tleg_bot = fc.draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
                                [b for b, _ in GENE_BANDS], BAND_COLORS)
 fc.draw_forest_legend(fig, L)
 fc.draw_cards(fig, L, CARD_GENES, cards, sp_coords)
+
+# --- Panel A: peripartum trajectory arcs (spans the dotplot width) -----------
+XS = np.array([0.0, 1.0, 2.0])
+XLAB = ['Null', 'Preg', 'Post']
+_arcs = {b: band_arc(b) for _, bs in THEME_GROUPS for b in bs}
+_meds = [np.median(_arcs[b][:, j]) for b in _arcs for j in (0, 1)
+         if len(_arcs[b])]
+arc_ylim = (min(_meds) - 0.5, max(_meds) + 0.4)
+arc_rng = arc_ylim[1] - arc_ylim[0]
+arc_fw = (L.ax_w_in - 2 * ARC_FGAP) / 3.0
+for k, (_, bands) in enumerate(THEME_GROUPS):
+    fx = L.ax_left_in + k * (arc_fw + ARC_FGAP)
+    ax = fc.add_axes(fig, L, fx, arc_bot_in, arc_fw, ARC_H)
+    ax.axhline(0, color='#999', lw=0.8, ls='--', zorder=1)
+    # dashed frame on the pregnant column (Panels B/C detail this preg v null)
+    ax.add_patch(plt.Rectangle((0.6, arc_ylim[0] + 0.04 * arc_rng), 0.8,
+                 arc_rng * 0.92, fill=False, edgecolor='black', lw=1.0,
+                 ls=(0, (4, 3)), zorder=1.5))
+    for b in bands:
+        med = [0, np.median(_arcs[b][:, 0]), np.median(_arcs[b][:, 1])]
+        col = BAND_COLORS[b]
+        ax.plot(XS, med, color=col, lw=2.4, marker='o', ms=5, zorder=4,
+                solid_capstyle='round')
+        ax.text(2.12, med[2], b, color=col, fontsize=7.5, va='center',
+                ha='left', fontweight='bold')
+    ax.set_xlim(-0.15, 4.6); ax.set_ylim(arc_ylim)
+    ax.set_xticks(XS); ax.set_xticklabels(XLAB, fontsize=fc.LABEL_FS)
+    ax.tick_params(length=2, labelsize=fc.LABEL_FS)
+    if k == 0:
+        ax.set_yticks([-1, 0, 1])
+        ax.set_ylabel('median NES', fontsize=fc.LABEL_FS)
+    else:
+        ax.set_yticks([])
+    fig.text((fx + arc_fw / 2) / L.fig_w,
+             (arc_bot_in + ARC_H + 0.14) / L.fig_h, GROUP_LABELS[k],
+             ha='center', va='bottom', fontsize=fc.TITLE_FS)
 
 # CCC chord row (single row of 3 neuron-intrinsic themes)
 specs = fc.chord_grid_specs(CHORD_THEMES, L.ax_left_in, BOT_MARGIN, cpw, cph,

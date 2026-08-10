@@ -946,12 +946,18 @@ def draw_dot_legends(fig, L, norm_nes, norm_lfc, nes_vmax, lfc_vmax,
     return bottom_in   # bottom of legend column, for stacking below
 
 
-def draw_forest_legend(fig, L):
-    left = L.flegv_left_in
-    top = L.cards_top_in
-    bot = L.ax_b_bot_in
-    h = top - bot
-    ax = add_axes(fig, L, left, bot, FLEG_COL_W_IN, h)
+def draw_forest_legend(fig, L, left_in=None, top_in=None, h_in=None,
+                       w_in=None):
+    """Card legend (platforms, meta support, significance). By default it fills
+    the right margin from Panel B up to the top of the cards; pass
+    ``left_in``/``top_in``/``h_in`` to place it explicitly, e.g. beneath a
+    chord column occupying that margin."""
+    left = L.flegv_left_in if left_in is None else left_in
+    top = L.cards_top_in if top_in is None else top_in
+    h = (top - L.ax_b_bot_in) if h_in is None else h_in
+    bot = top - h
+    ax = add_axes(fig, L, left, bot, FLEG_COL_W_IN if w_in is None else w_in,
+                  h)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.set_xticks([]); ax.set_yticks([])
     for s in ax.spines.values():
@@ -1214,13 +1220,33 @@ def draw_theme_chord(ax, df, cell_set, cells_ordered, subclass_colors):
                linewidth=0.4, align='center', zorder=0.5)
 
 
-def draw_chord_legend(fig, L, top_in, cell_set, subclass_colors):
+def draw_chord_legend(fig, L, top_in, cell_set, subclass_colors,
+                      left_in=None, w_in=None, align='right'):
+    """CCC legend, one column. By default it sits in the left legend column
+    with swatches right-aligned and labels running leftwards. Pass
+    ``left_in``/``w_in`` with ``align='left'`` to place it in the right margin
+    instead, where labels must run rightwards to clear the gene cards."""
     hdr, row, gapv = 0.31, 0.128, 0.085
     h_in = (3 * hdr + (5 + len(cell_set)) * row + 2 * gapv + 0.06)
-    ax = _leg_axes(fig, L, top_in - h_in, h_in)
-    sw = SWATCH_W_IN / LEG_W_IN
+    if left_in is None:
+        ax = _leg_axes(fig, L, top_in - h_in, h_in)
+        w_in = LEG_W_IN
+    else:
+        w_in = w_in or LEG_W_IN
+        ax = add_axes(fig, L, left_in, top_in - h_in, w_in, h_in, zorder=100)
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.patch.set_facecolor('white'); ax.patch.set_alpha(1.0)
+        ax.patch.set_zorder(99)
+        for s in ax.spines.values():
+            s.set_visible(False)
+    sw = SWATCH_W_IN / w_in
     sh = SWATCH_H_IN / h_in
-    sx = 0.95 - sw
+    left_align = align == 'left'
+    sx = 0.05 if left_align else 0.95 - sw
+    tx = sx + sw + 0.02 if left_align else sx - 0.02
+    ha = 'left' if left_align else 'right'
+    hx = 0.05 if left_align else 0.95
 
     def d(v):
         return v / h_in
@@ -1228,34 +1254,36 @@ def draw_chord_legend(fig, L, top_in, cell_set, subclass_colors):
     def swatch(yy, label, color):
         ax.add_patch(plt.Rectangle((sx, yy - sh / 2), sw, sh,
                      facecolor=color, edgecolor='black', lw=0.3))
-        ax.text(sx - 0.02, yy, label, ha='right', va='center',
+        ax.text(tx, yy, label, ha=ha, va='center',
                 fontsize=LEG_ITEM_FS, clip_on=False)
     y = 1.0 - d(0.03)
-    ax.text(0.95, y, 'CCC\nDirection', ha='right', va='top',
+    ax.text(hx, y, 'CCC\nDirection', ha=ha, va='top',
             fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for lbl, col in [('UP in pregnancy', CHORD_COLOR_UP),
                      ('DOWN in pregnancy', CHORD_COLOR_DOWN)]:
         swatch(y, lbl, col); y -= d(row)
     y -= d(gapv)
-    ax.text(0.95, y, 'CCC\nCell class', ha='right', va='top',
+    ax.text(hx, y, 'CCC\nCell class', ha=ha, va='top',
             fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for cls in CHORD_CLASS_ORDER:
         swatch(y, CHORD_CLASS_LABELS[cls], CHORD_CLASS_COLORS[cls])
         y -= d(row)
     y -= d(gapv)
-    ax.text(0.95, y, 'CCC\nSubclass', ha='right', va='top',
+    ax.text(hx, y, 'CCC\nSubclass', ha=ha, va='top',
             fontsize=LEG_TITLE_FS, linespacing=1.0)
     y -= d(hdr)
     for ct in sorted(cell_set, key=numeric_prefix):
         swatch(y, ct, subclass_colors.get(ct, '#d3d3d3'))
         y -= d(row)
+    return h_in
 
 
 def draw_chord_row(fig, L, specs, edges, theme_ligands, theme_titles,
                    cell_set, subclass_colors, title_off_in=0.30,
-                   ytitle_x_in=None, ytitle_cy_in=None):
+                   ytitle_x_in=None, ytitle_cy_in=None, ytitle_fs=9.0,
+                   ytitle_rot=90):
     """specs: list of (theme, left_in, bot_in, w_in, h_in)."""
     cells_ordered = sorted(cell_set, key=lambda c: (
         CHORD_CLASS_ORDER.index(chord_class(c)), numeric_prefix(c)))
@@ -1273,8 +1301,9 @@ def draw_chord_row(fig, L, specs, edges, theme_ligands, theme_titles,
                  ha='center', va='bottom', fontsize=TITLE_FS)
     if ytitle_x_in is not None:
         fig.text(ytitle_x_in / L.fig_w, ytitle_cy_in / L.fig_h,
-                 'Spatial cell-cell\ncommunication (meta)', rotation=90,
-                 ha='center', va='center', fontsize=9.0)
+                 'Spatial cell-cell\ncommunication (meta)',
+                 rotation=ytitle_rot, ha='center', va='center',
+                 fontsize=ytitle_fs)
 
 
 # --- IF-validation bar plots (GraphPad Prism style) --------------------------
@@ -1312,6 +1341,81 @@ def read_if_validation(xlsx_path, sheet, groups=('Non Pregnant', 'Pregnant')):
 def _sig_stars(p):
     return ('***' if p < 1e-3 else '**' if p < 1e-2
             else '*' if p < 0.05 else 'ns')
+
+
+def draw_group_barplot(ax, values, ylabel, *, labels=('Nulliparous',
+                       'Pregnant'), colors=IF_BAR_COLORS, bar_w=0.6,
+                       jitter=0.11, equal_var=False, p=None,
+                       annot=None, ymin=0, roi_values=None, err='sem'):
+    """Two-group bar + scatter from arrays (mean bar, error whiskers,
+    per-animal points, unpaired t-test bracket). `values` is a pair of 1D
+    arrays. Pass `p` to annotate a pre-computed test instead of recomputing.
+
+    `roi_values`, a pair of 1D arrays of the individual fields behind each
+    animal mean, is drawn as small grey points behind the animal points: it
+    shows the reader that within-animal scatter is small relative to
+    between-animal scatter, i.e. that power is set by animal number.
+    `err='ci'` draws the 95% confidence interval rather than the SEM, which is
+    the more informative interval when the result is a null. Returns p."""
+    from scipy import stats
+    import matplotlib.ticker as mtick
+    a, b = (np.asarray(v, float) for v in values)
+    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
+    data = [a, b]
+    xs = [0, 1]
+    means = [float(np.mean(v)) for v in data]
+    if err == 'ci':
+        errs = [float(stats.sem(v) * stats.t.ppf(0.975, len(v) - 1))
+                if len(v) > 1 else 0.0 for v in data]
+    else:
+        errs = [float(stats.sem(v)) for v in data]
+    for x, v, col in zip(xs, data, colors):
+        ax.bar(x, np.mean(v), width=bar_w, facecolor=col, edgecolor='black',
+               linewidth=0.9, zorder=2)
+    ax.errorbar(xs, means, yerr=errs, fmt='none', ecolor='black',
+                elinewidth=0.9, capsize=4, capthick=0.9, zorder=4)
+    rng = np.random.default_rng(0)
+    if roi_values is not None:
+        for x, v in zip(xs, roi_values):
+            v = np.asarray(v, float)
+            v = v[np.isfinite(v)]
+            if not len(v):
+                continue
+            ax.scatter(x + rng.uniform(-jitter * 1.7, jitter * 1.7,
+                                       size=len(v)), v, s=7,
+                       color='#b0b0b0', edgecolors='none', zorder=3)
+    for x, v in zip(xs, data):
+        ax.scatter(x + rng.uniform(-jitter, jitter, size=len(v)), v, s=22,
+                   color='black', edgecolors='white', linewidths=0.5, zorder=5)
+    if p is None:
+        p = float(stats.ttest_ind(a, b, equal_var=equal_var).pvalue)
+    pool = [np.concatenate(data)]
+    if roi_values is not None:
+        pool += [np.asarray(v, float) for v in roi_values if len(v)]
+    top = max(float(np.concatenate(pool).max()),
+              max(m + s for m, s in zip(means, errs)))
+    by, drop = top * 1.07, top * 0.03
+    ax.plot([0, 0, 1, 1], [by - drop, by, by, by - drop], color='black',
+            lw=0.9, clip_on=False, zorder=6)
+    ax.text(0.5, by, _sig_stars(p), ha='center', va='bottom',
+            fontsize=TITLE_FS)
+    if annot:
+        ax.text(0.5, by * 1.16, annot, ha='center', va='bottom',
+                fontsize=LABEL_FS - 0.8, color='#444444')
+    ax.set_xlim(-0.75, 1.75)
+    ax.set_ylim(ymin, by * (1.36 if annot else 1.28))
+    ax.yaxis.set_major_locator(
+        mtick.MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=TITLE_FS)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(0.9)
+    ax.spines['bottom'].set_linewidth(0.9)
+    ax.tick_params(axis='both', direction='out', width=0.9, length=4,
+                   labelsize=LABEL_FS)
+    return p
 
 
 def draw_if_barplot(ax, xlsx_path, sheet, ylabel, *,
@@ -1380,3 +1484,89 @@ def if_validation_figure(xlsx_path, panels, out_stem, *, panel_w=2.5,
     fig.savefig(f'{out_stem}.svg')
     plt.close(fig)
     return ps
+
+
+# --- vascular imaging (CD31) -------------------------------------------------
+# Data loading and representative-field selection for the Figure 4 validation
+# block. The block's layout lives in the figure script, per this module's
+# contract; only the parts that read from disk are shared here.
+
+VASC_SUBDIR = 'vascular_imaging_20260720'
+
+
+def load_vascular(working_dir, subdir=VASC_SUBDIR):
+    """(per-ROI metrics, per-animal means, per-metric statistics)."""
+    d = f'{working_dir}/output/{subdir}'
+    roi = pd.read_csv(f'{d}/roi_metrics.csv')
+    animal = pd.read_csv(f'{d}/animal_means.csv')
+    stats = pd.read_csv(f'{d}/stats_primary.csv').set_index('metric')
+    return roi, animal, stats
+
+
+def _vascular_masks(working_dir, name, subdir=VASC_SUBDIR):
+    z = np.load(f'{working_dir}/output/{subdir}/masks/{name}.npz')
+    sh = tuple(z['shape'])
+    n = sh[0] * sh[1]
+    return {k: np.unpackbits(z[k])[:n].reshape(sh).astype(bool)
+            for k in z.files if k != 'shape'}
+
+
+def vascular_representative(working_dir, roi, animal, condition=None,
+                            crop_um=400.0, px_per_um=1.7583,
+                            subdir=VASC_SUBDIR, metric=None, which=None):
+    """A representative CD31 field for one animal, or for one condition.
+
+    With `which` set, shows that animal. Otherwise chooses the animal whose
+    mean vessel area is closest to the condition median. In both cases it then
+    takes that animal's most typical ROI, and the window within it whose local
+    vessel area is closest to the ROI mean -- so the field shown is typical
+    rather than the densest corner.
+
+    Returns (rgb, animal, box_px).
+    """
+    from PIL import Image
+    from scipy import ndimage as ndi
+    Image.MAX_IMAGE_PIXELS = None
+    metric = metric or 'manual_vessel_area_fraction'
+
+    if which is not None:
+        an = which
+    else:
+        grp = animal[animal.condition == condition]
+        tgt = grp[metric].median()
+        an = grp.iloc[(grp[metric] - tgt).abs().argmin()]['animal']
+    sub = roi[roi.animal == an]
+    row = sub.iloc[(sub[metric] - sub[metric].median()).abs().argmin()]
+    name = f'{an}_ROI{int(row.roi)}'
+
+    m = _vascular_masks(working_dir, name, subdir)
+    vessel, core = m['manual'], m['core']
+    box = int(round(crop_um * px_per_um))
+    box = min(box, min(core.shape) - 2)
+    local = ndi.uniform_filter(vessel.astype(np.float32), box) * 100
+    inside = ndi.uniform_filter(core.astype(np.float32), box) >= 0.999
+    if inside.any():
+        cost = np.where(inside, np.abs(local - row[metric]), np.inf)
+        cy, cx = np.unravel_index(np.argmin(cost), cost.shape)
+    else:
+        cy, cx = (int(v) for v in ndi.center_of_mass(core))
+    half = box // 2
+    cy = int(np.clip(cy, half, vessel.shape[0] - half - 1))
+    cx = int(np.clip(cx, half, vessel.shape[1] - half - 1))
+    sl = (slice(cy - half, cy + half), slice(cx - half, cx + half))
+
+    base = f'{working_dir}/input/{subdir}/{an}/ROI{int(row.roi)}/{name}'
+    cd = np.asarray(Image.open(f'{base}_CD31.png').convert('RGB'))[..., 0]
+    dp = np.asarray(Image.open(f'{base}_composite.png').convert('RGB'))[..., 1]
+
+    def norm(x, lo=1, hi=99.5):
+        a, b = np.percentile(x, (lo, hi))
+        return np.clip((x.astype(np.float32) - a) / (b - a + 1e-9), 0, 1)
+
+    # CD31 magenta over a dim DAPI grey; each field is scaled to its own range
+    # because detector gain was optimised per sample
+    c, d = norm(cd[sl]), norm(dp[sl]) * 0.80
+    rgb = np.dstack([np.clip(c + d * 0.55, 0, 1),
+                     np.clip(d * 0.60, 0, 1),
+                     np.clip(c * 0.55 + d * 0.75, 0, 1)])
+    return rgb, an, box
