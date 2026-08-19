@@ -79,103 +79,36 @@ print('saved fingerprints to input/ap_fingerprints.joblib')
 
 #endregion
 
-#region leave-section-out cross-validation #####################################
+#region leave-one-section-out cross-validation #################################
+# hold out every atlas section in turn. reporting the error local to the plane
+# we sample matters: the global MAE is inflated by the anterior/posterior
+# extremes, where top-k weighting is biased inward.
 
-# evenly spaced sections + sections 46-49 (query reference range)
-cv_idx = np.linspace(0, len(all_sections) - 1, 8, dtype=int)
-cv_sections = list(dict.fromkeys(
-    [all_sections[i] for i in cv_idx] +
-    ['C57BL6J-638850.46', 'C57BL6J-638850.47',
-     'C57BL6J-638850.48', 'C57BL6J-638850.49']))
-n_cv = len(cv_sections)
-print(f'\n[CV] hold-out sections: {[s.split(".")[-1] for s in cv_sections]}')
+ref_section_names = ['C57BL6J-638850.46', 'C57BL6J-638850.47',
+                     'C57BL6J-638850.48', 'C57BL6J-638850.49']
+lo = float(section_ap[ref_section_names].min()) - 0.5
+hi = float(section_ap[ref_section_names].max()) + 0.5
 
 cv_results = []
-cv_sims = {}
-
-for i, held_out in enumerate(cv_sections):
-    held_idx = all_sections.index(held_out)
-    query_fp = ref_fp_matrix[held_idx]
-
+for held_idx, held_out in enumerate(all_sections):
     ref_mask = np.arange(len(all_sections)) != held_idx
-    ref_fps = ref_fp_matrix[ref_mask]
-    ref_aps = ref_ap_values[ref_mask]
-    ref_names = [s for j, s in enumerate(all_sections) if j != held_idx]
-
-    pred_ap, sims = predict_ap(query_fp, ref_fps, ref_aps)
-    true_ap = section_ap[held_out]
-    error = abs(pred_ap - true_ap)
-
-    cv_sims[held_out] = (ref_aps, sims, ref_names)
-
-    top3 = np.argsort(sims)[::-1][:3]
-    top_str = ', '.join(
-        f'{ref_names[j].split(".")[-1]}({sims[j]:.3f})' for j in top3)
-
-    cv_results.append(dict(
-        section=held_out, true_ap=true_ap,
-        pred_ap=pred_ap, error=error))
-
-    print(f'[CV {i+1}/{n_cv}] section {held_out.split(".")[-1]}: '
-          f'pred={pred_ap:.2f}, true={true_ap:.2f}, error={error:.3f} '
-          f'(top: {top_str})')
+    pred_ap, _ = predict_ap(ref_fp_matrix[held_idx],
+                            ref_fp_matrix[ref_mask], ref_ap_values[ref_mask])
+    true_ap = float(section_ap[held_out])
+    cv_results.append(dict(section=held_out, true_ap=true_ap,
+                           pred_ap=pred_ap, error=abs(pred_ap - true_ap)))
 
 cv_df = pd.DataFrame(cv_results)
 ap_range = cells['x_ccf'].max() - cells['x_ccf'].min()
-mean_err = cv_df['error'].mean()
-print(f'\n[CV] template matching: MAE={mean_err:.3f} ± '
-      f'{cv_df["error"].std():.3f} '
-      f'({mean_err / ap_range * 100:.1f}% of AP range)')
+in_window = (cv_df['true_ap'] >= lo) & (cv_df['true_ap'] <= hi)
+mae_all = cv_df['error'].mean()
+mae_local = cv_df.loc[in_window, 'error'].mean()
 
-# predicted vs true AP
-fig, ax = plt.subplots(figsize=(8, 8))
-ax.plot([0, 13], [0, 13], 'k--', lw=1, zorder=1)
-ax.scatter(cv_df['true_ap'], cv_df['pred_ap'],
-           s=100, c='steelblue', marker='D', zorder=5,
-           edgecolors='white', linewidths=1)
-for _, row in cv_df.iterrows():
-    ax.annotate(row['section'].split('.')[-1],
-                (row['true_ap'], row['pred_ap']),
-                textcoords='offset points', xytext=(8, 4), fontsize=8)
-ax.set_xlabel('True AP')
-ax.set_ylabel('Predicted AP')
-ax.set_title(f'Template Matching (leave-section-out CV)\n'
-             f'MAE={mean_err:.3f} ({mean_err / ap_range * 100:.1f}% '
-             f'of AP range)')
-ax.set_aspect('equal')
-plt.tight_layout()
-fig.savefig(f'{fig_dir}/ap_template_pred_vs_true.png', dpi=200)
-plt.close()
-
-# similarity profiles
-ncols = 4
-nrows = int(np.ceil(n_cv / ncols))
-fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows),
-                         squeeze=False)
-fig.suptitle('Similarity to Reference Sections', fontsize=14)
-
-for i, held_out in enumerate(cv_sections):
-    ax = axes[i // ncols, i % ncols]
-    ref_aps, sims, ref_names = cv_sims[held_out]
-    ax.scatter(ref_aps, sims, s=8, alpha=0.6, c='steelblue')
-    true_ap = section_ap[held_out]
-    ax.axvline(true_ap, color='red', lw=1, ls='--', label='true AP')
-    pred_ap = cv_df.loc[cv_df['section'] == held_out, 'pred_ap'].values[0]
-    ax.axvline(pred_ap, color='green', lw=1, ls='--', label='pred AP')
-    ax.set_title(f'section {held_out.split(".")[-1]}', fontsize=10)
-    ax.set_xlabel('Reference AP')
-    ax.set_ylabel('Cosine similarity')
-    if i == 0:
-        ax.legend(fontsize=7)
-
-for j in range(n_cv, nrows * ncols):
-    axes[j // ncols, j % ncols].set_visible(False)
-
-plt.tight_layout()
-fig.savefig(f'{fig_dir}/ap_template_similarity_profiles.png', dpi=200)
-plt.close()
-
-print('figures saved to figures/')
+print(f'\n[CV] leave-one-section-out over {len(cv_df)} atlas sections')
+print(f'[CV] MAE, all sections    = {mae_all:.3f} mm '
+      f'({mae_all / ap_range * 100:.1f}% of AP range)')
+print(f'[CV] MAE, sampled window  = {mae_local:.3f} mm '
+      f'(n = {int(in_window.sum())} sections, {lo:.2f} to {hi:.2f} mm)')
 
 #endregion
 
@@ -190,8 +123,14 @@ datasets_config = {
 }
 ref_s = 0.5
 
-ref_section_names = ['C57BL6J-638850.46', 'C57BL6J-638850.47',
-                     'C57BL6J-638850.48', 'C57BL6J-638850.49']
+# samples excluded from the analysis; keep in sync with 06_sumrank.py so this
+# figure shows the same sections the reported results are computed from
+drop_samples_map = {
+    'xenium': ['CTRL_3'],
+    'merfish': [],
+    'slidetags': [],
+}
+
 ref_section_aps = section_ap[ref_section_names].sort_values()
 
 all_sample_ap = []
@@ -203,12 +142,22 @@ for name, cfg in datasets_config.items():
     adata = sc.read_h5ad(query_path)
     print(f'[{name}] {adata.shape[0]:,} cells')
 
-    # convert CAST-aligned coords to original CCF space
+    # affine, not ffd: a global linear fit places the section in CCF space
+    # without the non-rigid warping that could absorb a real AP offset.
     # reference prep: x_raw = -z_ccf, y_raw = -y_ccf
-    y_ccf_q = -adata.obs['y_ffd'].values
-    z_ccf_q = -adata.obs['x_ffd'].values
+    y_ccf_q = -adata.obs['y_affine'].values
+    z_ccf_q = -adata.obs['x_affine'].values
 
     samples = sorted(adata.obs[sample_col].unique())
+    drop = drop_samples_map.get(name, [])
+    if drop:
+        n_before = len(samples)
+        samples = [s for s in samples
+                   if adata.obs.loc[adata.obs[sample_col] == s, 'sample']
+                   .iloc[0] not in drop]
+        print(f'[{name}] dropped {drop}: '
+              f'{n_before} -> {len(samples)} samples')
+
     for s in samples:
         mask = adata.obs[sample_col] == s
         sec_df = pd.DataFrame({
@@ -227,8 +176,10 @@ for name, cfg in datasets_config.items():
 
         adata.obs.loc[mask, 'ap_predicted'] = pred_ap
         all_sample_ap.append(dict(
-            dataset=name, sample=s, ap_predicted=pred_ap,
-            n_cells=int(mask.sum()),
+            dataset=name, sample_rep=s,
+            sample=str(adata.obs.loc[mask, 'sample'].iloc[0]),
+            condition=str(adata.obs.loc[mask, 'condition'].iloc[0]),
+            ap_predicted=pred_ap, n_cells=int(mask.sum()),
             top_match=all_sections[top3_idx[0]]))
 
         print(f'[{name}] {s}: AP={pred_ap:.2f} (top: {top3_str})')
@@ -237,71 +188,95 @@ for name, cfg in datasets_config.items():
     # adata.write(out_path)
     print(f'[{name}] saved to {out_path}')
 
-    # per-dataset figure: row 0 = 4 ref sections, rows 1-2 = query slices
-    # all colored by class, ordered anterior to posterior
-    sample_aps_q = (adata.obs.groupby(sample_col)['ap_predicted']
-                    .first().sort_values())
-    query_samples_ord = list(sample_aps_q.index)
-    n_query = len(query_samples_ord)
-    half = int(np.ceil(n_query / 2))
-    ncols = max(len(ref_section_names), half)
-    nrows = 3
+#endregion
 
-    fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(4 * ncols, 4 * nrows),
-                             squeeze=False)
-    fig.suptitle(f'{name}: Reference + Query Slices (anterior→posterior)',
-                 fontsize=14)
+#region supplementary figure ###################################################
+# Two panels only:
+#   A  the predictor is accurate within the atlas, with the error local to the
+#      plane we sample reported alongside the global error
+#   B  the predicted AP of every sample, by dataset and condition, which is
+#      what the reviewer's offset claim is actually about
 
-    # row 0: reference sections
-    for i, sec_name in enumerate(ref_section_aps.index):
-        ax = axes[0, i]
-        sec_cells = cells[cells['brain_section_label'] == sec_name]
-        ax.scatter(sec_cells['z_ccf'], sec_cells['y_ccf'],
-                   s=ref_s, c=sec_cells['class_color'],
-                   alpha=0.5, rasterized=True)
-        ax.set_title(f'ref {sec_name.split(".")[-1]} '
-                     f'(AP={ref_section_aps[sec_name]:.2f})', fontsize=10)
-        ax.set_aspect('equal')
-        ax.invert_yaxis()
-        ax.axis('off')
+rep_df = pd.DataFrame(all_sample_ap).sort_values(['dataset', 'ap_predicted'])
+rep_df.to_csv(f'{working_dir}/output/ap_predicted_samples.csv', index=False)
 
-    # rows 1-2: query slices, split anterior half / posterior half
-    for q_idx, samp in enumerate(query_samples_ord):
-        r = 1 if q_idx < half else 2
-        c = q_idx if q_idx < half else q_idx - half
-        ax = axes[r, c]
-        sm = (adata.obs[sample_col] == samp).values
-        cls = adata.obs.loc[sm, 'class'].values
-        colors = [class_colors.get(c_, '#d3d3d3') for c_ in cls]
-        ax.scatter(z_ccf_q[sm], y_ccf_q[sm],
-                   s=s_query, c=colors, alpha=0.5, rasterized=True)
-        ap_val = sample_aps_q[samp]
-        ax.set_title(f'{samp} (AP={ap_val:.2f})', fontsize=10)
-        ax.set_aspect('equal')
-        ax.invert_yaxis()
-        ax.axis('off')
+# one point per animal: replicate sections from the same mouse are averaged,
+# so the unit here matches the unit of replication used for the analysis
+ap_df = (rep_df.groupby(['dataset', 'sample', 'condition'], as_index=False)
+         ['ap_predicted'].mean().sort_values(['dataset', 'ap_predicted']))
+print(f'\n[query] {len(rep_df)} sections from {len(ap_df)} animals')
 
-    # hide unused axes
-    n_row1, n_row2 = half, n_query - half
-    for c in range(ncols):
-        if c >= len(ref_section_names):
-            axes[0, c].set_visible(False)
-        if c >= n_row1:
-            axes[1, c].set_visible(False)
-        if c >= n_row2:
-            axes[2, c].set_visible(False)
+print('\n[query] mean predicted AP by condition')
+for ds, g in ap_df.groupby('dataset'):
+    m = g.groupby('condition')['ap_predicted'].mean()
+    print(f'  {ds:10s} ' + '  '.join(f'{c}={v:.3f}' for c, v in m.items())
+          + f'   max difference = {m.max() - m.min():.3f} mm')
 
-    plt.tight_layout()
-    fig.savefig(f'{fig_dir}/ap_imputation_{name}.png',
-                dpi=200, bbox_inches='tight')
-    plt.close()
+COND_COLORS = {'CTRL': '#7209b7', 'PREG': '#b5179e', 'POSTPART': '#f72585'}
+COND_LABEL = {'CTRL': 'Nulliparous', 'PREG': 'Pregnant',
+              'POSTPART': 'Postpartum'}
+DS_LABEL = {'slidetags': 'Slide-tags', 'merfish': 'MERFISH',
+            'xenium': 'Xenium'}
 
-if all_sample_ap:
-    ap_df = pd.DataFrame(all_sample_ap).sort_values('ap_predicted')
-    print(f'\n[summary] {len(ap_df)} samples across '
-          f'{ap_df["dataset"].nunique()} datasets')
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.0),
+                         gridspec_kw={'width_ratios': [1.0, 1.3]})
 
+# A) leave-one-section-out validation on the atlas
+ax = axes[0]
+lims = [cv_df['true_ap'].min() - 0.4, cv_df['true_ap'].max() + 0.4]
+ax.axvspan(lo, hi, color='0.92', zorder=0)
+ax.plot(lims, lims, 'k--', lw=0.9, zorder=1)
+ax.scatter(cv_df.loc[~in_window, 'true_ap'], cv_df.loc[~in_window, 'pred_ap'],
+           s=20, c='0.62', zorder=3, label='all other sections')
+ax.scatter(cv_df.loc[in_window, 'true_ap'], cv_df.loc[in_window, 'pred_ap'],
+           s=32, c='steelblue', edgecolors='white', linewidths=0.5, zorder=4,
+           label='sampled window')
+ax.set_xlim(lims); ax.set_ylim(lims); ax.set_aspect('equal')
+ax.set_xlabel('True AP (mm)'); ax.set_ylabel('Predicted AP (mm)')
+ax.set_title(f'Leave-one-section-out, Allen atlas\n'
+             f'MAE {mae_all:.3f} mm overall, {mae_local:.3f} mm in window',
+             fontsize=9)
+ax.legend(fontsize=7, loc='upper left', frameon=False)
+ax.text(-0.16, 1.06, 'A', transform=ax.transAxes, fontsize=13,
+        fontweight='bold', va='top', ha='left')
+
+# B) predicted AP of every sample, by dataset and condition
+ax = axes[1]
+ds_order = [d for d in ['slidetags', 'merfish', 'xenium']
+            if d in set(ap_df['dataset'])]
+rng = np.random.default_rng(0)
+ax.axvspan(lo, hi, color='0.92', zorder=0)
+for a in ref_section_aps.values:
+    ax.axvline(a, color='0.55', lw=0.8, ls=':', zorder=1)
+for yi, ds in enumerate(ds_order):
+    sub = ap_df[ap_df['dataset'] == ds]
+    for cond, g in sub.groupby('condition'):
+        jit = rng.uniform(-0.14, 0.14, len(g))
+        ax.scatter(g['ap_predicted'], np.full(len(g), yi) + jit, s=44,
+                   c=COND_COLORS.get(cond, '0.5'), edgecolors='white',
+                   linewidths=0.6, zorder=3)
+ax.set_yticks(range(len(ds_order)))
+ax.set_yticklabels([DS_LABEL[d] for d in ds_order])
+ax.set_ylim(-0.6, len(ds_order) - 0.4)
+ax.set_xlabel('Predicted AP (mm)')
+ax.set_title('Predicted AP of every sample', fontsize=9)
+present = [c for c in ['CTRL', 'PREG', 'POSTPART']
+           if c in set(ap_df['condition'])]
+ax.legend(handles=[plt.Line2D([], [], marker='o', ls='', markersize=6,
+                              color=COND_COLORS[c], label=COND_LABEL[c])
+                   for c in present],
+          fontsize=7, loc='best', frameon=False)
+ax.text(-0.10, 1.06, 'B', transform=ax.transAxes, fontsize=13,
+        fontweight='bold', va='top', ha='left')
+
+plt.tight_layout()
+fig.savefig(f'{fig_dir}/ap_validation_supplement.png', dpi=300,
+            bbox_inches='tight')
+fig.savefig(f'{fig_dir}/ap_validation_supplement.pdf', bbox_inches='tight')
+plt.close()
+
+print(f'\nfigure -> {fig_dir}/ap_validation_supplement.png')
+print(f'table  -> {working_dir}/output/ap_predicted_samples.csv')
 print('done')
 
 #endregion

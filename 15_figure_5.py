@@ -185,7 +185,7 @@ subclass_colors = fc.load_subclass_colors()
 
 ordered_cts, ct_class = fc.select_cell_types(
     gsea, ordered_pathways, ct_allowlist, assign_class, CLASS_ORDER,
-    min_hits=2)
+    min_hits=1)
 
 nlp_mat, nes_mat, d_mat, sig_mat_a = fc.gsea_matrices(
     gsea_all, real_nes, ordered_pathways, ordered_cts)

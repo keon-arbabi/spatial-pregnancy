@@ -169,8 +169,8 @@ MPOA_ALLOWLIST = {'085 SI-MPO-LPO Lhx8 Gaba', '086 MPO-ADP Lhx8 Gaba',
 GLIAL_ALLOWLIST = {'318 Astro-NT NN', '319 Astro-TE NN', '323 Ependymal NN',
                    '326 OPC NN', '327 Oligo NN', '334 Microglia NN',
                    '335 BAM NN'}
-# Strong-remodeling neurons whose signal sits largely outside the chosen
-# pathways (so the >=3-hit rule drops them); force-included as columns.
+# Strong-remodeling neurons kept as columns regardless of hit count; both now
+# qualify on their own under the >=1-hit rule, retained for stability.
 NEURON_ALLOWLIST = {'032 L5 NP CTX Glut', '114 COAa-PAA-MEA Barhl2 Glut'}
 ct_allowlist = MPOA_ALLOWLIST | GLIAL_ALLOWLIST | NEURON_ALLOWLIST
 
@@ -231,7 +231,7 @@ subclass_colors = fc.load_subclass_colors()
 
 ordered_cts, ct_class = fc.select_cell_types(
     gsea, ordered_pathways, ct_allowlist, assign_class, NEIGHBOURHOOD_ORDER,
-    min_hits=3,
+    min_hits=1,
     candidate_expr=(pl.col('cell_type').str.contains(' Glut')
                     | pl.col('cell_type').str.contains(' Gaba')))
 
